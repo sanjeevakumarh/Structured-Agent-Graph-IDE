@@ -1,30 +1,32 @@
 # AgentIDE
 
-Multi-agent orchestration for VS Code with a fast .NET backend. Run local models (Ollama) or paid models (Claude, Codex, Gemini) with streaming output, workflows, and guardrails.
+Local-first deterministic workflow runtime for agent-native engineering.
 
-## Why this exists
-- Build-and-ship posture: download, run, and ship changes from VS Code without cloud lock-in.
-- Local-first: Ollama works offline; swap to Claude/Codex/Gemini by adding keys.
-- Designed for speed: named pipes to a .NET service keep UI responsive while agents work.
+Built as a .NET orchestration service (queueing, scheduling, DLQ, persistence, retry/timeout policies, history) plus a thin VS Code surface for task/agent control. Runs fully local with Ollama; swap to Claude, Codex, or Gemini by adding keys.
+
+## What makes this different
+- Workflow-first: queueing/scheduling, persistence, DLQ, and policy-driven retries timeouts make it a small workflow platform embedded in the editor.
+- Local-first, provider-agnostic: works fully offline with Ollama; swap to Claude/Codex/Gemini by adding keys—no Copilot-first bias.
+- Split architecture: orchestration lives in a .NET service; the VS Code extension is a thin UI connected over named pipes to stay responsive under load.
+- Workflow engine: DAGs, router nodes, pause/resume, and auditable history—closer to a mini Temporal/Airflow than typical agent chat wrappers.
 
 ## Capabilities
-- Task orchestration with queueing, scheduling, DLQ, and persistence.
-- Workflow engine with DAGs, router nodes, pause/resume, and history.
-- Multi-provider support (Claude, Codex, Gemini, Ollama) with streaming output.
+- Task orchestration with queueing, scheduling, DLQ, persistence, retry/timeout policies, and history.
+- Workflow engine with DAGs, router nodes, pause/resume, and Git-linked activity logging.
+- Multi-provider LLM support (Claude, Codex, Gemini, Ollama) with streaming output.
 - VS Code UI: Active Tasks, History, DLQ, Workflow Explorer, diagnostics.
-- Resilience: retry/timeout policies, dead-letter handling, Git-linked activity logging.
 
 ## Architecture (high level)
 
-### Task and workflow
+### Task and workflow path
 ```mermaid
 sequenceDiagram
   participant U as User
   participant V as VS Code Extension
   participant P as Named Pipe
-  participant S as Service
+  participant S as .NET Orchestration Service
   participant M as Model Provider
-  participant D as SQLite
+  participant D as Persistence (SQLite)
 
   U->>V: Submit Task / Run Workflow
   V->>P: PipeMessage (submit_task/start_workflow)
@@ -37,10 +39,14 @@ sequenceDiagram
   V-->>U: Status, output, diffs
 ```
 
+### Why named pipes
+- Keeps the extension host lean; orchestration/state lives in the .NET process.
+- Avoids Node event-loop stalls under heavy streaming.
+- Works cross-platform; service can be restarted independently of the UI.
 
-#### Status (Feb 19, 2026)
-- Shipped: orchestration + DLQ, multi-provider streaming UI, workflow engine with DAGs, diagnostics/history, Git-linked logging.
-- Known gaps (directional): tighten streaming reliability; surface parsed changes/issues in UI; finish workflow UI wiring.
+## Status (2026-02-20)
+- Shipped: orchestration with DLQ/persistence/policies, multi-provider streaming UI, workflow engine (DAGs, router nodes, pause/resume, history), Git-linked logging.
+- In progress: harden streaming reliability, surface parsed changes/issues in UI, finish workflow UI wiring.
 
 ## Quickstart
 
@@ -52,11 +58,11 @@ sequenceDiagram
 
 ### 1) Clone
 ```bash
-git clone https://github.com/sanjeevakumarh/SAGExtention/AgentIDE.git
+git clone https://github.com/yourusername/AgentIDE.git
 cd AgentIDE
 ```
 
-### 2) Start the service
+### 2) Start the orchestration service
 ```bash
 cd src/AgenticIDE.Service
 dotnet run
@@ -72,11 +78,11 @@ Leave this running; it hosts named pipes, orchestration, and persistence.
    ```
 4. Press F5 to launch the Extension Development Host.
 
-### 4) Run a task
+### 4) Run a task or workflow
 - In the Extension Host window, open a code file.
-- Press Ctrl+Shift+P (Command Palette) and run `SAG: Submit Task`.
+- Press Ctrl+Shift+P and run `SAG: Submit Task`.
 - Choose an agent and model (local or paid).
-- Watch Active Tasks and Streaming Output panes.
+- Watch Active Tasks, Streaming Output, and History panes.
 
 ## Model configuration
 Configuration lives in two places:
@@ -94,9 +100,9 @@ Configuration lives in two places:
    ollama list
    ```
 4. Verify via HTTP (service health and tags):
-  ```bash
-  curl http://localhost:11434/api/tags
-  ```
+   ```bash
+   curl http://localhost:11434/api/tags
+   ```
 
 Service example:
 ```json
@@ -118,7 +124,7 @@ Service example:
 }
 ```
 
-### Paid 
+### Paid providers
 Add keys to `appsettings.json` under `AgenticIDE:ApiKeys`:
 ```json
 {
@@ -132,6 +138,34 @@ Add keys to `appsettings.json` under `AgenticIDE:ApiKeys`:
 }
 ```
 Then select the provider in `SAG: Submit Task`.
+
+
+## Defining Workflows (YAML)
+Workflows live in `.agentide/workflows/*.yaml`. They support DAG dependencies, conditional routing, and context passing.
+
+```yaml
+name: "Refactor and Test"
+description: "Refactors code and generates tests"
+params:
+  - name: file_path
+    description: "Target file"
+steps:
+  - id: refactor
+    model: deepseek-coder:6.7b
+    prompt: "Refactor {{file_path}} to improve readability."
+    
+  - id: review
+    model: claude-3-opus
+    depends_on: [refactor]
+    prompt: "Review the refactoring in {{refactor.output}}. Approve or request changes."
+    
+  - id: generate_tests
+    model: gpt-4
+    depends_on: [review]
+    if: "{{review.approved}} == true"
+    prompt: "Generate unit tests for {{file_path}}."
+```
+
 
 ## Verification and FAQ
 
@@ -161,4 +195,4 @@ Then select the provider in `SAG: Submit Task`.
 - Harden streaming reliability and UI state updates.
 - Expand workflow templates and policy checks.
 - Improve handling for large files and long-running tasks.
-```
+

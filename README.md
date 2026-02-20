@@ -1,4 +1,3 @@
-
 # AgentIDE
 
 Multi-agent orchestration for VS Code with a fast .NET backend. Run local models (Ollama) or paid models (Claude, Codex, Gemini) with streaming output, workflows, and guardrails.
@@ -17,7 +16,7 @@ Multi-agent orchestration for VS Code with a fast .NET backend. Run local models
 
 ## Architecture (high level)
 
-### Task and workflow flow
+### Task and workflow
 ```mermaid
 sequenceDiagram
   participant U as User
@@ -38,82 +37,12 @@ sequenceDiagram
   V-->>U: Status, output, diffs
 ```
 
-### Extension (TypeScript)
-Thin UI surface that keeps the editor responsive while delegating orchestration to the service.
-```mermaid
-classDiagram
-  class ServiceConnection
-  class NamedPipeClient
-  class TaskTreeProvider
-  class HistoryTreeProvider
-  class DlqTreeProvider
-  class DiagnosticsManager
-  class WorkflowExplorerProvider
-  class WorkflowGraphPanel
 
-  ServiceConnection --> NamedPipeClient
-  ServiceConnection ..> TaskTreeProvider
-  ServiceConnection ..> DiagnosticsManager
-  ServiceConnection ..> WorkflowExplorerProvider
-  WorkflowExplorerProvider ..> WorkflowGraphPanel
-```
-
-### Service (C#)
-Orchestration, persistence, and resilience live in the service; execution stays off the UI thread.
-```mermaid
-classDiagram
-  class AgentOrchestrator
-  class TaskQueue
-  class WorkflowEngine
-  class WorkflowDefinitionLoader
-  class MessageHandler
-  class NamedPipeServer
-  class SqliteTaskRepository
-  class DeadLetterQueue
-  class ResultParser
-
-  NamedPipeServer --> MessageHandler
-  MessageHandler --> AgentOrchestrator
-  MessageHandler --> WorkflowEngine
-  AgentOrchestrator --> TaskQueue
-  AgentOrchestrator --> DeadLetterQueue
-  AgentOrchestrator --> ResultParser
-  AgentOrchestrator --> SqliteTaskRepository
-  WorkflowEngine --> WorkflowDefinitionLoader
-  WorkflowEngine --> SqliteTaskRepository
-```
-
-### Providers and resilience
-Provider abstraction keeps the surface agent-agnostic while shared HTTP policies harden calls.
-```mermaid
-classDiagram
-  class IAgentProvider
-  class ClaudeProvider
-  class CodexProvider
-  class GeminiProvider
-  class OllamaProvider
-  class ProviderFactory
-  class ResilientHttpHandler
-  class RetryPolicy
-  class TimeoutConfig
-
-  IAgentProvider <|.. ClaudeProvider
-  IAgentProvider <|.. CodexProvider
-  IAgentProvider <|.. GeminiProvider
-  IAgentProvider <|.. OllamaProvider
-  ProviderFactory --> IAgentProvider
-  ClaudeProvider --> ResilientHttpHandler
-  CodexProvider --> ResilientHttpHandler
-  GeminiProvider --> ResilientHttpHandler
-  ResilientHttpHandler --> RetryPolicy
-  ResilientHttpHandler --> TimeoutConfig
-```
-
-## Status (2026-02-19)
+#### Status (Feb 19, 2026)
 - Shipped: orchestration + DLQ, multi-provider streaming UI, workflow engine with DAGs, diagnostics/history, Git-linked logging.
 - Known gaps (directional): tighten streaming reliability; surface parsed changes/issues in UI; finish workflow UI wiring.
 
-## Quickstart 
+## Quickstart
 
 ### Prerequisites
 - VS Code 1.85+
@@ -189,7 +118,7 @@ Service example:
 }
 ```
 
-### Paid (Claude, Codex, Gemini)
+### Paid 
 Add keys to `appsettings.json` under `AgenticIDE:ApiKeys`:
 ```json
 {
@@ -233,5 +162,3 @@ Then select the provider in `SAG: Submit Task`.
 - Expand workflow templates and policy checks.
 - Improve handling for large files and long-running tasks.
 ```
-
----

@@ -12,3 +12,6 @@
 
 # Node
 **/node_modules/
+
+# VS Code extension package
+src/vscode-extension/sag-ide-0.1.0.vsix

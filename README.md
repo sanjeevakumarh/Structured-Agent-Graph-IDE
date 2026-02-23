@@ -1,4 +1,4 @@
-# AgentIDE
+# SAG(Structured Agent Graph) IDE
 
 Local-first deterministic workflow runtime for agent-native engineering.
 

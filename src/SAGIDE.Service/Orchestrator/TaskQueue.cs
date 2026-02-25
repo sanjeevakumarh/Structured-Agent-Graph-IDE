@@ -9,7 +9,7 @@ public class TaskQueue
     private readonly PriorityQueue<AgentTask, int> _pendingQueue = new();
     private readonly object _queueLock = new();
 
-    // ── Bounded in-memory history ─────────────────────────────────────────
+    // ── Bounded in-memory history ─────────────────────────────────────────────
     // Terminal tasks are candidates for eviction; active tasks are never evicted.
     // _terminalOrder tracks insertion order for FIFO eviction.
     // Complete task history is always available in SQLite.

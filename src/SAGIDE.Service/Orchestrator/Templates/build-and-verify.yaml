@@ -1,5 +1,5 @@
 name: "Build & Verify"
-description: "Generate code, build it, check the build passed, then review and document."
+description: "Generate code, build it in an isolated shadow workspace, check the build passed, then review and document. Changes are discarded after review (shadow_action: destroy)."
 parameters:
   - name: feature_description
     type: string
@@ -11,8 +11,13 @@ parameters:
     type: string
     default: "."
 steps:
+  - id: provision
+    type: workspace_provision
+    # shadow_branch: HEAD  (default — snapshot the current HEAD)
+
   - id: generate_code
     agent: Coder
+    depends_on: [provision]
     prompt: |
       Implement the following feature: {{feature_description}}
       Return complete, production-ready code with no placeholders.
@@ -21,7 +26,7 @@ steps:
     type: tool
     depends_on: [generate_code]
     command: "{{build_command}}"
-    working_dir: "{{workspace_path}}"
+    working_dir: "{{shadow_path}}"
     exit_code_policy: FAIL_ON_NONZERO
 
   - id: check_build
@@ -45,3 +50,8 @@ steps:
       Write documentation for this feature.
       Code: {{generate_code.output}}
       Review notes: {{review.output}}
+
+  - id: teardown
+    type: workspace_teardown
+    depends_on: [documentation]
+    shadow_action: destroy

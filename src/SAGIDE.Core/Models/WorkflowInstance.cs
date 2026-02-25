@@ -1,4 +1,4 @@
-using SAGIDE.Core.DTOs;
+﻿using SAGIDE.Core.DTOs;
 
 namespace SAGIDE.Core.Models;
 
@@ -40,6 +40,13 @@ public class WorkflowInstance
     /// Checked after the YAML-baked step model but before the instance default and affinities.
     /// </summary>
     public Dictionary<string, StepModelOverride> StepModelOverrides { get; set; } = [];
+
+    /// <summary>
+    /// Absolute path to the active shadow worktree ().
+    /// Set by workspace_provision, cleared by workspace_teardown or auto-destroy on failure/cancel.
+    /// Null when no shadow is provisioned.
+    /// </summary>
+    public string? ShadowWorkspacePath { get; set; }
 }
 
 public class AuditEntry
@@ -59,7 +66,7 @@ public class WorkflowStepExecution
 
     public WorkflowStepStatus Status { get; set; } = WorkflowStepStatus.Pending;
 
-    /// <summary>State-transition log written on every status change (§2.1 BaseNode contract).</summary>
+    /// <summary>State-transition log written on every status change (BaseNode contract).</summary>
     public List<AuditEntry> AuditLog { get; set; } = [];
 
     /// <summary>Raw LLM output from the completed step.</summary>
@@ -78,13 +85,13 @@ public class WorkflowStepExecution
     public int? ExitCode { get; set; }
 
     /// <summary>
-    /// Issue count from the prior loop iteration, used for contradiction detection (§2.2).
+    /// Issue count from the prior loop iteration, used for contradiction detection ().
     /// Set just before a new iteration is started; compared against the new iteration's result.
     /// </summary>
     public int PreviousIssueCount { get; set; }
 
     /// <summary>
-    /// MACP IntentPackage produced by this step (§2.5).
+    /// MACP IntentPackage produced by this step ().
     /// Populated by agent steps when the model response includes a structured intent block.
     /// Null for tool, constraint, router, and human_approval steps.
     /// </summary>

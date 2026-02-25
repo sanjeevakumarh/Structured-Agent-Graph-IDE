@@ -1,10 +1,10 @@
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Serilog;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Service.Agents;
+using SAGIDE.Service.Api;
 using SAGIDE.Service.Communication;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Persistence;
@@ -12,6 +12,8 @@ using SAGIDE.Service.Providers;
 using SAGIDE.Service.Resilience;
 using SAGIDE.Service.ActivityLogging;
 using SAGIDE.Service.Infrastructure;
+using SAGIDE.Service.Prompts;
+using SAGIDE.Service.Rag;
 
 using ServiceLifetimeHosted = SAGIDE.Service.Services.ServiceLifetime;
 
@@ -25,7 +27,7 @@ try
 {
     Log.Information("Starting Agentic IDE Service");
 
-    var builder = Host.CreateApplicationBuilder(args);
+    var builder = WebApplication.CreateBuilder(args);
 
     // Configure Serilog
     builder.Services.AddSerilog();
@@ -46,20 +48,18 @@ try
     builder.Services.AddConfiguredSingleton<WorkflowPolicyConfig>(builder.Configuration, "SAGIDE:WorkflowPolicy");
     builder.Services.AddSingleton<WorkflowPolicyEngine>();
 
-    // TaskAffinities uses a non-standard bind target (Affinities sub-dict), keep explicit
-    var taskAffinitiesConfig = new TaskAffinitiesConfig();
-    builder.Configuration.GetSection("SAGIDE:TaskAffinities").Bind(taskAffinitiesConfig.Affinities);
-    builder.Services.AddSingleton(taskAffinitiesConfig);
+    builder.Services.AddSingleton(new TaskAffinitiesConfig());
 
     // IPC / named-pipe configuration (MaxMessageSizeBytes, backoff parameters)
     var commConfig = new CommunicationConfig();
     builder.Configuration.GetSection("SAGIDE:Communication").Bind(commConfig);
     builder.Services.AddSingleton(commConfig);
 
-    // Register SQLite persistence
-    var dbPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "SAGIDE", "agentic-ide.db");
+    // Register SQLite persistence — path configurable via SAGIDE:Database:Path (default: %LOCALAPPDATA%/SAGIDE/agentic-ide.db)
+    var configuredDbPath = builder.Configuration["SAGIDE:Database:Path"];
+    var dbPath = !string.IsNullOrWhiteSpace(configuredDbPath)
+        ? configuredDbPath
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SAGIDE", "agentic-ide.db");
     Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
 
     builder.Services.AddSingleton<ITaskRepository>(sp =>
@@ -74,6 +74,8 @@ try
         (IActivityRepository)sp.GetRequiredService<ITaskRepository>());
     builder.Services.AddSingleton<IWorkflowRepository>(sp =>
         (IWorkflowRepository)sp.GetRequiredService<ITaskRepository>());
+    builder.Services.AddSingleton<ISchedulerRepository>(sp =>
+        (ISchedulerRepository)sp.GetRequiredService<ITaskRepository>());
 
     // Register activity logging services
     builder.Services.AddSingleton<MarkdownGenerator>();
@@ -86,10 +88,12 @@ try
     builder.Services.AddSingleton(gitConfig);
     builder.Services.AddSingleton<GitService>();
 
-    // Register dead-letter queue (with persistence)
+    // Register dead-letter queue (with persistence) — retention configurable via SAGIDE:Database:DlqRetentionDays
+    var dlqRetentionDays = builder.Configuration.GetValue("SAGIDE:Database:DlqRetentionDays", 7);
     builder.Services.AddSingleton(sp => new DeadLetterQueue(
         sp.GetRequiredService<ILogger<DeadLetterQueue>>(),
-        sp.GetRequiredService<ITaskRepository>()));
+        sp.GetRequiredService<ITaskRepository>(),
+        dlqRetentionDays));
 
     // Register result parser
     builder.Services.AddSingleton<ResultParser>();
@@ -111,7 +115,9 @@ try
     builder.Services.AddSingleton(providerFactory);
 
     // Register orchestrator with all dependencies
-    var maxTaskHistory = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxTaskHistoryInMemory", 1000);
+    var maxTaskHistory      = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxTaskHistoryInMemory", 1000);
+    var broadcastThrottleMs = builder.Configuration.GetValue("SAGIDE:Orchestration:BroadcastThrottleMs", 200);
+    var maxFileSizeChars    = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxFileSizeChars", 32_000);
     builder.Services.AddSingleton(new TaskQueue(maxTaskHistory));
     // Register AgentOrchestrator as both its concrete type and the ITaskSubmissionService interface.
     // WorkflowEngine depends on ITaskSubmissionService (not the concrete class) — this breaks
@@ -128,7 +134,9 @@ try
         sp.GetRequiredService<ActivityLogger>(),
         maxConcurrent,
         sp.GetRequiredService<GitService>(),
-        sp.GetRequiredService<GitConfig>()));
+        sp.GetRequiredService<GitConfig>(),
+        broadcastThrottleMs,
+        maxFileSizeChars));
     builder.Services.AddSingleton<ITaskSubmissionService>(sp => sp.GetRequiredService<AgentOrchestrator>());
 
     // Register workflow engine with all dependencies (Items 1, 3, 4, 6)
@@ -139,6 +147,7 @@ try
         sp.GetRequiredService<AgentLimitsConfig>(),
         sp.GetRequiredService<TaskAffinitiesConfig>(),
         sp.GetRequiredService<WorkflowPolicyEngine>(),
+        sp.GetRequiredService<GitService>(),
         sp.GetRequiredService<ILogger<WorkflowEngine>>(),
         sp.GetService<IWorkflowRepository>()));
 
@@ -153,8 +162,51 @@ try
     // Register hosted service
     builder.Services.AddHostedService<ServiceLifetimeHosted>();
 
-    var host = builder.Build();
-    await host.RunAsync();
+    // Subtask Coordinator (multi-model prompt dispatch + @machine routing)
+    builder.Services.AddSingleton<SubtaskCoordinator>();
+
+    // Prompt Registry (singleton with file-watcher hot-reload)
+    builder.Services.AddSingleton<PromptRegistry>();
+
+    // Scheduler Service (cron-based task submission from prompt YAMLs)
+    builder.Services.AddHostedService<SAGIDE.Service.Scheduling.SchedulerService>();
+
+    // RAG Pipeline
+    builder.Services.AddHttpClient<WebFetcher>(client =>
+    {
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("SAGIDE/1.0");
+    }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        AllowAutoRedirect = true,
+        MaxAutomaticRedirections = 10,
+    });
+    builder.Services.AddHttpClient<WebSearchAdapter>();
+    builder.Services.AddHttpClient<EmbeddingService>();
+    builder.Services.AddSingleton<TextChunker>();
+    builder.Services.AddSingleton<VectorStore>(sp =>
+    {
+        var store = new VectorStore(dbPath, sp.GetRequiredService<ILogger<VectorStore>>());
+        store.InitializeAsync().GetAwaiter().GetResult();
+        return store;
+    });
+    builder.Services.AddSingleton<RagPipeline>();
+
+    var app = builder.Build();
+
+    // Web dashboard — serve wwwroot/index.html at /dashboard and root /
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+
+    // REST API endpoints
+    app.MapTaskEndpoints();
+    app.MapResultEndpoints();
+    app.MapPromptEndpoints();
+    app.MapReportsEndpoints(app.Configuration);
+
+    // Redirect /dashboard → / for discoverability
+    app.MapGet("/dashboard", () => Results.Redirect("/"));
+
+    await app.RunAsync();
 }
 catch (Exception ex)
 {
@@ -171,15 +223,11 @@ return 0;
 // ── Local helpers ──────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Collects all Ollama base URLs from config for the health monitor to track.
-/// Reads SAGIDE:Ollama:DefaultServer + every server in SAGIDE:Ollama:Servers.
+/// Collects all Ollama base URLs from SAGIDE:Ollama:Servers for the health monitor to track.
 /// </summary>
 static IEnumerable<string> BuildAllOllamaUrls(IConfiguration cfg)
 {
     var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-    var dflt = cfg["SAGIDE:Ollama:DefaultServer"];
-    if (!string.IsNullOrEmpty(dflt)) urls.Add(dflt);
 
     foreach (var server in cfg.GetSection("SAGIDE:Ollama:Servers").GetChildren())
     {

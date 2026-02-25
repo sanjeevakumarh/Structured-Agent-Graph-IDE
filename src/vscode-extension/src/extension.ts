@@ -14,6 +14,7 @@ import { StreamingOutputPanel } from './views/StreamingOutputPanel';
 import { DiffApprovalPanel } from './views/DiffApprovalPanel';
 import { WorkflowExplorerProvider } from './views/WorkflowExplorerProvider';
 import { WorkflowGraphPanel } from './views/WorkflowGraphPanel';
+import { PromptLibraryProvider } from './views/PromptLibraryProvider';
 
 let connection: ServiceConnection;
 
@@ -27,7 +28,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const historyTreeProvider = new HistoryTreeProvider();
     const dlqTreeProvider = new DlqTreeProvider();
     const diagnosticsManager = new DiagnosticsManager();
-    const workflowExplorer = new WorkflowExplorerProvider();
+    const workflowExplorer  = new WorkflowExplorerProvider();
+    const restBaseUrl       = 'http://localhost:5100';
+    const promptLibrary     = new PromptLibraryProvider(restBaseUrl);
 
     // Register tree views in sidebar
     context.subscriptions.push(
@@ -35,6 +38,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.registerTreeDataProvider('sagIDE.taskHistory', historyTreeProvider),
         vscode.window.registerTreeDataProvider('sagIDE.dlq', dlqTreeProvider),
         vscode.window.registerTreeDataProvider('sagIDE.workflowExplorer', workflowExplorer),
+        vscode.window.registerTreeDataProvider('sagIDE.promptLibrary', promptLibrary),
         diagnosticsManager
     );
 
@@ -175,7 +179,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
 
     // Register all commands
-    registerCommands(context, connection, taskTreeProvider, historyTreeProvider, dlqTreeProvider, diagnosticsManager, comparisonTracker, workflowExplorer);
+    registerCommands(context, connection, taskTreeProvider, historyTreeProvider, dlqTreeProvider, diagnosticsManager, comparisonTracker, workflowExplorer, promptLibrary, restBaseUrl);
 
     // Connect to the C# backend service
     try {
@@ -192,6 +196,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         } catch {
             // Workflow list is best-effort — service may not be ready yet
         }
+
+        // Initial prompt library load (REST API — best-effort)
+        promptLibrary.refresh().catch(() => { /* service may not be ready yet */ });
     } catch {
         log('Service not running — will reconnect when available');
     }

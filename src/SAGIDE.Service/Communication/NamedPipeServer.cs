@@ -19,7 +19,7 @@ public class NamedPipeServer
     private readonly ConcurrentDictionary<string, ClientEntry> _clients = new();
     // Maps taskId → clientId so streaming output is routed only to the submitting window
     private readonly ConcurrentDictionary<string, string> _taskOwners = new();
-    // bbounded channel — BroadcastAsync enqueues here; drain loop fans out to all clients
+    // bounded channel — BroadcastAsync enqueues here; drain loop fans out to all clients
     private readonly Channel<PipeMessage> _broadcastChannel;
     private CancellationTokenSource? _cts;
 
@@ -42,7 +42,7 @@ public class NamedPipeServer
         _logger         = logger;
         _config         = config ?? new CommunicationConfig();
 
-        // C4: DropOldest ensures BroadcastAsync never blocks even under high-throughput streaming.
+        // DropOldest ensures BroadcastAsync never blocks even under high-throughput streaming.
         _broadcastChannel = Channel.CreateBounded<PipeMessage>(new BoundedChannelOptions(_config.MaxBroadcastQueueSize)
         {
             FullMode          = BoundedChannelFullMode.DropOldest,
@@ -221,7 +221,7 @@ public class NamedPipeServer
     }
 
     /// <summary>
-    /// C4: Non-blocking broadcast — enqueues into the bounded channel and returns immediately.
+    /// Non-blocking broadcast — enqueues into the bounded channel and returns immediately.
     /// The drain loop fans the message out to all connected clients asynchronously.
     /// If the channel is full, the oldest undelivered message is dropped (DropOldest policy).
     /// </summary>

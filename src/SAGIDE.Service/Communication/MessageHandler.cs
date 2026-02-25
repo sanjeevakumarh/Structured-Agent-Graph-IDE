@@ -123,6 +123,7 @@ public class MessageHandler
             Metadata = metadata,
             ScheduledFor = request.ScheduledFor,
             ComparisonGroupId = request.ComparisonGroupId,
+            SourceTag = "vscode",
         };
         var taskId = await _orchestrator.SubmitTaskAsync(task, ct);
         var response = new TaskStatusResponse

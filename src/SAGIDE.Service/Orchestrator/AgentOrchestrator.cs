@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,6 +27,7 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly ILogger<AgentOrchestrator> _logger;
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningTasks = new();
     private readonly SemaphoreSlim _concurrencyLimiter;
+    private readonly int _broadcastThrottleMs;
     private CancellationTokenSource? _processingCts;
 
     /// <summary>
@@ -54,7 +55,9 @@ public class AgentOrchestrator : ITaskSubmissionService
         ActivityLogger? activityLogger = null,
         int maxConcurrentTasks = 5,
         Infrastructure.GitService? gitService = null,
-        Infrastructure.GitConfig? gitConfig = null)
+        Infrastructure.GitConfig? gitConfig = null,
+        int broadcastThrottleMs = 200,
+        int maxFileSizeChars = 32_000)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
@@ -69,6 +72,8 @@ public class AgentOrchestrator : ITaskSubmissionService
         _gitConfig = gitConfig;
         MaxConcurrentTasks = maxConcurrentTasks;
         _concurrencyLimiter = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
+        _broadcastThrottleMs = broadcastThrottleMs;
+        _maxFileSizeChars = maxFileSizeChars;
     }
 
     // Idempotent — duplicate task ID returns existing, no re-execution
@@ -200,7 +205,13 @@ public class AgentOrchestrator : ITaskSubmissionService
             var basePrompt = await BuildPrompt(task);
             var prompt = basePrompt;
             task.Metadata.TryGetValue("modelEndpoint", out var modelEndpointOverride);
-            var modelConfig = new ModelConfig(task.ModelProvider, task.ModelId,
+
+            // Strip @machine suffix from ModelId if present (e.g. "deepseek-coder-v2:16b@workstation"
+            // → "deepseek-coder-v2:16b").  The suffix is used by WorkflowEngine / SubtaskCoordinator
+            // for endpoint routing but must not be forwarded to the Ollama API as part of the model name.
+            var bareModelId = StripMachineSuffix(task.ModelId);
+
+            var modelConfig = new ModelConfig(task.ModelProvider, bareModelId,
                 Endpoint: string.IsNullOrEmpty(modelEndpointOverride) ? null : modelEndpointOverride);
             string lastResponse = "";
 
@@ -329,9 +340,7 @@ public class AgentOrchestrator : ITaskSubmissionService
             // Log activity for task completion
             if (_activityLogger != null && task.Metadata.TryGetValue("workspacePath", out var workspacePath))
             {
-                var result = _repository != null
-                    ? await _repository.GetResultAsync(task.Id)
-                    : null;
+                var result = _repository != null ? await _repository.GetResultAsync(task.Id) : null;
                 var details = result != null ? System.Text.Json.JsonSerializer.Serialize(result) : null;
 
                 await _activityLogger.LogActivityAsync(new ActivityEntry
@@ -404,7 +413,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         var tokenCount = 0;
         var lastBroadcastLength = 0;
         var lastBroadcast = DateTime.UtcNow;
-        var broadcastInterval = TimeSpan.FromMilliseconds(200);
+        var broadcastInterval = TimeSpan.FromMilliseconds(_broadcastThrottleMs);
 
         // Idle watchdog: cancel if no chunk arrives within the configured window.
         // CancelAfter() resets the countdown on each successive call before it fires.
@@ -697,6 +706,26 @@ public class AgentOrchestrator : ITaskSubmissionService
         catch (Exception ex) { _logger.LogError(ex, "Failed to persist result for task {TaskId}", result.TaskId); }
     }
 
+    /// <summary>
+    /// Strips the <c>@machine</c> routing suffix from a model identifier.
+    /// <para>
+    /// YAML prompts and workflow step definitions may use the notation
+    /// <c>modelId@machineName</c> (e.g. <c>deepseek-coder-v2:16b@workstation</c>) to
+    /// express both the model name and the preferred Ollama server in a single string.
+    /// The suffix is consumed during task routing and must be removed before the model
+    /// name is forwarded to the Ollama API, which would otherwise return a 404.
+    /// </para>
+    /// <para>
+    /// Rules: the <c>@</c> must not be the first character (empty model name is invalid),
+    /// so an index of 0 is treated as a literal <c>@</c> in the model name and left unchanged.
+    /// </para>
+    /// </summary>
+    internal static string StripMachineSuffix(string modelId)
+    {
+        var atIdx = modelId.LastIndexOf('@');
+        return atIdx > 0 ? modelId[..atIdx].Trim() : modelId;
+    }
+
     // Determinism — SHA-256 output cache key
     private static string ComputeCacheKey(string prompt, string modelId, string provider)
     {
@@ -707,9 +736,10 @@ public class AgentOrchestrator : ITaskSubmissionService
 
     // Per-file character cap: keeps individual files from inflating the prompt beyond
     // model context limits and prevents runaway memory use on large source files.
-    private const int MaxFileSizeChars = 32_000;
+    // Configurable via SAGIDE:Orchestration:MaxFileSizeChars.
+    private readonly int _maxFileSizeChars;
 
-    private static async Task<string> BuildPrompt(AgentTask task)
+    private async Task<string> BuildPrompt(AgentTask task)
     {
         // Read actual file contents for the prompt
         var fileContents = new List<string>();
@@ -718,9 +748,9 @@ public class AgentOrchestrator : ITaskSubmissionService
             if (File.Exists(filePath))
             {
                 var content = await File.ReadAllTextAsync(filePath);
-                if (content.Length > MaxFileSizeChars)
-                    content = string.Concat(content.AsSpan(0, MaxFileSizeChars),
-                        $"\n... [file truncated to {MaxFileSizeChars:N0} chars]");
+                if (content.Length > _maxFileSizeChars)
+                    content = string.Concat(content.AsSpan(0, _maxFileSizeChars),
+                        $"\n... [file truncated to {_maxFileSizeChars:N0} chars]");
                 fileContents.Add($"### {Path.GetFileName(filePath)}\n```\n{content}\n```");
             }
         }

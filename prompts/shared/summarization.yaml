@@ -1,0 +1,29 @@
+name: summarization
+version: 1
+domain: shared
+source_tag: cli
+
+description: >
+  General-purpose summarization prompt. Summarizes any text into a concise,
+  structured markdown output.
+
+model_preference:
+  primary: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+  fallback: ollama/qwen2.5:7b-instruct-q4_K_M@mini
+
+variables:
+  max_length: 500
+  format: bullet_points
+
+prompt_template: |
+  Summarize the following content concisely.
+  Target length: {{ max_length }} words or less.
+  Format: {{ format }}
+
+  Content:
+  {{ content }}
+
+  Output as markdown.
+
+output:
+  format: markdown

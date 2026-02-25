@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Interfaces;
@@ -6,7 +6,7 @@ using SAGIDE.Core.Models;
 
 namespace SAGIDE.Service.Persistence;
 
-public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkflowRepository
+public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkflowRepository, ISchedulerRepository
 {
     private readonly string _connectionString;
     private readonly ILogger<SqliteTaskRepository> _logger;
@@ -39,6 +39,10 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         var cacheTableCmd = conn.CreateCommand();
         cacheTableCmd.CommandText = SqlQueries.CreateOutputCacheTable;
         await cacheTableCmd.ExecuteNonQueryAsync();
+
+        var schedulerTableCmd = conn.CreateCommand();
+        schedulerTableCmd.CommandText = SqlQueries.CreateSchedulerStateTable;
+        await schedulerTableCmd.ExecuteNonQueryAsync();
 
         // Schema migrations — ADD COLUMN is idempotent (SQLite throws on duplicate, we catch it)
         foreach (var migrationSql in SqlQueries.Migrations)
@@ -82,6 +86,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         cmd.Parameters.AddWithValue("@completedAt", task.CompletedAt?.ToString("O") ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("@scheduledFor", task.ScheduledFor?.ToString("O") ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("@comparisonGroupId", (object?)task.ComparisonGroupId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@sourceTag", (object?)task.SourceTag ?? DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync();
     }
@@ -173,6 +178,26 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         var cmd = conn.CreateCommand();
         cmd.CommandText = SqlQueries.SelectTasksByStatus;
         cmd.Parameters.AddWithValue("@status", status.ToString());
+
+        var tasks = new List<AgentTask>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            tasks.Add(ReadTask(reader));
+        }
+        return tasks;
+    }
+
+    public async Task<IReadOnlyList<AgentTask>> GetTasksBySourceTagAsync(string sourceTag, int limit = 100, int offset = 0)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.SelectTasksBySourceTag;
+        cmd.Parameters.AddWithValue("@sourceTag", sourceTag);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        cmd.Parameters.AddWithValue("@offset", offset);
 
         var tasks = new List<AgentTask>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -295,7 +320,8 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
             StartedAt = reader.IsDBNull(reader.GetOrdinal("started_at")) ? null : DateTime.Parse(reader.GetString(reader.GetOrdinal("started_at"))),
             CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at")) ? null : DateTime.Parse(reader.GetString(reader.GetOrdinal("completed_at"))),
             ScheduledFor = reader.IsDBNull(reader.GetOrdinal("scheduled_for")) ? null : DateTime.Parse(reader.GetString(reader.GetOrdinal("scheduled_for"))),
-            ComparisonGroupId = reader.IsDBNull(reader.GetOrdinal("comparison_group_id")) ? null : reader.GetString(reader.GetOrdinal("comparison_group_id"))
+            ComparisonGroupId = reader.IsDBNull(reader.GetOrdinal("comparison_group_id")) ? null : reader.GetString(reader.GetOrdinal("comparison_group_id")),
+            SourceTag = reader.IsDBNull(reader.GetOrdinal("source_tag")) ? null : reader.GetString(reader.GetOrdinal("source_tag"))
         };
     }
 
@@ -504,7 +530,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await cmd.ExecuteNonQueryAsync();
     }
 
-    // ── §2.3 Determinism — output cache ──────────────────────────────────────
+    // ── Determinism — output cache ──────────────────────────────────────
 
     public async Task<string?> GetCachedOutputAsync(string cacheKey)
     {
@@ -551,5 +577,50 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
             GitCommitHash = reader.IsDBNull(reader.GetOrdinal("git_commit_hash")) ? null : reader.GetString(reader.GetOrdinal("git_commit_hash")),
             Metadata = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(reader.GetOrdinal("metadata"))) ?? []
         };
+    }
+
+    // ── ISchedulerRepository ──────────────────────────────────────────────────
+
+    public async Task<DateTimeOffset?> GetLastFiredAtAsync(string promptKey)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.SelectLastFiredAt;
+        cmd.Parameters.AddWithValue("@promptKey", promptKey);
+
+        var raw = await cmd.ExecuteScalarAsync();
+        return raw is string s ? DateTimeOffset.Parse(s) : null;
+    }
+
+    public async Task SetLastFiredAtAsync(string promptKey, DateTimeOffset firedAt)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.UpsertSchedulerState;
+        cmd.Parameters.AddWithValue("@promptKey", promptKey);
+        cmd.Parameters.AddWithValue("@lastFiredAt", firedAt.ToString("O"));
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task LoadAllLastFiredAsync(IDictionary<string, DateTimeOffset> target)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.SelectAllSchedulerState;
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var key = reader.GetString(0);
+            var ts  = DateTimeOffset.Parse(reader.GetString(1));
+            target[key] = ts;
+        }
     }
 }

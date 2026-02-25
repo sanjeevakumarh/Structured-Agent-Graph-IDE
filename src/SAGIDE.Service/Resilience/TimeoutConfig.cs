@@ -60,8 +60,8 @@ public class AgentLimitEntry
 }
 
 // ── Task Affinity config ──────────────────────────────────────────────────────
-// Maps AgentType name → preferred cloud/local model.  Used by WorkflowEngine when
-// a workflow step has no explicit model_id and the instance has no default model.
+// Model affinities per agent type.  Populated from appsettings.json if present;
+// WorkflowEngine falls back to this when a step has no explicit model.
 
 public class TaskAffinityEntry
 {
@@ -72,7 +72,6 @@ public class TaskAffinityEntry
 
 public class TaskAffinitiesConfig
 {
-    // Intentionally empty — all values come from appsettings.json (SAGIDE:TaskAffinities:Affinities).
     public Dictionary<string, TaskAffinityEntry> Affinities { get; init; } = new();
 
     /// <summary>

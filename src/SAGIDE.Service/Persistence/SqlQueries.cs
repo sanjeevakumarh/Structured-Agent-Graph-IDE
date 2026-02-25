@@ -1,4 +1,4 @@
-namespace SAGIDE.Service.Persistence;
+﻿namespace SAGIDE.Service.Persistence;
 
 /// <summary>
 /// All SQL statements used by SqliteTaskRepository, centralised so they are easy to find and edit.
@@ -95,7 +95,28 @@ internal static class SqlQueries
         );
         """;
 
-    // ── §2.3 Determinism: output cache ───────────────────────────────────────
+    // ── scheduler_state ───────────────────────────────────────────────────────
+
+    public const string CreateSchedulerStateTable = """
+        CREATE TABLE IF NOT EXISTS scheduler_state (
+            prompt_key    TEXT PRIMARY KEY,
+            last_fired_at TEXT NOT NULL
+        );
+        """;
+
+    public const string SelectLastFiredAt =
+        "SELECT last_fired_at FROM scheduler_state WHERE prompt_key = @promptKey";
+
+    public const string SelectAllSchedulerState =
+        "SELECT prompt_key, last_fired_at FROM scheduler_state";
+
+    public const string UpsertSchedulerState = """
+        INSERT INTO scheduler_state (prompt_key, last_fired_at)
+        VALUES (@promptKey, @lastFiredAt)
+        ON CONFLICT(prompt_key) DO UPDATE SET last_fired_at = @lastFiredAt
+        """;
+
+    // ── Determinism: output cache ───────────────────────────────────────
 
     public const string CreateOutputCacheTable = """
         CREATE TABLE IF NOT EXISTS node_output_cache (
@@ -135,6 +156,8 @@ internal static class SqlQueries
     [
         "ALTER TABLE task_history ADD COLUMN scheduled_for TEXT",
         "ALTER TABLE task_history ADD COLUMN comparison_group_id TEXT",
+        "ALTER TABLE task_history ADD COLUMN source_tag TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_task_source_tag ON task_history(source_tag)",
     ];
 
     // ── task_history ──────────────────────────────────────────────────────────
@@ -142,10 +165,10 @@ internal static class SqlQueries
     public const string UpsertTask = """
         INSERT INTO task_history (id, agent_type, model_provider, model_id, description, file_paths,
             status, progress, status_message, priority, metadata, created_at, started_at, completed_at,
-            scheduled_for, comparison_group_id)
+            scheduled_for, comparison_group_id, source_tag)
         VALUES (@id, @agentType, @modelProvider, @modelId, @description, @filePaths,
             @status, @progress, @statusMessage, @priority, @metadata, @createdAt, @startedAt, @completedAt,
-            @scheduledFor, @comparisonGroupId)
+            @scheduledFor, @comparisonGroupId, @sourceTag)
         ON CONFLICT(id) DO UPDATE SET
             status = @status,
             progress = @progress,
@@ -154,7 +177,8 @@ internal static class SqlQueries
             completed_at = @completedAt,
             metadata = @metadata,
             scheduled_for = @scheduledFor,
-            comparison_group_id = @comparisonGroupId
+            comparison_group_id = @comparisonGroupId,
+            source_tag = @sourceTag
         """;
 
     public const string SelectTaskById = "SELECT * FROM task_history WHERE id = @id";
@@ -169,6 +193,17 @@ internal static class SqlQueries
         SELECT * FROM task_history
         WHERE status IN ('Queued', 'Running')
         ORDER BY priority DESC, created_at ASC
+        """;
+
+    public const string SelectTasksBySourceTag =
+        "SELECT * FROM task_history WHERE source_tag = @sourceTag ORDER BY created_at DESC LIMIT @limit OFFSET @offset";
+
+    public const string SelectResultsBySourceTag = """
+        SELECT r.*, h.source_tag FROM task_results r
+        JOIN task_history h ON h.id = r.task_id
+        WHERE h.source_tag = @sourceTag
+        ORDER BY h.created_at DESC
+        LIMIT @limit OFFSET @offset
         """;
 
     // ── task_results ──────────────────────────────────────────────────────────

@@ -1,0 +1,8 @@
+{
+  "id": "sagide-logseq",
+  "name": "SAGIDE",
+  "version": "0.1.0",
+  "description": "Run AI agent tasks and insert results from the SAGIDE backend",
+  "author": "SAGIDE",
+  "main": "dist/index.js"
+}

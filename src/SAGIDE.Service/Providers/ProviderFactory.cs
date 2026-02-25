@@ -50,8 +50,13 @@ public class ProviderFactory
         {
             var timeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Codex));
             var openAiCompatibleEndpoints = BuildOpenAICompatibleRoutingTable();
-            _providers[ModelProvider.Codex] = new CodexProvider(openaiKey, RetryPolicy.Default,
-                timeout, _loggerFactory.CreateLogger<CodexProvider>(), openAiCompatibleEndpoints, codexMaxTokens);
+            // Only register if an API key or at least one custom endpoint is configured.
+            // Without either, every call would immediately return 401/404 and land in the DLQ.
+            if (!string.IsNullOrEmpty(openaiKey) || openAiCompatibleEndpoints.Count > 0)
+            {
+                _providers[ModelProvider.Codex] = new CodexProvider(openaiKey, RetryPolicy.Default,
+                    timeout, _loggerFactory.CreateLogger<CodexProvider>(), openAiCompatibleEndpoints, codexMaxTokens);
+            }
         }
 
         if (!string.IsNullOrEmpty(googleKey))
@@ -64,10 +69,13 @@ public class ProviderFactory
         // Multi-server Ollama: build model-to-endpoint routing table from config
         var ollamaTimeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Ollama));
         var modelEndpoints = BuildOllamaRoutingTable();
-        var defaultServer = _configuration["SAGIDE:Ollama:DefaultServer"] ?? "http://localhost:11434";
+        var defaultServer = _configuration.GetSection("SAGIDE:Ollama:Servers")
+            .GetChildren()
+            .Select(s => s["BaseUrl"])
+            .FirstOrDefault(u => !string.IsNullOrEmpty(u)) ?? string.Empty;
 
         _providers[ModelProvider.Ollama] = new OllamaProvider(
-            defaultServer, modelEndpoints, RetryPolicy.Default, ollamaTimeout,
+            defaultServer, modelEndpoints, RetryPolicy.ForOllama, ollamaTimeout,
             _loggerFactory.CreateLogger<OllamaProvider>(),
             _ollamaHealthMonitor, ollamaMaxTokens);
     }

@@ -151,6 +151,21 @@
         "command": "sagIDE.clearCompletedWorkflows",
         "title": "SAG: Clear Completed Workflows",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "sagIDE.runPrompt",
+        "title": "SAG: Run Prompt",
+        "icon": "$(play)"
+      },
+      {
+        "command": "sagIDE.editPrompt",
+        "title": "SAG: Edit Prompt YAML",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "sagIDE.refreshPromptLibrary",
+        "title": "SAG: Refresh Prompt Library",
+        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -179,6 +194,10 @@
         {
           "id": "sagIDE.workflowExplorer",
           "name": "Workflows"
+        },
+        {
+          "id": "sagIDE.promptLibrary",
+          "name": "Prompt Library"
         }
       ]
     },
@@ -207,6 +226,16 @@
         {
           "command": "sagIDE.refreshWorkflows",
           "when": "view == sagIDE.workflowExplorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sagIDE.runPrompt",
+          "when": "view == sagIDE.promptLibrary",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sagIDE.refreshPromptLibrary",
+          "when": "view == sagIDE.promptLibrary",
           "group": "navigation@2"
         }
       ],
@@ -272,6 +301,16 @@
           "command": "sagIDE.clearCompletedWorkflows",
           "when": "view == sagIDE.workflowExplorer && viewItem == workflowRunningGroup",
           "group": "inline"
+        },
+        {
+          "command": "sagIDE.runPrompt",
+          "when": "view == sagIDE.promptLibrary && viewItem == promptItem",
+          "group": "inline@1"
+        },
+        {
+          "command": "sagIDE.editPrompt",
+          "when": "view == sagIDE.promptLibrary && viewItem == promptItem",
+          "group": "inline@2"
         }
       ]
     },

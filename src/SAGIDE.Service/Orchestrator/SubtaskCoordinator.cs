@@ -1,0 +1,701 @@
+using System.Text;
+using Scriban;
+using Scriban.Runtime;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using SAGIDE.Core.Models;
+using SAGIDE.Service.Prompts;
+using SAGIDE.Service.Providers;
+using SAGIDE.Service.Rag;
+
+namespace SAGIDE.Service.Orchestrator;
+
+/// <summary>
+/// Orchestrates multi-model prompt execution:
+///   1. Runs data_collection steps (file reads, HTTP fetches) to gather context.
+///   2. Dispatches subtasks in parallel to the models specified in the prompt YAML.
+///   3. Waits for all subtask results, then renders the synthesis prompt.
+///   4. Writes the synthesized output to the configured destination.
+///
+/// Supports "@machine" notation in model specs
+/// (e.g. "ollama/deepseek-r1:14b@mini") — resolved to BaseUrl via SAGIDE:Ollama:Servers config.
+///
+/// Load balancing: OllamaHostHealthMonitor is used to route around unhealthy servers before
+/// dispatch, and to retry failed subtasks on an alternative healthy server (one retry per subtask).
+/// </summary>
+public sealed class SubtaskCoordinator
+{
+    private readonly AgentOrchestrator _orchestrator;
+    private readonly WebFetcher _fetcher;
+    private readonly WebSearchAdapter _search;
+    private readonly IConfiguration _config;
+    private readonly ILogger<SubtaskCoordinator> _logger;
+    private readonly OllamaHostHealthMonitor? _healthMonitor;
+    private readonly IReadOnlyList<string> _allOllamaUrls;
+
+    // Tracks a submitted subtask together with the actual endpoint used, for retry purposes.
+    private sealed record SubtaskSubmission(string Name, string TaskId, string ModelId, string Endpoint);
+
+    public SubtaskCoordinator(
+        AgentOrchestrator orchestrator,
+        WebFetcher fetcher,
+        WebSearchAdapter search,
+        IConfiguration config,
+        ILogger<SubtaskCoordinator> logger,
+        OllamaHostHealthMonitor? healthMonitor = null)
+    {
+        _orchestrator  = orchestrator;
+        _fetcher       = fetcher;
+        _search        = search;
+        _config        = config;
+        _logger        = logger;
+        _healthMonitor = healthMonitor;
+        _allOllamaUrls = config.GetSection("SAGIDE:Ollama:Servers")
+            .GetChildren()
+            .Select(s => s["BaseUrl"]?.TrimEnd('/') ?? string.Empty)
+            .Where(u => u.Length > 0)
+            .ToList();
+    }
+
+    // ── Main entry point ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs the full subtask pipeline for the given prompt definition.
+    /// </summary>
+    public async Task<SubtaskRunResult> RunAsync(
+        PromptDefinition prompt,
+        Dictionary<string, string>? variableOverrides = null,
+        CancellationToken ct = default)
+    {
+        var instanceId = Guid.NewGuid().ToString("N")[..12];
+        _logger.LogInformation(
+            "SubtaskCoordinator [{Id}] starting for {Domain}/{Name} ({SubtaskCount} subtasks)",
+            instanceId, prompt.Domain, prompt.Name, prompt.Subtasks.Count);
+
+        // 1. Build variable context (YAML vars + caller overrides + auto date/time)
+        var vars = BuildVarContext(prompt, variableOverrides);
+
+        // 2. Execute data_collection steps sequentially (each step can reference prior outputs)
+        await ExecuteDataCollectionAsync(prompt, vars, ct);
+
+        // 3. Dispatch all subtasks in parallel
+        var subtaskResults = await DispatchSubtasksAsync(prompt, vars, instanceId, ct);
+
+        // 4. Merge subtask results into vars so synthesis template can reference them
+        foreach (var (name, output) in subtaskResults)
+            vars[$"{name}_result"] = output;
+
+        // 5. Run synthesis (or aggregate if no synthesis template)
+        var synthesized = RenderSynthesisOrAggregate(prompt, vars, subtaskResults);
+
+        // 6. Write to output destination if configured
+        if (!string.IsNullOrEmpty(prompt.Output?.Destination))
+            await WriteOutputAsync(prompt.Output.Destination, synthesized, vars);
+
+        _logger.LogInformation("SubtaskCoordinator [{Id}] complete", instanceId);
+        return new SubtaskRunResult(instanceId, synthesized, subtaskResults);
+    }
+
+    // ── Variable context ────────────────────────────────────────────────────────
+
+    private static Dictionary<string, object> BuildVarContext(
+        PromptDefinition prompt,
+        Dictionary<string, string>? overrides)
+    {
+        var vars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["date"]     = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+            ["datetime"] = DateTime.UtcNow.ToString("O"),
+        };
+
+        foreach (var kv in prompt.Variables)
+            vars[kv.Key] = kv.Value;
+
+        if (overrides is not null)
+            foreach (var kv in overrides)
+                vars[kv.Key] = kv.Value;
+
+        // Make model_preference available so subtask model fields like
+        // "{{model_preference.subtasks.fundamental}}" resolve correctly.
+        if (prompt.ModelPreference is not null)
+        {
+            var mp = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (prompt.ModelPreference.Orchestrator is not null)
+                mp["orchestrator"] = prompt.ModelPreference.Orchestrator;
+            if (prompt.ModelPreference.Subtasks.Count > 0)
+                mp["subtasks"] = prompt.ModelPreference.Subtasks
+                    .ToDictionary(kv => kv.Key, kv => (object)kv.Value, StringComparer.OrdinalIgnoreCase);
+            vars["model_preference"] = mp;
+        }
+
+        return vars;
+    }
+
+    // ── Data collection steps ───────────────────────────────────────────────────
+
+    private async Task ExecuteDataCollectionAsync(
+        PromptDefinition prompt,
+        Dictionary<string, object> vars,
+        CancellationToken ct)
+    {
+        if (prompt.DataCollection is null) return;
+
+        foreach (var step in prompt.DataCollection.Steps)
+        {
+            _logger.LogDebug("Data collection: {Name} ({Type})", step.Name, step.Type);
+            try
+            {
+                var result = await ExecuteStepAsync(step, vars, ct);
+                if (!string.IsNullOrEmpty(step.OutputVar))
+                    vars[step.OutputVar] = result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Data collection step '{Name}' failed, continuing with empty result", step.Name);
+                if (!string.IsNullOrEmpty(step.OutputVar))
+                    vars[step.OutputVar] = string.Empty;
+            }
+        }
+    }
+
+    private async Task<object> ExecuteStepAsync(
+        PromptDataCollectionStep step,
+        Dictionary<string, object> vars,
+        CancellationToken ct)
+    {
+        switch (step.Type.Trim().ToLowerInvariant())
+        {
+            case "read_file":
+            {
+                var path = ExpandPath(ResolveSimpleTemplate(step.Source ?? string.Empty, vars));
+                return File.Exists(path) ? await File.ReadAllTextAsync(path, ct) : string.Empty;
+            }
+
+            case "web_api":
+            {
+                var url = ResolveSimpleTemplate(step.Source ?? string.Empty, vars);
+                if (string.IsNullOrWhiteSpace(url)) return string.Empty;
+                var doc = await _fetcher.FetchUrlAsync(url, ct);
+                return doc.Body;
+            }
+
+            case "rss":
+            case "atom":
+            {
+                var feedUrl = ResolveSimpleTemplate(step.Source ?? string.Empty, vars);
+                if (string.IsNullOrWhiteSpace(feedUrl)) return string.Empty;
+                var entries = await _fetcher.FetchRssAsync(feedUrl, ct);
+                // Format each entry as a compact block so the LLM receives structured text
+                return string.Join("\n\n", entries.Select(e =>
+                    $"### {e.Title}\nURL: {e.Url}\n{e.Body}".Trim()));
+            }
+
+            case "web_api_batch":
+            {
+                var urlTemplate = ResolveSimpleTemplate(step.Source ?? string.Empty, vars);
+                var items       = ResolveCollection(step.IterateOver ?? string.Empty, vars);
+                var bodies      = new List<string>();
+
+                foreach (var item in items.Take(_config.GetValue("SAGIDE:Orchestration:WebApiBatchMaxItems", 50))) // safety cap — configurable
+                {
+                    var url = urlTemplate
+                        .Replace("{symbol}", item)
+                        .Replace("{item}",   item);
+                    try
+                    {
+                        var doc = await _fetcher.FetchUrlAsync(url, ct);
+                        bodies.Add(doc.Body);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Batch fetch failed for item '{Item}'", item);
+                    }
+                }
+
+                return string.Join("\n---\n", bodies);
+            }
+
+            case "filter":
+            {
+                // Resolve the input data
+                var inputStr  = ResolveSimpleTemplate(step.Input ?? string.Empty, vars);
+
+                // Resolve condition (may contain {{template}} expressions like {{drop_threshold}})
+                var condition = ResolveSimpleTemplate(step.Condition ?? string.Empty, vars);
+
+                // Resolve limit (template or plain integer); 0 / missing → no limit
+                var limitStr  = ResolveSimpleTemplate(step.Limit ?? string.Empty, vars);
+                var limit     = int.TryParse(limitStr, out var l) && l > 0 ? l : int.MaxValue;
+
+                _logger.LogDebug("Filter step '{Name}': condition='{Condition}' limit={Limit}",
+                    step.Name, condition, limit == int.MaxValue ? "none" : limitStr);
+
+                return FilterConditionEvaluator.Filter(inputStr, condition, limit);
+            }
+
+            case "web_search_batch":
+            {
+                if (!_search.IsConfigured)
+                {
+                    _logger.LogWarning(
+                        "web_search_batch step '{Name}': SAGIDE:Rag:SearchUrl not configured — skipped", step.Name);
+                    return string.Empty;
+                }
+
+                var queryTemplate = ResolveSimpleTemplate(step.Query ?? step.Source ?? string.Empty, vars);
+                var items         = string.IsNullOrWhiteSpace(step.IterateOver)
+                    ? (IEnumerable<string>)[queryTemplate]           // single query
+                    : ResolveCollection(step.IterateOver, vars);    // one query per item
+
+                var limitStr   = ResolveSimpleTemplate(step.Limit ?? string.Empty, vars);
+                var maxResults = int.TryParse(limitStr, out var l) && l > 0 ? l : 5;
+
+                var sections = new List<string>();
+                foreach (var item in items.Take(_config.GetValue("SAGIDE:Orchestration:WebSearchBatchMaxItems", 20))) // safety cap — configurable
+                {
+                    // Render the query with the current item substituted for {{symbol}}, {{item}}, etc.
+                    var query = queryTemplate
+                        .Replace("{{symbol}}", item)
+                        .Replace("{{item}}",   item)
+                        .Replace("{symbol}",   item)
+                        .Replace("{item}",     item);
+
+                    _logger.LogDebug("web_search_batch '{Name}': querying '{Query}'", step.Name, query);
+                    var result = await _search.SearchAsync(query, maxResults, ct);
+                    if (!string.IsNullOrWhiteSpace(result))
+                        sections.Add($"## Search: {query}\n{result}");
+                }
+
+                return string.Join("\n\n---\n\n", sections);
+            }
+
+            default:
+                _logger.LogWarning(
+                    "Unknown data_collection step type '{Type}' in step '{Name}'", step.Type, step.Name);
+                return string.Empty;
+        }
+    }
+
+    // ── Subtask dispatch ────────────────────────────────────────────────────────
+
+    private async Task<Dictionary<string, string>> DispatchSubtasksAsync(
+        PromptDefinition prompt,
+        Dictionary<string, object> vars,
+        string instanceId,
+        CancellationToken ct)
+    {
+        if (prompt.Subtasks.Count == 0)
+            return [];
+
+        // Submit all subtasks concurrently, capturing the resolved (modelId, endpoint) for retry
+        var submissionTasks = prompt.Subtasks
+            .Select(st => SubmitSubtaskAsync(st, prompt, vars, instanceId, ct))
+            .ToList();
+
+        var submitted = (await Task.WhenAll(submissionTasks))
+            .Where(s => s is not null)
+            .Select(s => s!)
+            .ToList();
+
+        // Wait for all submitted tasks to reach a terminal state
+        var results = new Dictionary<string, string>(StringComparer.Ordinal);
+        var waitTasks = submitted.Select(async s =>
+        {
+            var output = await WaitForTaskAsync(s.TaskId, ct);
+            lock (results) results[s.Name] = output;
+        });
+        await Task.WhenAll(waitTasks);
+
+        // One retry pass: for subtasks that returned empty due to a server-side error,
+        // find a healthy alternative server and re-submit once.
+        if (_healthMonitor is not null)
+        {
+            var retryTasks = submitted
+                .Where(s => string.IsNullOrEmpty(results.GetValueOrDefault(s.Name)))
+                .Select(async s =>
+                {
+                    var status = _orchestrator.GetTaskStatus(s.TaskId);
+                    if (status?.Status != SAGIDE.Core.Models.AgentTaskStatus.Failed) return;
+                    if (!IsRetriableServerError(status.StatusMessage ?? string.Empty)) return;
+
+                    // Find a healthy alternative, explicitly excluding the endpoint that failed
+                    var alternatives = _allOllamaUrls
+                        .Where(u => !string.Equals(u, s.Endpoint, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    var fallback = _healthMonitor.TryGetBestHost(s.ModelId, string.Empty, alternatives);
+
+                    if (fallback is null)
+                    {
+                        _logger.LogWarning(
+                            "No healthy fallback for subtask '{Name}' (model: {Model}, failed: {Endpoint}): {Error}",
+                            s.Name, s.ModelId, s.Endpoint, status.StatusMessage);
+                        return;
+                    }
+
+                    _logger.LogInformation(
+                        "Retrying subtask '{Name}' on {Fallback} — original {Endpoint} failed: {Error}",
+                        s.Name, fallback, s.Endpoint, status.StatusMessage);
+
+                    var subtask = prompt.Subtasks.First(st => st.Name == s.Name);
+                    var retry = await SubmitSubtaskAsync(subtask, prompt, vars, instanceId, ct, endpointOverride: fallback);
+                    if (retry is null) return;
+
+                    var retryOutput = await WaitForTaskAsync(retry.TaskId, ct);
+                    if (!string.IsNullOrEmpty(retryOutput))
+                        lock (results) results[s.Name] = retryOutput;
+                })
+                .ToList();
+
+            if (retryTasks.Count > 0)
+                await Task.WhenAll(retryTasks);
+        }
+
+        return results;
+    }
+
+    private async Task<SubtaskSubmission?> SubmitSubtaskAsync(
+        PromptSubtask subtask,
+        PromptDefinition prompt,
+        Dictionary<string, object> vars,
+        string instanceId,
+        CancellationToken ct,
+        string? endpointOverride = null)
+    {
+        try
+        {
+            // Resolve model spec — may be a Scriban template
+            var modelSpec = ResolveModelTemplate(subtask.Model ?? string.Empty, vars);
+            var (provider, modelId, parsedEndpoint) = ParseModelSpec(modelSpec);
+
+            // Use override if provided (retry path); otherwise start with the parsed endpoint
+            var endpoint = endpointOverride ?? parsedEndpoint;
+
+            // Pre-dispatch health routing (only on initial dispatch, not on explicit retry)
+            if (endpointOverride is null && _healthMonitor is not null
+                && provider == ModelProvider.Ollama && !string.IsNullOrEmpty(endpoint))
+            {
+                var bestHost = _healthMonitor.TryGetBestHost(modelId, endpoint, _allOllamaUrls);
+                if (bestHost is null)
+                {
+                    _logger.LogWarning(
+                        "No healthy Ollama server for subtask '{Name}' (model: {Model}) — submitting to {Endpoint} anyway",
+                        subtask.Name, modelId, endpoint);
+                }
+                else if (!string.Equals(bestHost, endpoint, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation(
+                        "Health routing: subtask '{Name}' rerouted from {Old} to {New}",
+                        subtask.Name, endpoint, bestHost);
+                    endpoint = bestHost;
+                }
+            }
+
+            // Build subtask variable context
+            var subtaskVars = BuildSubtaskVars(subtask, prompt, vars);
+
+            // Render the subtask prompt template
+            var renderedPrompt = PromptTemplate.RenderSubtask(subtask, prompt, subtaskVars);
+            if (string.IsNullOrWhiteSpace(renderedPrompt))
+            {
+                _logger.LogWarning("Subtask '{Name}' produced an empty prompt — skipping", subtask.Name);
+                return null;
+            }
+
+            var task = new AgentTask
+            {
+                AgentType     = AgentType.Generic,
+                ModelProvider = provider,
+                ModelId       = modelId,
+                Description   = renderedPrompt,
+                SourceTag     = prompt.SourceTag ?? $"{prompt.Domain}_subtask",
+                Priority      = 1,
+                Metadata      = new Dictionary<string, string>
+                {
+                    ["subtask_name"]   = subtask.Name,
+                    ["coordinator_id"] = instanceId,
+                    ["prompt_domain"]  = prompt.Domain,
+                    ["prompt_name"]    = prompt.Name,
+                    ["triggered_by"]   = "subtask_coordinator",
+                },
+            };
+
+            if (!string.IsNullOrEmpty(endpoint))
+                task.Metadata["modelEndpoint"] = endpoint;
+
+            var taskId = await _orchestrator.SubmitTaskAsync(task, ct);
+            _logger.LogInformation(
+                "Subtask '{Name}' submitted as task {TaskId} (model: {Model}@{Host})",
+                subtask.Name, taskId, modelId, endpoint ?? "auto");
+            return new SubtaskSubmission(subtask.Name, taskId, modelId, endpoint ?? string.Empty);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to submit subtask '{Name}'", subtask.Name);
+            return null;
+        }
+    }
+
+    private static bool IsRetriableServerError(string errorMessage)
+        => errorMessage.Contains("cudaMalloc", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("out of memory", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("connection refused", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("No such host", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("Ollama 500", StringComparison.OrdinalIgnoreCase)
+        || errorMessage.Contains("llama runner", StringComparison.OrdinalIgnoreCase);
+
+    private static Dictionary<string, object> BuildSubtaskVars(
+        PromptSubtask subtask,
+        PromptDefinition prompt,
+        Dictionary<string, object> allVars)
+    {
+        if (subtask.InputVars.Count == 0)
+            return allVars; // No filter — pass everything
+
+        // Include base vars + the explicitly listed input vars
+        var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["date"]     = allVars.GetValueOrDefault("date", string.Empty),
+            ["datetime"] = allVars.GetValueOrDefault("datetime", string.Empty),
+        };
+
+        foreach (var kv in prompt.Variables)
+            result[kv.Key] = kv.Value;
+
+        foreach (var key in subtask.InputVars)
+            if (allVars.TryGetValue(key, out var val))
+                result[key] = val;
+
+        return result;
+    }
+
+    private async Task<string> WaitForTaskAsync(string taskId, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(taskId)) return string.Empty;
+
+        // Poll every 2 seconds; give up after 2 hours (matches TaskExecutionTimeout)
+        var deadline = DateTime.UtcNow.AddHours(2);
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            await Task.Delay(2_000, ct);
+
+            var status = _orchestrator.GetTaskStatus(taskId);
+            if (status is null) break;
+
+            switch (status.Status)
+            {
+                case AgentTaskStatus.Completed:
+                    return status.Result?.Output ?? string.Empty;
+                case AgentTaskStatus.Failed:
+                    _logger.LogWarning(
+                        "Subtask {TaskId} failed: {Err}", taskId, status.Result?.ErrorMessage);
+                    return string.Empty;
+                case AgentTaskStatus.Cancelled:
+                    return string.Empty;
+            }
+        }
+
+        _logger.LogWarning("Timed out waiting for subtask task {TaskId}", taskId);
+        return string.Empty;
+    }
+
+    // ── Synthesis ───────────────────────────────────────────────────────────────
+
+    private static string RenderSynthesisOrAggregate(
+        PromptDefinition prompt,
+        Dictionary<string, object> vars,
+        Dictionary<string, string> subtaskResults)
+    {
+        if (prompt.Synthesis?.PromptTemplate is not null)
+        {
+            try { return PromptTemplate.RenderSynthesis(prompt, vars); }
+            catch (Exception) { /* fall through to aggregation */ }
+        }
+
+        // Fallback: concatenate subtask results under headings
+        var sb = new StringBuilder();
+        foreach (var (name, output) in subtaskResults)
+        {
+            sb.AppendLine($"## {name}");
+            sb.AppendLine(output);
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    // ── Output writing ──────────────────────────────────────────────────────────
+
+    private async Task WriteOutputAsync(
+        string destinationTemplate,
+        string content,
+        Dictionary<string, object> vars)
+    {
+        try
+        {
+            var path = ExpandPath(ResolveSimpleTemplate(destinationTemplate, vars));
+            var dir  = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            await File.WriteAllTextAsync(path, content);
+            _logger.LogInformation("Output written to {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to write output to '{Dest}'", destinationTemplate);
+        }
+    }
+
+    // ── Model spec parsing ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Parses a model spec string such as "ollama/deepseek-r1:14b@mini" into its components.
+    /// The optional @machine suffix is resolved to a BaseUrl via SAGIDE:Ollama:Servers config.
+    /// </summary>
+    private (ModelProvider Provider, string ModelId, string? Endpoint) ParseModelSpec(string spec)
+    {
+        string? endpoint = null;
+
+        // Extract @machine suffix for cross-machine routing
+        var atIdx = spec.LastIndexOf('@');
+        if (atIdx > 0)
+        {
+            var machine = spec[(atIdx + 1)..].Trim();
+            spec     = spec[..atIdx].Trim();
+            endpoint = ResolveServerUrl(machine);
+
+            if (endpoint is null)
+                _logger.LogWarning(
+                    "Machine '{Machine}' not found in SAGIDE:Ollama:Servers — request will use health-monitor routing",
+                    machine);
+        }
+
+        if (spec.StartsWith("ollama/", StringComparison.OrdinalIgnoreCase))
+            return (ModelProvider.Ollama, spec[7..], endpoint);
+
+        if (spec.StartsWith("claude", StringComparison.OrdinalIgnoreCase))
+            return (ModelProvider.Claude, spec, endpoint);
+
+        if (spec.StartsWith("codex/", StringComparison.OrdinalIgnoreCase) ||
+            spec.StartsWith("openai/", StringComparison.OrdinalIgnoreCase))
+        {
+            var slash = spec.IndexOf('/');
+            return (ModelProvider.Codex, spec[(slash + 1)..], endpoint);
+        }
+
+        if (spec.StartsWith("gemini/", StringComparison.OrdinalIgnoreCase))
+            return (ModelProvider.Gemini, spec[7..], endpoint);
+
+        // Default: treat as Ollama model id
+        return (ModelProvider.Ollama, spec, endpoint);
+    }
+
+    /// <summary>
+    /// Looks up a machine name in SAGIDE:Ollama:Servers and SAGIDE:OpenAICompatible:Servers.
+    /// Returns the BaseUrl if found, or null.
+    /// </summary>
+    private string? ResolveServerUrl(string machineName)
+    {
+        foreach (var server in _config.GetSection("SAGIDE:Ollama:Servers").GetChildren())
+        {
+            if (string.Equals(server["Name"], machineName, StringComparison.OrdinalIgnoreCase))
+                return server["BaseUrl"];
+        }
+        foreach (var server in _config.GetSection("SAGIDE:OpenAICompatible:Servers").GetChildren())
+        {
+            if (string.Equals(server["Name"], machineName, StringComparison.OrdinalIgnoreCase))
+                return server["BaseUrl"];
+        }
+        return null;
+    }
+
+    // ── Template helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Renders a model template string that may contain Scriban expressions such as
+    /// <c>{{model_preference.subtasks.fundamental}}</c>.
+    /// Falls back to the original string on render failure.
+    /// </summary>
+    private static string ResolveModelTemplate(string template, Dictionary<string, object> vars)
+    {
+        if (!template.Contains("{{")) return template;
+
+        try
+        {
+            var t   = Template.Parse(template);
+            var ctx = new TemplateContext { MemberRenamer = m => m.Name };
+            var g   = new ScriptObject();
+            foreach (var kv in vars)
+                g[kv.Key] = kv.Value;
+            ctx.PushGlobal(g);
+            return t.Render(ctx) ?? template;
+        }
+        catch
+        {
+            return template;
+        }
+    }
+
+    /// <summary>
+    /// Simple {{varName}} → value substitution using string.Replace.
+    /// Does not handle nested paths. Suitable for resolving step source/query parameters.
+    /// </summary>
+    private static string ResolveSimpleTemplate(string template, Dictionary<string, object> vars)
+    {
+        if (!template.Contains("{{")) return template;
+
+        foreach (var kv in vars)
+        {
+            var placeholder = $"{{{{{kv.Key}}}}}";
+            if (template.Contains(placeholder, StringComparison.OrdinalIgnoreCase))
+                template = template.Replace(placeholder, kv.Value?.ToString() ?? string.Empty,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+        return template;
+    }
+
+    /// <summary>
+    /// Resolves an expression like "{{watchlist.symbols}}" into its var name ("watchlist"),
+    /// then extracts the value from vars as a collection of strings.
+    /// Falls back to treating the resolved string as a single item.
+    /// </summary>
+    private static IEnumerable<string> ResolveCollection(string expression, Dictionary<string, object> vars)
+    {
+        var varName = ExtractLeadingVarName(expression);
+        if (!string.IsNullOrEmpty(varName) && vars.TryGetValue(varName, out var val))
+        {
+            if (val is IEnumerable<string> list) return list;
+            var str = val?.ToString() ?? string.Empty;
+            return str.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        }
+
+        // Not a var reference: resolve template and return as single item
+        var resolved = ResolveSimpleTemplate(expression, vars);
+        return string.IsNullOrWhiteSpace(resolved) ? [] : [resolved];
+    }
+
+    /// <summary>
+    /// Extracts the leading var name from a template expression like "{{watchlist.symbols}}".
+    /// Returns the segment before the first dot.
+    /// </summary>
+    private static string ExtractLeadingVarName(string template)
+    {
+        var start = template.IndexOf("{{", StringComparison.Ordinal);
+        var end   = template.IndexOf("}}", StringComparison.Ordinal);
+        if (start < 0 || end < 0) return template.Trim();
+        var inner = template[(start + 2)..end].Trim();
+        var dot   = inner.IndexOf('.');
+        return dot > 0 ? inner[..dot] : inner;
+    }
+
+    private static string ExpandPath(string path)
+    {
+        if (path.StartsWith("~/") || path == "~")
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                path.Length > 2 ? path[2..] : string.Empty);
+        return path;
+    }
+}
+
+public record SubtaskRunResult(
+    string InstanceId,
+    string SynthesizedOutput,
+    Dictionary<string, string> SubtaskResults);

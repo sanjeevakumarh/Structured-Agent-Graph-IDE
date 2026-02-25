@@ -1,7 +1,7 @@
-namespace SAGIDE.Core.Models;
+﻿namespace SAGIDE.Core.Models;
 
 /// <summary>
-/// Typed inter-agent communication record (§2.5 — MACP).
+/// Typed inter-agent communication record (— MACP).
 /// Every ModelExecutionNode MUST produce an IntentPackage as part of its output.
 /// Stored per workflow step so that the reasoning chain is fully auditable.
 /// </summary>
@@ -43,7 +43,7 @@ public class IntentPackage
 
     /// <summary>
     /// Structured hints for downstream node types.
-    /// Required for ArchitectureNode outputs (§2.5.2).
+    /// Required for ArchitectureNode outputs ().
     /// </summary>
     public List<DownstreamHint> DownstreamHints { get; set; } = [];
 

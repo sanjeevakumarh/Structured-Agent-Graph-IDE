@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Resilience;
@@ -37,7 +37,7 @@ public class GeminiProvider : BaseHttpAgentProvider
     protected override object BuildRequestBody(string prompt, ModelConfig model) => new
     {
         contents = new[] { new { parts = new[] { new { text = prompt } } } },
-        // §2.3 Determinism: temperature=0 for consistent outputs
+        // Determinism: temperature=0 for consistent outputs
         generationConfig = new { maxOutputTokens = _maxTokens, temperature = 0.0 }
     };
 

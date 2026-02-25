@@ -78,26 +78,18 @@ public partial class ResultParser
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        // Try to extract issues array
-        if (root.TryGetProperty("issues", out var issuesArr) && issuesArr.ValueKind == JsonValueKind.Array)
+        // Root array: treat as a direct issues/items list
+        if (root.ValueKind == JsonValueKind.Array)
         {
-            foreach (var item in issuesArr.EnumerateArray())
-            {
-                result.Issues.Add(new Issue
-                {
-                    FilePath = item.TryGetProperty("filePath", out var fp) ? fp.GetString() ?? ""
-                             : item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
-                    Line = item.TryGetProperty("line", out var ln) ? ln.GetInt32() : 0,
-                    Severity = ParseSeverity(item.TryGetProperty("severity", out var sev) ? sev.GetString() : "medium"),
-                    Message = item.TryGetProperty("message", out var msg) ? msg.GetString() ?? ""
-                            : item.TryGetProperty("description", out var desc) ? desc.GetString() ?? "" : "",
-                    SuggestedFix = item.TryGetProperty("suggestedFix", out var fix) ? fix.GetString()
-                                 : item.TryGetProperty("fix", out var fx) ? fx.GetString() : null
-                });
-            }
+            ParseIssueItems(result, root);
+            _logger.LogDebug("Parsed JSON array block: {IssueCount} issues", result.Issues.Count);
+            return;
         }
 
-        // Try to extract changes/files array
+        // Root object: look for "issues" and "changes" properties
+        if (root.TryGetProperty("issues", out var issuesArr) && issuesArr.ValueKind == JsonValueKind.Array)
+            ParseIssueItems(result, issuesArr);
+
         if (root.TryGetProperty("changes", out var changesArr) && changesArr.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in changesArr.EnumerateArray())
@@ -116,6 +108,24 @@ public partial class ResultParser
 
         _logger.LogDebug("Parsed JSON block: {IssueCount} issues, {ChangeCount} changes",
             result.Issues.Count, result.Changes.Count);
+    }
+
+    private static void ParseIssueItems(AgentResult result, JsonElement array)
+    {
+        foreach (var item in array.EnumerateArray())
+        {
+            result.Issues.Add(new Issue
+            {
+                FilePath = item.TryGetProperty("filePath", out var fp) ? fp.GetString() ?? ""
+                         : item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
+                Line = item.TryGetProperty("line", out var ln) ? ln.GetInt32() : 0,
+                Severity = ParseSeverity(item.TryGetProperty("severity", out var sev) ? sev.GetString() : "medium"),
+                Message = item.TryGetProperty("message", out var msg) ? msg.GetString() ?? ""
+                        : item.TryGetProperty("description", out var desc) ? desc.GetString() ?? "" : "",
+                SuggestedFix = item.TryGetProperty("suggestedFix", out var fix) ? fix.GetString()
+                             : item.TryGetProperty("fix", out var fx) ? fx.GetString() : null
+            });
+        }
     }
 
     private static List<Issue> ParseCodeReviewIssues(string text)

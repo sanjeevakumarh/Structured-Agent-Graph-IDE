@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Resilience;
@@ -33,7 +33,7 @@ public class ClaudeProvider : BaseHttpAgentProvider
     {
         model       = model.ModelId,
         max_tokens  = _maxTokens,
-        temperature = 0,          // §2.3 Determinism
+        temperature = 0,          // Determinism
         messages    = new[] { new { role = "user", content = prompt } }
     };
 

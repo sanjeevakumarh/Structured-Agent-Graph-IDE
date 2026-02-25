@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -55,7 +55,46 @@ public class OllamaProvider : IAgentProvider
         });
 
     /// <summary>
-    ///  Load-aware routing:
+    /// Reads the response body before throwing so Ollama error messages
+    /// (e.g. "model 'xyz' not found, try pulling it first") appear in logs and DLQ.
+    /// When the error indicates a missing model, a prominent actionable log entry is
+    /// emitted to help operators identify and pull the required model.
+    /// </summary>
+    private static async Task EnsureSuccessAsync(
+        HttpResponseMessage response, ILogger logger, CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode) return;
+        var body = await response.Content.ReadAsStringAsync(ct);
+        string detail;
+        try
+        {
+            var doc = JsonDocument.Parse(body);
+            detail = doc.RootElement.TryGetProperty("error", out var e)
+                ? e.GetString() ?? body
+                : body;
+        }
+        catch { detail = body; }
+
+        // Emit an actionable log entry when Ollama reports a missing model so operators
+        // can immediately identify the fix without digging through HTTP error details.
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound &&
+            detail.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogError(
+                "Ollama model not found on {Server}. Detail: \"{Detail}\". " +
+                "Pull the missing model with: ollama pull <modelId>",
+                response.RequestMessage?.RequestUri?.GetLeftPart(UriPartial.Authority),
+                detail);
+        }
+
+        throw new HttpRequestException(
+            $"Ollama {(int)response.StatusCode} from {response.RequestMessage?.RequestUri}: {detail}",
+            inner: null,
+            statusCode: response.StatusCode);
+    }
+
+    /// <summary>
+    /// Load-aware routing:
     ///   1. Explicit model.Endpoint override (highest priority)
     ///   2. Health-monitor best host (warm VRAM → failover → any reachable)
     ///   3. Static model-to-server mapping  (falls back when monitor is absent/unreachable)
@@ -106,7 +145,7 @@ public class OllamaProvider : IAgentProvider
         _logger.LogDebug("Calling Ollama at {Endpoint} with model {Model}", endpoint, model.ModelId);
 
         var response = await handler.SendWithRetryAsync(CreateRequest, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, _logger, ct);
 
         var responseJson = await response.Content.ReadAsStringAsync(ct);
         var doc = JsonDocument.Parse(responseJson);
@@ -143,7 +182,7 @@ public class OllamaProvider : IAgentProvider
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
         var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, _logger, ct);
 
         using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);

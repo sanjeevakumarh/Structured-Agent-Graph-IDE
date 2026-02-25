@@ -1,4 +1,4 @@
-namespace SAGIDE.Core.Models;
+﻿namespace SAGIDE.Core.Models;
 
 /// <summary>
 /// Static definition of a workflow — parsed from YAML or built-in.
@@ -70,7 +70,7 @@ public class WorkflowStepDef
     public string ExitCodePolicy { get; set; } = "FAIL_ON_NONZERO";
 
     /// <summary>
-    /// Per-step wall-clock timeout in seconds for tool steps (§2.1 BaseNode timeout_sec).
+    /// Per-step wall-clock timeout in seconds for tool steps (BaseNode timeout_sec).
     /// 0 = no per-step timeout (global task execution timeout applies).
     /// </summary>
     public int TimeoutSec { get; set; } = 0;
@@ -118,10 +118,18 @@ public class WorkflowStepDef
     /// Supports {{step_id.output}} template variables.
     /// </summary>
     public string? ApprovalPrompt { get; set; }
+
+    // ── Shadow workspace step fields ───────────────────────────────────────────
+
+    /// <summary>Git ref to snapshot when provisioning a shadow worktree. Default "HEAD".</summary>
+    public string ShadowBranch { get; set; } = "HEAD";
+
+    /// <summary>Action on workspace_teardown: "promote" (apply shadow diff to real workspace) or "destroy" (discard). Default "promote".</summary>
+    public string ShadowAction { get; set; } = "promote";
 }
 
 /// <summary>
-/// Convergence policy for constraint-loop workflows (§2.2).
+/// Convergence policy for constraint-loop workflows ().
 /// Declare on any workflow that contains a feedback loop (next: back-edge).
 /// </summary>
 public class ConvergencePolicy
@@ -148,7 +156,7 @@ public class ConvergencePolicy
 
     /// <summary>
     /// When true, immediately escalates to HUMAN_APPROVAL if issues fail to decrease between
-    /// iterations — indicating mutually exclusive constraints (§2.2). Default: true.
+    /// iterations — indicating mutually exclusive constraints (). Default: true.
     /// </summary>
     public bool ContradictionDetection { get; set; } = true;
 }

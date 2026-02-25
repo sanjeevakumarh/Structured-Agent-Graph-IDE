@@ -1,4 +1,4 @@
-export interface PipeMessage {
+﻿export interface PipeMessage {
     type: string;
     requestId?: string;
     payload?: Buffer;
@@ -232,7 +232,7 @@ export interface RouterBranch {
 
 export interface WorkflowStepDef {
     id: string;
-    type: 'agent' | 'router' | 'tool' | 'constraint' | 'human_approval';
+    type: 'agent' | 'router' | 'tool' | 'constraint' | 'human_approval' | 'workspace_provision' | 'workspace_teardown';
     agent?: string;
     dependsOn: string[];
     prompt?: string;
@@ -252,6 +252,9 @@ export interface WorkflowStepDef {
     slaHours?: number;
     timeoutAction?: string;
     approvalPrompt?: string;
+    // shadow workspace step fields ()
+    shadowBranch?: string;
+    shadowAction?: string;
 }
 
 export interface ConvergencePolicy {

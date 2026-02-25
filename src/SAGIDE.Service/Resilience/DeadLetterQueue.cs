@@ -10,12 +10,13 @@ public class DeadLetterQueue
     private readonly ConcurrentDictionary<string, DeadLetterEntry> _entries = new();
     private readonly ITaskRepository? _repository;
     private readonly ILogger<DeadLetterQueue> _logger;
-    private readonly TimeSpan _retentionPeriod = TimeSpan.FromDays(7);
+    private readonly TimeSpan _retentionPeriod;
 
-    public DeadLetterQueue(ILogger<DeadLetterQueue> logger, ITaskRepository? repository = null)
+    public DeadLetterQueue(ILogger<DeadLetterQueue> logger, ITaskRepository? repository = null, int retentionDays = 7)
     {
         _logger = logger;
         _repository = repository;
+        _retentionPeriod = TimeSpan.FromDays(retentionDays);
     }
 
     public async Task LoadFromStoreAsync()

@@ -7,6 +7,7 @@ import { DlqTreeProvider } from '../views/DlqTreeProvider';
 import { DiagnosticsManager } from '../views/DiagnosticsManager';
 import { WorkflowExplorerProvider, WorkflowRunningItem } from '../views/WorkflowExplorerProvider';
 import { WorkflowGraphPanel } from '../views/WorkflowGraphPanel';
+import { PromptLibraryProvider, PromptItem, postJson } from '../views/PromptLibraryProvider';
 import { submitTaskCommand, submitTaskOnFilesCommand, getAllModels } from './SubmitTaskCommand';
 import { compareModelsCommand } from './CompareModelsCommand';
 import { runWorkflowCommand } from './RunWorkflowCommand';
@@ -35,7 +36,9 @@ export function registerCommands(
     dlqTree: DlqTreeProvider,
     diagnostics: DiagnosticsManager,
     comparisonTracker: ComparisonTracker,
-    workflowExplorer: WorkflowExplorerProvider
+    workflowExplorer: WorkflowExplorerProvider,
+    promptLibrary: PromptLibraryProvider,
+    restBaseUrl: string
 ): void {
     // Submit new task (with model picker)
     context.subscriptions.push(
@@ -734,6 +737,138 @@ export function registerCommands(
                     );
                 } catch (err) {
                     vscode.window.showErrorMessage(`Failed to ${approved ? 'approve' : 'reject'} step: ${err}`);
+                }
+            })
+    );
+
+    // ── Prompt Library Commands ───────────────────────────────────────────────
+
+    // Refresh the prompt library tree view
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.refreshPromptLibrary', async () => {
+            await promptLibrary.refresh();
+            log('Prompt library refreshed');
+        })
+    );
+
+    // Open prompt YAML file in editor
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.editPrompt',
+            async (domainOrItem?: string | PromptItem, name?: string) => {
+                let domain: string | undefined;
+                let promptName: string | undefined;
+
+                if (domainOrItem instanceof PromptItem) {
+                    domain     = domainOrItem.prompt.domain;
+                    promptName = domainOrItem.prompt.name;
+                } else {
+                    domain     = domainOrItem;
+                    promptName = name;
+                }
+
+                if (!domain || !promptName) {
+                    // Let the user pick from the library
+                    const all  = promptLibrary.getAll();
+                    const pick = await vscode.window.showQuickPick(
+                        all.map(p => ({ label: `${p.domain}/${p.name}`, description: p.description ?? '', data: p })),
+                        { placeHolder: 'Select a prompt to open' }
+                    );
+                    if (!pick) { return; }
+                    domain     = pick.data.domain;
+                    promptName = pick.data.name;
+                }
+
+                // Look for the file across workspace folders and common locations
+                const candidates: vscode.Uri[] = [];
+                for (const wf of vscode.workspace.workspaceFolders ?? []) {
+                    candidates.push(
+                        vscode.Uri.joinPath(wf.uri, 'prompts', domain, `${promptName}.yaml`),
+                        vscode.Uri.joinPath(wf.uri, '..', 'prompts', domain, `${promptName}.yaml`),
+                    );
+                }
+                for (const uri of candidates) {
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, { preview: false });
+                        return;
+                    } catch { /* try next */ }
+                }
+                vscode.window.showWarningMessage(
+                    `Prompt file not found: prompts/${domain}/${promptName}.yaml`);
+            })
+    );
+
+    // Run a prompt now via the REST API
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.runPrompt',
+            async (itemOrDomain?: PromptItem | string, name?: string) => {
+                let domain: string | undefined;
+                let promptName: string | undefined;
+
+                if (itemOrDomain instanceof PromptItem) {
+                    domain     = itemOrDomain.prompt.domain;
+                    promptName = itemOrDomain.prompt.name;
+                } else {
+                    domain     = itemOrDomain;
+                    promptName = name;
+                }
+
+                if (!domain || !promptName) {
+                    const all  = promptLibrary.getAll();
+                    const pick = await vscode.window.showQuickPick(
+                        all.map(p => ({
+                            label:       `${p.domain}/${p.name}`,
+                            description: p.description ?? '',
+                            detail:      p.hasSubtasks ? '$(graph) Multi-model' : (p.schedule ? `$(clock) ${p.schedule}` : ''),
+                            data:        p,
+                        })),
+                        { placeHolder: 'Select a prompt to run', matchOnDescription: true }
+                    );
+                    if (!pick) { return; }
+                    domain     = pick.data.domain;
+                    promptName = pick.data.name;
+                }
+
+                // Optionally collect variable overrides
+                const overrideInput = await vscode.window.showInputBox({
+                    prompt: 'Optional: variable overrides as key=value pairs (comma-separated)',
+                    placeHolder: 'e.g. drop_threshold=3, max_stocks=5 (leave blank for defaults)',
+                });
+                const variables: Record<string, string> = {};
+                if (overrideInput?.trim()) {
+                    for (const part of overrideInput.split(',')) {
+                        const eq = part.indexOf('=');
+                        if (eq > 0) {
+                            variables[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+                        }
+                    }
+                }
+
+                try {
+                    const resp = await postJson<Record<string, unknown>>(
+                        restBaseUrl,
+                        `/api/prompts/${domain}/${promptName}/run`,
+                        Object.keys(variables).length > 0 ? variables : {}
+                    );
+
+                    const mode    = resp['mode'] as string | undefined;
+                    const taskId  = resp['taskId'] as string | undefined;
+                    const instId  = resp['instanceId'] as string | undefined;
+
+                    if (mode === 'subtask_coordinator') {
+                        vscode.window.showInformationMessage(
+                            `$(graph) Prompt "${domain}/${promptName}" dispatched to SubtaskCoordinator`);
+                    } else if (taskId) {
+                        vscode.window.showInformationMessage(
+                            `$(play) Prompt "${domain}/${promptName}" submitted — Task ${taskId.substring(0, 8)}`);
+                    } else {
+                        vscode.window.showInformationMessage(
+                            `$(check) Prompt "${domain}/${promptName}" accepted by service`);
+                    }
+
+                    log(`Prompt run: ${domain}/${promptName} — ${JSON.stringify(resp)}`);
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Failed to run prompt: ${err}`);
                 }
             })
     );

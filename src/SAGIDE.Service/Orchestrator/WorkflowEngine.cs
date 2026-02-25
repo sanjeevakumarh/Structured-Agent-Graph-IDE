@@ -1,10 +1,11 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
+using SAGIDE.Service.Infrastructure;
 using SAGIDE.Service.Resilience;
 
 namespace SAGIDE.Service.Orchestrator;
@@ -36,6 +37,7 @@ public class WorkflowEngine
     private readonly AgentLimitsConfig _agentLimitsConfig;
     private readonly TaskAffinitiesConfig _taskAffinitiesConfig;
     private readonly WorkflowPolicyEngine _policyEngine;
+    private readonly GitService _gitService;
     private readonly IWorkflowRepository? _workflowRepository;
     private readonly ILogger<WorkflowEngine> _logger;
 
@@ -63,6 +65,7 @@ public class WorkflowEngine
         AgentLimitsConfig agentLimitsConfig,
         TaskAffinitiesConfig taskAffinitiesConfig,
         WorkflowPolicyEngine policyEngine,
+        GitService gitService,
         ILogger<WorkflowEngine> logger,
         IWorkflowRepository? workflowRepository = null)
     {
@@ -71,6 +74,7 @@ public class WorkflowEngine
         _agentLimitsConfig    = agentLimitsConfig;
         _taskAffinitiesConfig = taskAffinitiesConfig;
         _policyEngine         = policyEngine;
+        _gitService           = gitService;
         _workflowRepository   = workflowRepository;
         _logger               = logger;
     }
@@ -484,15 +488,10 @@ public class WorkflowEngine
                      && s.Status is WorkflowStepStatus.Running or WorkflowStepStatus.Pending)
             .ToList();
 
-        var submittedTaskIds = submittedSteps
-            .Select(s => s.TaskId!)
-            .Select(id => id[..Math.Min(8, id.Length)])
-            .ToList();
-
         _logger.LogInformation(
             "Workflow '{Name}' cancelled (instance {Id}) — cancelling {N} active task(s): {TaskIds}",
             inst.DefinitionName, instanceId, submittedSteps.Count,
-            string.Join(", ", submittedTaskIds));
+            string.Join(", ", submittedSteps.Select(s => s.TaskId is { } tid ? tid[..Math.Min(8, tid.Length)] : "?")));
 
         foreach (var stepExec in submittedSteps)
             await _orchestrator.CancelTaskAsync(stepExec.TaskId!, ct);
@@ -586,7 +585,7 @@ public class WorkflowEngine
                     _logger.LogWarning(
                         "Workflow {Id} step '{Target}' contradiction detected — escalating to HUMAN_APPROVAL",
                         inst.InstanceId, loopTargetDef.Id);
-                    // contradiction always escalates to HUMAN_APPROVAL regardless of escalation_target
+                    // Spec contradiction always escalates to HUMAN_APPROVAL regardless of escalation_target
                     await EscalateLoopAsync(inst, def, loopTargetDef, loopTargetExec,
                         agentType, msg, "HUMAN_APPROVAL");
                     return;
@@ -617,7 +616,7 @@ public class WorkflowEngine
                         ResetLoopBodyForNewIteration(loopTargetDef.Id, inst, def);
                     // FAILING_NODES_ONLY: only the loop target was reset above (default behaviour)
 
-                    //  ConvergenceHintMemory — inject causal context from the prior iteration
+                    // ConvergenceHintMemory — inject causal context from the prior iteration
                     if (policy?.ConvergenceHintMemory == true)
                         InjectConvergenceHints(completedStep, completedExec, loopTargetExec, inst);
 
@@ -653,7 +652,7 @@ public class WorkflowEngine
     private async Task SubmitReadyStepsAsync(
         WorkflowInstance inst, WorkflowDefinition def, CancellationToken ct)
     {
-        // ── Phase 1: drain synchronous steps (routers + constraints) ──────────
+        // ── Pass 1: drain synchronous steps (routers + constraints) ───────────
         // Loop until no more synchronous steps become ready; this handles chains
         // where a constraint's completion immediately unlocks another constraint.
         bool anySync;
@@ -709,10 +708,36 @@ public class WorkflowEngine
                 ExecuteContextRetrievalStep(ctxStep, inst);
                 anySync = true;
             }
+
+            // workspace_provision — creates isolated shadow worktree ()
+            var readyProvisions = def.Steps
+                .Where(s => s.Type == "workspace_provision"
+                         && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
+                         && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
+                                                 && e.Status == WorkflowStepStatus.Completed))
+                .ToList();
+            foreach (var ps in readyProvisions)
+            {
+                await ExecuteWorkspaceProvisionStepAsync(ps, inst, def, ct);
+                anySync = true;
+            }
+
+            // workspace_teardown — promotes or destroys shadow worktree ()
+            var readyTeardowns = def.Steps
+                .Where(s => s.Type == "workspace_teardown"
+                         && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
+                         && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
+                                                 && e.Status == WorkflowStepStatus.Completed))
+                .ToList();
+            foreach (var ts in readyTeardowns)
+            {
+                await ExecuteWorkspaceTeardownStepAsync(ts, inst, def, ct);
+                anySync = true;
+            }
         }
         while (anySync);
 
-        // ── Phase 1b: activate human_approval gates ──────────────────────────
+        // ── Pass 1b: activate human_approval gates ───────────────────────────
         // When all dependencies are complete the gate transitions to WaitingForApproval
         // and the workflow is effectively paused for that branch until approved/rejected.
         var readyApprovals = def.Steps
@@ -745,7 +770,7 @@ public class WorkflowEngine
                 ScheduleApprovalTimeout(inst.InstanceId, approvalStep.Id, approvalStep.SlaHours, approvalStep.TimeoutAction, ct);
         }
 
-        // ── Phase 2: submit async steps (tools + agents) ──────────────────────
+        // ── Pass 2: submit async steps (tools + agents) ───────────────────────
 
         var readyTools = def.Steps
             .Where(s => s.Type == "tool"
@@ -969,7 +994,7 @@ public class WorkflowEngine
     // ── Context-retrieval step execution ──────────────────────────────────────
 
     /// <summary>
-    ///  ContextRetrievalNode: aggregates outputs from source_steps and injects
+    /// ContextRetrievalNode: aggregates outputs from source_steps and injects
     /// the concatenated text into inst.InputContext[context_var_name].
     /// Runs synchronously in the constraint drain loop — no I/O required.
     /// Downstream prompts can reference the result via {{context_var_name}}.
@@ -1013,6 +1038,138 @@ public class WorkflowEngine
         RecordAudit(exec, WorkflowStepStatus.Completed, summary);
         _logger.LogInformation("Workflow {Id} context_retrieval '{StepId}': {Summary}",
             inst.InstanceId, stepDef.Id, summary);
+    }
+
+    // ── Shadow workspace step handlers () ─────────────────────────────────
+
+    private async Task ExecuteWorkspaceProvisionStepAsync(
+        WorkflowStepDef stepDef, WorkflowInstance inst, WorkflowDefinition def, CancellationToken ct)
+    {
+        var exec = inst.StepExecutions[stepDef.Id];
+        exec.StartedAt = DateTime.UtcNow;
+        RecordAudit(exec, WorkflowStepStatus.Running);
+
+        try
+        {
+            if (string.IsNullOrEmpty(inst.WorkspacePath) || !_gitService.IsGitRepo(inst.WorkspacePath))
+            {
+                exec.Output      = "Shadow workspace skipped: not a git repository.";
+                exec.CompletedAt = DateTime.UtcNow;
+                RecordAudit(exec, WorkflowStepStatus.Completed, exec.Output);
+                _logger.LogWarning("Workflow {Id} workspace_provision skipped: {WorkspacePath} is not a git repo",
+                    inst.InstanceId, inst.WorkspacePath ?? "(none)");
+                await PersistInstanceAsync(inst);
+                BroadcastUpdate(inst);
+                return;
+            }
+
+            var shadowPath = await _gitService.ProvisionShadowAsync(
+                inst.WorkspacePath, inst.InstanceId, stepDef.ShadowBranch, ct);
+
+            if (shadowPath is null)
+            {
+                exec.Output      = "Shadow workspace skipped: git not available.";
+                exec.CompletedAt = DateTime.UtcNow;
+                RecordAudit(exec, WorkflowStepStatus.Completed, exec.Output);
+                await PersistInstanceAsync(inst);
+                BroadcastUpdate(inst);
+                return;
+            }
+
+            inst.ShadowWorkspacePath = shadowPath;
+            inst.InputContext["shadow_path"] = shadowPath;
+
+            exec.Output      = $"Shadow worktree provisioned at: {shadowPath}";
+            exec.CompletedAt = DateTime.UtcNow;
+            RecordAudit(exec, WorkflowStepStatus.Completed, exec.Output);
+            _logger.LogInformation("Workflow {Id} shadow workspace provisioned: {Path}", inst.InstanceId, shadowPath);
+
+            await PersistInstanceAsync(inst);
+            BroadcastUpdate(inst);
+        }
+        catch (Exception ex)
+        {
+            exec.Error       = $"workspace_provision failed: {ex.Message}";
+            exec.CompletedAt = DateTime.UtcNow;
+            RecordAudit(exec, WorkflowStepStatus.Failed, exec.Error);
+            _logger.LogError(ex, "Workflow {Id} workspace_provision threw", inst.InstanceId);
+            SkipDownstream(stepDef.Id, inst, def);
+            await PersistInstanceAsync(inst);
+            BroadcastUpdate(inst);
+        }
+    }
+
+    private async Task ExecuteWorkspaceTeardownStepAsync(
+        WorkflowStepDef stepDef, WorkflowInstance inst, WorkflowDefinition def, CancellationToken ct)
+    {
+        var exec = inst.StepExecutions[stepDef.Id];
+        exec.StartedAt = DateTime.UtcNow;
+        RecordAudit(exec, WorkflowStepStatus.Running);
+
+        try
+        {
+            if (string.IsNullOrEmpty(inst.ShadowWorkspacePath))
+            {
+                exec.Output      = "No shadow workspace to tear down.";
+                exec.CompletedAt = DateTime.UtcNow;
+                RecordAudit(exec, WorkflowStepStatus.Completed, exec.Output);
+                await PersistInstanceAsync(inst);
+                BroadcastUpdate(inst);
+                return;
+            }
+
+            var shadowPath = inst.ShadowWorkspacePath;
+
+            if (stepDef.ShadowAction == "promote")
+            {
+                var (success, summary) = await _gitService.PromoteShadowAsync(
+                    inst.WorkspacePath!, shadowPath, ct);
+
+                if (!success)
+                {
+                    exec.Error       = $"workspace_teardown promote failed: {summary}";
+                    exec.CompletedAt = DateTime.UtcNow;
+                    RecordAudit(exec, WorkflowStepStatus.Failed, exec.Error);
+                    _logger.LogError("Workflow {Id} workspace_teardown promote failed: {Err}", inst.InstanceId, summary);
+                    SkipDownstream(stepDef.Id, inst, def);
+                    inst.ShadowWorkspacePath = null;
+                    inst.InputContext.Remove("shadow_path");
+                    await PersistInstanceAsync(inst);
+                    BroadcastUpdate(inst);
+                    return;
+                }
+
+                exec.Output      = $"Shadow changes promoted to workspace.\n{summary}";
+            }
+            else
+            {
+                // destroy
+                await _gitService.DestroyShadowAsync(inst.WorkspacePath ?? "", shadowPath, ct);
+                exec.Output = "Shadow workspace destroyed.";
+            }
+
+            inst.ShadowWorkspacePath = null;
+            inst.InputContext.Remove("shadow_path");
+            exec.CompletedAt = DateTime.UtcNow;
+            RecordAudit(exec, WorkflowStepStatus.Completed, exec.Output);
+            _logger.LogInformation("Workflow {Id} workspace_teardown completed (action: {Action})",
+                inst.InstanceId, stepDef.ShadowAction);
+
+            await PersistInstanceAsync(inst);
+            BroadcastUpdate(inst);
+        }
+        catch (Exception ex)
+        {
+            exec.Error       = $"workspace_teardown failed: {ex.Message}";
+            exec.CompletedAt = DateTime.UtcNow;
+            RecordAudit(exec, WorkflowStepStatus.Failed, exec.Error);
+            _logger.LogError(ex, "Workflow {Id} workspace_teardown threw", inst.InstanceId);
+            inst.ShadowWorkspacePath = null;
+            inst.InputContext.Remove("shadow_path");
+            SkipDownstream(stepDef.Id, inst, def);
+            await PersistInstanceAsync(inst);
+            BroadcastUpdate(inst);
+        }
     }
 
     private (bool Passed, string Reason) EvaluateConstraintExpr(string expr, WorkflowInstance inst)
@@ -1381,9 +1538,20 @@ public class WorkflowEngine
         if (_workflowRepository is null) return;
         try
         {
+            // Auto-destroy shadow on terminal failure/cancel (fire-and-forget)
+            if (inst.Status is WorkflowStatus.Failed or WorkflowStatus.Cancelled
+                && !string.IsNullOrEmpty(inst.ShadowWorkspacePath))
+            {
+                var shadow = inst.ShadowWorkspacePath;
+                var wsPath = inst.WorkspacePath ?? "";
+                inst.ShadowWorkspacePath = null;
+                inst.InputContext.Remove("shadow_path");
+                _ = Task.Run(() => _gitService.DestroyShadowAsync(wsPath, shadow, CancellationToken.None));
+            }
+
             await _workflowRepository.SaveWorkflowInstanceAsync(inst);
 
-            // C3: Schedule deferred in-memory cleanup so the UI can still query
+            // Schedule deferred in-memory cleanup so the UI can still query
             // the instance for ~30 s after it reaches a terminal state.
             if (inst.Status is WorkflowStatus.Completed or WorkflowStatus.Failed or WorkflowStatus.Cancelled)
                 ScheduleInstanceCleanup(inst.InstanceId);
@@ -1395,7 +1563,7 @@ public class WorkflowEngine
     }
 
     /// <summary>
-    /// C3: Removes a terminal workflow instance from the in-memory active set after a
+    /// Removes a terminal workflow instance from the in-memory active set after a
     /// short grace period (so the UI can still query it post-completion).
     /// The SemaphoreSlim in _locks is NOT disposed here — another thread may have already
     /// retrieved a reference to it via GetOrAdd and be about to call WaitAsync.
@@ -1439,7 +1607,7 @@ public class WorkflowEngine
     // ── Convergence loop helpers ───────────────────────────────────────────────
 
     /// <summary>
-    /// Shared escalation handler for convergence loop failures .
+    /// Shared escalation handler for convergence loop failures ().
     /// Handles HUMAN_APPROVAL, DLQ, and CANCEL escalation targets.
     /// </summary>
     private async Task EscalateLoopAsync(
@@ -1486,7 +1654,7 @@ public class WorkflowEngine
     }
 
     /// <summary>
-    ///  partial_retry_scope = FULL_WORKFLOW: reset every non-terminal step to Pending
+    /// partial_retry_scope = FULL_WORKFLOW: reset every non-terminal step to Pending
     /// so the entire workflow re-runs from the root. The loop target itself is excluded
     /// because it was already reset by the caller.
     /// </summary>
@@ -1508,7 +1676,7 @@ public class WorkflowEngine
     }
 
     /// <summary>
-    ///  partial_retry_scope = FROM_CODEGEN: reset all steps that are downstream
+    /// partial_retry_scope = FROM_CODEGEN: reset all steps that are downstream
     /// (transitively dependent) of the loop target — the "loop body" — so the full
     /// loop body re-runs, not just the immediate target.
     /// The loop target itself is excluded because the caller already reset it.
@@ -1552,7 +1720,7 @@ public class WorkflowEngine
     }
 
     /// <summary>
-    ///  ConvergenceHintMemory: builds a structured context variable from the prior
+    /// ConvergenceHintMemory: builds a structured context variable from the prior
     /// iteration's failure data and injects it into the workflow's InputContext as
     /// "convergence_hints". The refactor step's prompt template can reference {{convergence_hints}}.
     /// </summary>

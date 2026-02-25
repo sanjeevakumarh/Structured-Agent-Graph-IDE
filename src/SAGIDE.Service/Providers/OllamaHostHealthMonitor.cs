@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 namespace SAGIDE.Service.Providers;
 
 /// <summary>
-///  Resource-Aware Multi-Host Scheduler.
+/// Resource-Aware Multi-Host Scheduler.
 /// Background service that periodically polls every configured Ollama server's /api/ps
 /// endpoint to determine which models are currently loaded in VRAM.
 ///
@@ -70,7 +70,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     {
         var list = candidates.Select(u => u.TrimEnd('/')).Distinct().ToList();
 
-        //  honour static routing if the preferred host is reachable
+        // rule 1: honour static routing if the preferred host is reachable
         var normalized = preferredUrl.TrimEnd('/');
         if (_state.TryGetValue(normalized, out var preferred) && preferred.IsReachable)
             return normalized;
@@ -87,7 +87,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
             return warmHost;
         }
 
-        //  any reachable candidate
+        // rule 3: any reachable candidate
         var anyReachable = list.FirstOrDefault(url =>
             _state.TryGetValue(url, out var s) && s.IsReachable);
         if (anyReachable is not null)
@@ -106,6 +106,13 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     /// <summary>Returns the models currently loaded in VRAM on the given server.</summary>
     public IReadOnlyList<string> GetLoadedModels(string baseUrl)
         => _state.TryGetValue(baseUrl.TrimEnd('/'), out var s) ? s.LoadedModels : [];
+
+    /// <summary>
+    /// Test seam: directly sets the observed state for a host without performing an HTTP poll.
+    /// Only used by unit tests via <c>[assembly: InternalsVisibleTo("SAGIDE.Service.Tests")]</c>.
+    /// </summary>
+    internal void SimulateHostState(string baseUrl, bool isReachable, IReadOnlyList<string> loadedModels)
+        => _state[baseUrl.TrimEnd('/')] = new HostState(isReachable, loadedModels, DateTime.UtcNow);
 
     // ── Private polling ───────────────────────────────────────────────────────
 
@@ -151,7 +158,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
                     "Ollama {Url}: {Count} model(s) in VRAM: {Models}",
                     baseUrl, models.Count, string.Join(", ", models));
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             var wasReachable = _state.TryGetValue(baseUrl, out var prev) && prev.IsReachable;
             _state[baseUrl] = new HostState(false, [], DateTime.UtcNow);

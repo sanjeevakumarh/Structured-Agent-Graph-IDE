@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>SAGIDE Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
+      --text: #e0e0e0; --muted: #888; --accent: #5b8ef0;
+      --green: #4caf82; --yellow: #e6a817; --red: #e05a5a;
+      --purple: #9b72cf; --radius: 8px; --mono: 'Cascadia Code', 'Fira Code', monospace;
+    }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif;
+           font-size: 14px; line-height: 1.5; min-height: 100vh; }
+
+    /* ── Layout ─────────────────────────────────── */
+    header { display: flex; align-items: center; gap: 12px; padding: 14px 24px;
+             background: var(--surface); border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+    #status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red);
+                  transition: background .3s; flex-shrink: 0; }
+    #status-dot.up { background: var(--green); }
+    #status-text { font-size: 12px; color: var(--muted); }
+    header .spacer { flex: 1; }
+    #refresh-btn { font-size: 12px; padding: 5px 12px; border-radius: var(--radius);
+                   border: 1px solid var(--border); background: transparent; color: var(--accent);
+                   cursor: pointer; }
+    #refresh-btn:hover { background: var(--border); }
+
+    nav { display: flex; gap: 2px; padding: 0 24px; background: var(--surface);
+          border-bottom: 1px solid var(--border); }
+    nav button { font-size: 13px; padding: 10px 16px; border: none; background: none;
+                 color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+    nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    /* ── Cards / Tables ────────────────────────── */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; }
+    .card-header { display: flex; align-items: center; justify-content: space-between;
+                   padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 500; }
+    .card-body { padding: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+         text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+    td { padding: 8px 12px; border-bottom: 1px solid #1e2130; font-size: 13px; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1e2130; }
+    .mono { font-family: var(--mono); font-size: 12px; }
+    .empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+
+    /* ── Badges ────────────────────────────────── */
+    .badge { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 4px;
+             font-weight: 500; }
+    .badge-green  { background: #1a3a2a; color: var(--green); }
+    .badge-yellow { background: #3a2d0a; color: var(--yellow); }
+    .badge-red    { background: #3a1a1a; color: var(--red); }
+    .badge-blue   { background: #1a2a4a; color: var(--accent); }
+    .badge-purple { background: #251a3a; color: var(--purple); }
+    .badge-gray   { background: #252830; color: var(--muted); }
+
+    /* ── Run Prompt form ────────────────────────── */
+    .form-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-start; }
+    select, input[type=text] {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: var(--radius); padding: 7px 10px; font-size: 13px; flex: 1; }
+    select:focus, input:focus { outline: none; border-color: var(--accent); }
+    .btn { padding: 7px 16px; border-radius: var(--radius); border: none; cursor: pointer;
+           font-size: 13px; font-weight: 500; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #4a7de0; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 5px; border: 1px solid var(--border);
+              background: transparent; color: var(--accent); cursor: pointer; }
+    .btn-sm:hover { background: var(--border); }
+    .btn-danger { border-color: var(--red); color: var(--red); }
+
+    /* ── Output modal ───────────────────────────── */
+    #modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+                      z-index: 100; align-items: center; justify-content: center; }
+    #modal-backdrop.open { display: flex; }
+    #modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+             width: min(860px, 95vw); max-height: 80vh; display: flex; flex-direction: column; }
+    #modal-title { padding: 14px 16px; font-weight: 600; border-bottom: 1px solid var(--border);
+                   display: flex; justify-content: space-between; align-items: center; }
+    #modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+    #modal-body { padding: 16px; overflow-y: auto; flex: 1; }
+    #modal-body pre { font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+                      word-break: break-word; line-height: 1.6; }
+
+    /* ── Search / Filter bar ─────────────────────── */
+    .filter-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+    .filter-bar input { max-width: 280px; }
+
+    /* ── Toast ──────────────────────────────────── */
+    #toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface);
+             border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 16px;
+             font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none;
+             max-width: 340px; z-index: 200; }
+    #toast.show { opacity: 1; }
+
+    /* ── Reports ─────────────────────────────────── */
+    .report-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .report-card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+                   padding: 12px; cursor: pointer; transition: border-color .2s; }
+    .report-card:hover { border-color: var(--accent); }
+    .report-card .name { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+    .report-card .meta { font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div id="status-dot"></div>
+  <h1>SAGIDE</h1>
+  <span id="status-text">connecting…</span>
+  <div class="spacer"></div>
+  <button id="refresh-btn" onclick="refreshAll()">Refresh</button>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('tasks')">Tasks</button>
+  <button onclick="showTab('prompts')">Prompts</button>
+  <button onclick="showTab('reports')">Reports</button>
+  <button onclick="showTab('workflows')">Workflows</button>
+</nav>
+
+<main>
+
+  <!-- ── Tasks panel ─────────────────────────────── -->
+  <div id="panel-tasks" class="panel active">
+    <div class="card">
+      <div class="card-header">
+        <span>Recent Tasks</span>
+        <div class="filter-bar" style="margin:0">
+          <input id="task-filter" type="text" placeholder="Filter by description…" oninput="filterTasks()"/>
+        </div>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table>
+          <thead><tr>
+            <th>ID</th><th>Type</th><th>Model</th><th>Description</th>
+            <th>Status</th><th>Created</th><th></th>
+          </tr></thead>
+          <tbody id="tasks-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Prompts panel ───────────────────────────── -->
+  <div id="panel-prompts" class="panel">
+    <div class="card">
+      <div class="card-header">
+        <span>Prompt Library</span>
+      </div>
+      <div class="card-body">
+        <div class="form-row">
+          <select id="run-domain"></select>
+          <select id="run-name"></select>
+          <input id="run-vars" type="text" placeholder='Variables: key=val, key2=val2'/>
+          <button class="btn btn-primary" onclick="runPrompt()">Run</button>
+        </div>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table>
+          <thead><tr>
+            <th>Domain</th><th>Name</th><th>Schedule</th><th>Subtasks</th><th>Description</th>
+          </tr></thead>
+          <tbody id="prompts-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Reports panel ──────────────────────────── -->
+  <div id="panel-reports" class="panel">
+    <div class="card">
+      <div class="card-header" id="reports-breadcrumb">Reports</div>
+      <div class="card-body" id="reports-body">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Workflows panel ────────────────────────── -->
+  <div id="panel-workflows" class="panel">
+    <div class="card">
+      <div class="card-header"><span>Workflow Instances</span></div>
+      <div class="card-body" style="padding:0">
+        <table>
+          <thead><tr>
+            <th>ID</th><th>Definition</th><th>Status</th><th>Created</th><th>Updated</th>
+          </tr></thead>
+          <tbody id="workflows-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ── Modal ───────────────────────────────────────── -->
+<div id="modal-backdrop" onclick="closeModal(event)">
+  <div id="modal">
+    <div id="modal-title">
+      <span id="modal-title-text">Output</span>
+      <button id="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div id="modal-body"><pre id="modal-pre"></pre></div>
+  </div>
+</div>
+
+<!-- ── Toast ───────────────────────────────────────── -->
+<div id="toast"></div>
+
+<script>
+const API = '';  // same origin
+
+// ── Utilities ─────────────────────────────────────────
+async function apiFetch(path, opts) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json().catch(() => r.text());
+}
+
+function showToast(msg, err) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = err ? 'var(--red)' : 'var(--green)';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function statusBadge(s) {
+  const map = {
+    Completed: 'badge-green', Running: 'badge-blue', Queued: 'badge-yellow',
+    Failed: 'badge-red', Cancelled: 'badge-gray', WaitingForApproval: 'badge-purple',
+    completed: 'badge-green', running: 'badge-blue', failed: 'badge-red',
+    paused: 'badge-yellow', cancelled: 'badge-gray',
+  };
+  return `<span class="badge ${map[s] || 'badge-gray'}">${s}</span>`;
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, { month:'short', day:'numeric',
+    hour:'2-digit', minute:'2-digit' });
+}
+
+function openModal(title, content) {
+  document.getElementById('modal-title-text').textContent = title;
+  document.getElementById('modal-pre').textContent = content;
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+function closeModal(e) {
+  if (!e || e.target === document.getElementById('modal-backdrop'))
+    document.getElementById('modal-backdrop').classList.remove('open');
+}
+
+// ── Tab navigation ────────────────────────────────────
+let activeTab = 'tasks';
+function showTab(name) {
+  activeTab = name;
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  event.target.classList.add('active');
+  loadTab(name);
+}
+
+function loadTab(name) {
+  if (name === 'tasks')     loadTasks();
+  if (name === 'prompts')   loadPrompts();
+  if (name === 'reports')   loadReports();
+  if (name === 'workflows') loadWorkflows();
+}
+
+async function refreshAll() {
+  checkHealth();
+  loadTab(activeTab);
+}
+
+// ── Health ────────────────────────────────────────────
+async function checkHealth() {
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  try {
+    const data = await apiFetch('/api/health');
+    dot.classList.add('up');
+    text.textContent = typeof data === 'string' ? data : 'online';
+  } catch {
+    dot.classList.remove('up');
+    text.textContent = 'service offline';
+  }
+}
+
+// ── Tasks ─────────────────────────────────────────────
+let _allTasks = [];
+async function loadTasks() {
+  const tbody = document.getElementById('tasks-body');
+  try {
+    _allTasks = await apiFetch('/api/tasks?limit=50');
+    renderTasks(_allTasks);
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">Error: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTasks(tasks) {
+  const tbody = document.getElementById('tasks-body');
+  if (!tasks.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No tasks</td></tr>'; return; }
+  tbody.innerHTML = tasks.map(t => {
+    const shortId = t.id.substring(0, 8);
+    const desc = (t.description || '').substring(0, 60) + (t.description?.length > 60 ? '…' : '');
+    const canCancel = t.status === 'Running' || t.status === 'Queued';
+    return `<tr>
+      <td class="mono">${shortId}</td>
+      <td>${t.agentType || '—'}</td>
+      <td class="mono">${(t.modelId || '').split(':')[0]}</td>
+      <td>${desc}</td>
+      <td>${statusBadge(t.status)}</td>
+      <td>${fmtTime(t.createdAt)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-sm" onclick="viewTask('${t.id}')">View</button>
+        ${canCancel ? `<button class="btn-sm btn-danger" onclick="cancelTask('${t.id}')">Cancel</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function filterTasks() {
+  const q = document.getElementById('task-filter').value.toLowerCase();
+  renderTasks(_allTasks.filter(t =>
+    (t.description || '').toLowerCase().includes(q) ||
+    (t.status || '').toLowerCase().includes(q) ||
+    t.id.toLowerCase().includes(q)
+  ));
+}
+
+async function viewTask(id) {
+  try {
+    const [task, result] = await Promise.all([
+      apiFetch(`/api/tasks/${id}`),
+      apiFetch(`/api/results/${id}`).catch(() => null),
+    ]);
+    const out = [
+      `Status:  ${task.status}`,
+      `Agent:   ${task.agentType}   Model: ${task.modelId}`,
+      `Created: ${fmtTime(task.createdAt)}`,
+      result ? `\n── Output ──\n${result.output || result.errorMessage || '(empty)'}` : '',
+    ].filter(Boolean).join('\n');
+    openModal(`Task ${id.substring(0,8)}`, out);
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function cancelTask(id) {
+  try {
+    await fetch(`${API}/api/tasks/${id}`, { method: 'DELETE' });
+    showToast('Task cancelled');
+    loadTasks();
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Prompts ───────────────────────────────────────────
+let _prompts = [];
+async function loadPrompts() {
+  const tbody = document.getElementById('prompts-body');
+  try {
+    _prompts = await apiFetch('/api/prompts');
+    renderPrompts(_prompts);
+    populateRunSelects(_prompts);
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
+  }
+}
+
+function renderPrompts(prompts) {
+  const tbody = document.getElementById('prompts-body');
+  if (!prompts.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No prompts</td></tr>'; return; }
+  tbody.innerHTML = prompts.map(p => `<tr>
+    <td><span class="badge badge-purple">${p.domain}</span></td>
+    <td>${p.name}</td>
+    <td class="mono">${p.schedule || '—'}</td>
+    <td>${p.hasSubtasks ? '<span class="badge badge-blue">multi-model</span>' : '—'}</td>
+    <td style="color:var(--muted)">${(p.description || '').substring(0, 80)}</td>
+  </tr>`).join('');
+}
+
+function populateRunSelects(prompts) {
+  const domains = [...new Set(prompts.map(p => p.domain))].sort();
+  const domSel  = document.getElementById('run-domain');
+  domSel.innerHTML = domains.map(d => `<option value="${d}">${d}</option>`).join('');
+  domSel.onchange = () => updateNameSelect(prompts, domSel.value);
+  updateNameSelect(prompts, domains[0]);
+}
+
+function updateNameSelect(prompts, domain) {
+  const names = prompts.filter(p => p.domain === domain).map(p => p.name);
+  document.getElementById('run-name').innerHTML =
+    names.map(n => `<option value="${n}">${n}</option>`).join('');
+}
+
+async function runPrompt() {
+  const domain = document.getElementById('run-domain').value;
+  const name   = document.getElementById('run-name').value;
+  const rawVars = document.getElementById('run-vars').value.trim();
+  const vars = {};
+  if (rawVars) {
+    rawVars.split(',').forEach(pair => {
+      const [k, ...rest] = pair.trim().split('=');
+      if (k && rest.length) vars[k.trim()] = rest.join('=').trim();
+    });
+  }
+  try {
+    const resp = await fetch(`${API}/api/prompts/${domain}/${name}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(vars),
+    });
+    const data = await resp.json().catch(() => ({}));
+    showToast(data.taskId ? `Submitted: ${data.taskId.substring(0,8)}` : 'Accepted (coordinator mode)');
+    setTimeout(loadTasks, 500);
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Reports ───────────────────────────────────────────
+let _reportDomain = null;
+async function loadReports(domain) {
+  _reportDomain = domain || null;
+  const body = document.getElementById('reports-body');
+  const crumb = document.getElementById('reports-breadcrumb');
+
+  if (!domain) {
+    crumb.innerHTML = 'Reports';
+    try {
+      const domains = await apiFetch('/api/reports');
+      if (!domains.length) { body.innerHTML = '<div class="empty">No reports yet</div>'; return; }
+      body.innerHTML = `<div class="report-list">${domains.map(d => `
+        <div class="report-card" onclick="loadReports('${d.domain}')">
+          <div class="name">${d.domain}</div>
+          <div class="meta">${d.fileCount} file${d.fileCount === 1 ? '' : 's'}</div>
+        </div>`).join('')}</div>`;
+    } catch (e) { body.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+  } else {
+    crumb.innerHTML = `<span onclick="loadReports()" style="cursor:pointer;color:var(--accent)">Reports</span> / ${domain}`;
+    try {
+      const files = await apiFetch(`/api/reports/${domain}`);
+      if (!files.length) { body.innerHTML = '<div class="empty">No reports in this domain</div>'; return; }
+      body.innerHTML = `<div class="report-list">${files.map(f => `
+        <div class="report-card" onclick="openReport('${domain}','${f.filename}')">
+          <div class="name">${f.filename}</div>
+          <div class="meta">${(f.sizeBytes/1024).toFixed(1)} KB · ${fmtTime(f.lastModified)}</div>
+        </div>`).join('')}</div>`;
+    } catch (e) { body.innerHTML = `<div class="empty">Error: ${e.message}</div>`; }
+  }
+}
+
+async function openReport(domain, filename) {
+  try {
+    const r = await fetch(`${API}/api/reports/${domain}/${filename}`);
+    const text = await r.text();
+    openModal(filename, text);
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Workflows ─────────────────────────────────────────
+async function loadWorkflows() {
+  const tbody = document.getElementById('workflows-body');
+  try {
+    const data = await apiFetch('/api/tasks?limit=50');
+    // Filter workflow-related tasks or show all recent
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">Workflow view coming soon — use the VSCode sidebar for now</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// ── Init ──────────────────────────────────────────────
+checkHealth();
+loadTasks();
+setInterval(checkHealth, 30_000);
+setInterval(() => { if (activeTab === 'tasks') loadTasks(); }, 10_000);
+</script>
+</body>
+</html>

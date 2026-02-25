@@ -1,4 +1,4 @@
-using SAGIDE.Core.Models;
+﻿using SAGIDE.Core.Models;
 
 namespace SAGIDE.Core.Interfaces;
 
@@ -11,6 +11,7 @@ public interface ITaskRepository
     Task<AgentResult?> GetResultAsync(string taskId);
     Task<IReadOnlyList<AgentTask>> GetTaskHistoryAsync(int limit = 100, int offset = 0);
     Task<IReadOnlyList<AgentTask>> GetTasksByStatusAsync(AgentTaskStatus status);
+    Task<IReadOnlyList<AgentTask>> GetTasksBySourceTagAsync(string sourceTag, int limit = 100, int offset = 0);
     Task<IReadOnlyList<AgentTask>> LoadPendingTasksAsync();
     Task SaveDlqEntryAsync(DeadLetterEntry entry);
     Task<IReadOnlyList<DeadLetterEntry>> GetDlqEntriesAsync();

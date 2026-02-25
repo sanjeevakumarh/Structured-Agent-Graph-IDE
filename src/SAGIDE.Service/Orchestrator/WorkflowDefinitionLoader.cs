@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -172,6 +172,8 @@ public class WorkflowDefinitionLoader
                     ApprovalPrompt    = s.ApprovalPrompt,
                     ContextVarName    = s.ContextVarName,
                     SourceSteps       = s.SourceSteps ?? [],
+                    ShadowBranch      = s.ShadowBranch ?? "HEAD",
+                    ShadowAction      = s.ShadowAction ?? "promote",
                 };
 
                 if (s.Branches is { Count: > 0 })
@@ -361,6 +363,9 @@ public class WorkflowDefinitionLoader
         public int SlaHours { get; set; } = 0;
         public string? TimeoutAction { get; set; }
         public string? ApprovalPrompt { get; set; }
+        // Shadow workspace step fields ()
+        public string? ShadowBranch { get; set; }
+        public string? ShadowAction { get; set; }
     }
 
     private class YamlBranch
@@ -370,4 +375,8 @@ public class WorkflowDefinitionLoader
     }
 }
 
-// Built-in YAML templates have been moved to Orchestrator/Templates/*.yaml
+// ── Built-in YAML templates have been moved to Orchestrator/Templates/*.yaml ──
+// They are copied to the output directory by the build (CopyToOutputDirectory=Always)
+// and loaded at startup from the path configured in SAGIDE:BuiltInTemplatesPath.
+// Users can add or modify templates by editing the YAML files next to the executable.
+

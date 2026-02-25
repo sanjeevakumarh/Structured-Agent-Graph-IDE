@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace SAGIDE.Service.Infrastructure;
@@ -33,15 +33,15 @@ public class GitService
     /// <summary>Cleans up any stale worktrees left by a previous crash. Called on startup.</summary>
     public Task PruneStaleWorktreesAsync(CancellationToken ct = default)
     {
-        // Find any worktree paths in temp that look like ours
+        // Find any worktree paths in temp that look like ours (commit logs and shadow workspaces)
         var tmpDir = Path.GetTempPath();
-        var stale = Directory.GetDirectories(tmpDir, "sag-ide-wt-*");
+        var stale = Directory.GetDirectories(tmpDir, "sag-ide-wt-*")
+            .Concat(Directory.GetDirectories(tmpDir, "sag-ide-sw-*"));
         foreach (var wt in stale)
         {
-            _logger.LogInformation("Cleaning up stale git worktree: {Path}", wt);
+            _logger.LogInformation("Cleaning up stale worktree/shadow: {Path}", wt);
             try { Directory.Delete(wt, recursive: true); } catch { /* best effort */ }
         }
-
         return Task.CompletedTask;
     }
 
@@ -115,6 +115,108 @@ public class GitService
             {
                 await RunGitAsync(workspacePath, $"worktree remove --force \"{worktreePath}\"", ct);
             }
+        }
+    }
+
+    // ── Shadow workspace methods () ─────────────────────────────────────────
+
+    /// <summary>
+    /// Creates an isolated git worktree in %TEMP%/sag-ide-sw-{instanceId8} branching from
+    /// <paramref name="branch"/> (default HEAD). Returns the shadow path on success, or null
+    /// when git is unavailable or the workspace is not a git repo.
+    /// </summary>
+    public async Task<string?> ProvisionShadowAsync(
+        string workspacePath, string instanceId, string branch = "HEAD", CancellationToken ct = default)
+    {
+        if (!IsAvailable || !IsGitRepo(workspacePath))
+        {
+            _logger.LogWarning("ProvisionShadow: git not available or not a git repo at {Path}", workspacePath);
+            return null;
+        }
+
+        var shortId = instanceId[..Math.Min(8, instanceId.Length)];
+        var shadowPath = Path.Combine(Path.GetTempPath(), $"sag-ide-sw-{shortId}");
+
+        // Remove any leftover from a prior run
+        if (Directory.Exists(shadowPath))
+        {
+            await RunGitAsync(workspacePath, $"worktree remove --force \"{shadowPath}\"", ct);
+            if (Directory.Exists(shadowPath))
+                try { Directory.Delete(shadowPath, recursive: true); } catch { /* best effort */ }
+        }
+
+        var (ok, err) = await RunGitAsync(workspacePath, $"worktree add \"{shadowPath}\" {branch}", ct);
+        if (!ok)
+        {
+            _logger.LogError("Failed to provision shadow worktree at {Path}: {Error}", shadowPath, err);
+            return null;
+        }
+
+        _logger.LogInformation("Shadow worktree provisioned at {Path} (branch: {Branch})", shadowPath, branch);
+        return shadowPath;
+    }
+
+    /// <summary>
+    /// Removes the shadow worktree, first via <c>git worktree remove --force</c> and falling
+    /// back to a recursive directory delete.
+    /// </summary>
+    public async Task DestroyShadowAsync(
+        string workspacePath, string shadowPath, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(shadowPath)) return;
+
+        var (ok, _) = await RunGitAsync(workspacePath, $"worktree remove --force \"{shadowPath}\"", ct);
+        if (!ok && Directory.Exists(shadowPath))
+        {
+            _logger.LogWarning("git worktree remove failed; falling back to Directory.Delete for {Path}", shadowPath);
+            try { Directory.Delete(shadowPath, recursive: true); } catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to delete shadow worktree directory {Path}", shadowPath);
+            }
+        }
+        else
+        {
+            _logger.LogInformation("Shadow worktree destroyed: {Path}", shadowPath);
+        }
+    }
+
+    /// <summary>
+    /// Promotes changes made inside the shadow worktree back to the real workspace by
+    /// computing a <c>git diff HEAD</c> patch and applying it with <c>git apply --index</c>.
+    /// On success, destroys the shadow. Returns (false, errorMessage) if the apply fails.
+    /// </summary>
+    public async Task<(bool Success, string Summary)> PromoteShadowAsync(
+        string workspacePath, string shadowPath, CancellationToken ct = default)
+    {
+        // Get the diff from the shadow worktree
+        var (diffOk, patch) = await RunGitAsync(shadowPath, "diff HEAD", ct);
+        if (!diffOk)
+            return (false, $"Failed to compute shadow diff: {patch}");
+
+        if (string.IsNullOrWhiteSpace(patch))
+        {
+            await DestroyShadowAsync(workspacePath, shadowPath, ct);
+            return (true, "No changes to promote from shadow workspace");
+        }
+
+        // Write patch to a temp file and apply to real workspace
+        var patchFile = Path.Combine(Path.GetTempPath(), $"sag-ide-sw-patch-{Guid.NewGuid():N}.patch");
+        try
+        {
+            await File.WriteAllTextAsync(patchFile, patch, ct);
+            var (applyOk, applyErr) = await RunGitAsync(workspacePath, $"apply --index \"{patchFile}\"", ct);
+            if (!applyOk)
+                return (false, $"git apply failed: {applyErr}");
+
+            // Capture a short stat for the step output
+            var (_, stat) = await RunGitAsync(workspacePath, "diff HEAD --stat", ct);
+            await DestroyShadowAsync(workspacePath, shadowPath, ct);
+            _logger.LogInformation("Shadow changes promoted to {WorkspacePath}", workspacePath);
+            return (true, string.IsNullOrWhiteSpace(stat) ? "Changes promoted successfully" : stat.Trim());
+        }
+        finally
+        {
+            try { File.Delete(patchFile); } catch { /* best effort */ }
         }
     }
 

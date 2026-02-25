@@ -7,6 +7,7 @@ dist/
 # Dependencies
 node_modules/
 packages/
+package-lock.json
 
 # IDE
 .vs/
@@ -25,11 +26,25 @@ logs/
 *.db
 *.db-shm
 *.db-wal
+*.bak
 
-# Environment
+# Environment — real hostnames and API keys live here; never commit
 .env
 .env.local
-appsettings.Development.json
+appsettings.json
+appsettings.local.json
+
+# Sensitive instance configs (explicit paths)
+src/SAGIDE.Service/appsettings.json
+src/SAGIDE.Service/appsettings.json.bak
+
+# Prompt variants with local host aliases
+prompts/robotics/weekly-chipset-review.yaml
+prompts/robotics/weekly-chipset-review.yaml.bak
+prompts/shared/summarization.yaml
+
+# Generated reports
+reports/
 
 # Extension
 *.vsix

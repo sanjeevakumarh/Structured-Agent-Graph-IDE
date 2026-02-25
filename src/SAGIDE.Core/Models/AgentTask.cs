@@ -1,4 +1,4 @@
-namespace SAGIDE.Core.Models;
+﻿namespace SAGIDE.Core.Models;
 
 public class AgentTask
 {
@@ -18,6 +18,12 @@ public class AgentTask
     public Dictionary<string, string> Metadata { get; set; } = [];
     public DateTime? ScheduledFor { get; set; }
     public string? ComparisonGroupId { get; set; }
+
+    /// <summary>
+    /// Identifies which frontend or pipeline submitted this task (e.g. "vscode", "finance_daily", "cli").
+    /// Used by the REST API to filter results per-consumer without cross-contamination.
+    /// </summary>
+    public string? SourceTag { get; set; }
 
     /// <summary>
     /// Replay: when true, bypasses the SHA-256 output cache and forces a fresh model call.

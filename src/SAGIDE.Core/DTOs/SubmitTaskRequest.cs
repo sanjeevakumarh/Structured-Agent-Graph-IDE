@@ -14,4 +14,10 @@ public class SubmitTaskRequest
     public DateTime? ScheduledFor { get; set; }
     public string? ComparisonGroupId { get; set; }
     public string? ModelEndpoint { get; set; }
+
+    /// <summary>
+    /// Identifies the submitting frontend or pipeline (e.g. "vscode", "finance_daily", "cli").
+    /// Defaults to null; the named-pipe handler sets this to "vscode" automatically.
+    /// </summary>
+    public string? SourceTag { get; set; }
 }

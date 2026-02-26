@@ -12,7 +12,7 @@ model_preference:
   orchestrator: workstation
   subtasks:
     hardware_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
-    software_scan: ollama/qwen2.5:3b@localhost
+    software_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
     paper_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
 
 variables:

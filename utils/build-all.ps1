@@ -34,6 +34,8 @@ try {
         npm install --prefix "src/vscode-extension" --no-audit --no-fund
         # compile runs tsc via the locally installed typescript in node_modules
         npm run compile --prefix "src/vscode-extension"
+        # package the extension (.vsix) so downstream consumers find the artifact
+        npx vsce package --no-dependencies --out "src/vscode-extension/sag-ide-0.1.0.vsix" --cwd "src/vscode-extension"
     }
 
     Invoke-Step "Build Logseq plugin" {

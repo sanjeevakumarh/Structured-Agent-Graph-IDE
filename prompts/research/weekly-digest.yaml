@@ -14,17 +14,17 @@ model_preference:
   subtasks:
     assembler: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
     analyst:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
-    planning:  ollama/qwen2.5:3b@localhost
+    planning:  ollama/qwen2.5:14b-instruct-q5_K_M@workstation
 
 # ── Variables ────────────────────────────────────────────────────────────────
 # Override via POST /api/prompts/research/weekly-digest/run
 # Body: { "topic": "Microsoft stock outlook", "context": "I am a tech investor..." }
 variables:
-  topic: "robotics, edge AI, and computer vision"
+  topic: "Learn AI In C#"
 
   context: >
-    I work on computer vision, edge deployment, and multi-camera systems.
-    My stack includes ROS2, OpenCV, PyTorch, and TensorRT.
+    All aspects of model development, training, inference, and techniques like gradient descent and math.
+    I want to do it over 45 days with each day 30-45 minutes, a real world problem that teaches basics, math, but doable as a side project with constraints in hardward, software and skills.
 
   context_file: "~/projects/context/RESEARCH_CONTEXT.md"
 

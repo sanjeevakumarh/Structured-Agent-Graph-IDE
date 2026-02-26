@@ -48,8 +48,9 @@ sequenceDiagram
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
 ## Updates (2026-02-26)
-- Hardened orchestration and persistence: TaskQueue/WorkflowEngine/SubtaskCoordinator refinements, status/retry semantics, and tightened pipe/message handling.
-- Provider/timeout resilience tuning plus expanded tests (agent limits, retries/timeouts, DLQ, workflow engine, environment leak checks).
+- Dynamic weekly digest now plans sections with Scriban templating, replacing fixed headings and hardcoded query categories.
+- Pipe security tightened with optional shared-secret handshake across service, extension, and client; logging gains safe redaction plus expanded template rendering.
+- Resilience and recovery strengthened with new workflow/orchestrator/provider tests, refined SubtaskCoordinator/WorkflowEngine behavior, and hardened pipe/message handling.
 
 ## Updates (2026-02-25)
 - Added full RAG pipeline and orchestration stack (workflow engine, prompt registry/templates, subtask coordinator, scheduler, RAG fetch/chunk/embed/vector store/search) with new API endpoints and resilience/plumbing updates.
@@ -65,48 +66,57 @@ sequenceDiagram
 - Shipped: orchestration with DLQ/persistence (SQLite WAL), multi-provider streaming UI (real-time chunks with token counts), workflow engine (DAGs, routers, approval gates, pause/resume), Git-linked activity logging (markdown generation), comparison groups (all N models side-by-side), diagnostics (issues parsed to Problems panel).
 - In progress: harden streaming reliability at high token rates (>500 tok/sec), expand workflow templates (security audit, API generation, code migration), improve DLQ UI (batch retry, error categorization).
 
-## Quickstart
+## Prerequisites (summary)
+- OS: Windows 10/11 (full named-pipe support)
+- Runtime/tooling: .NET SDK 9.0, Node.js 20+ (npm 10+), VS Code 1.85+
+- Packaging: `vsce` (`npm install -g @vscode/vsce`) to build the VSIX
+- Models: Ollama with at least one model (e.g., `qwen2.5-coder:7b-instruct`) and `nomic-embed-text` for RAG; cloud keys optional (Anthropic/OpenAI/Google)
+- Optional: SearXNG for web search, Logseq 0.9+ if using the plugin
 
-### Prerequisites
-- VS Code 1.85+
-- .NET SDK 9.0
-- Node.js 20+ and npm 10+
-- Optional: Ollama for local models and SearXNG for RAG web search
-
-### 1) Clone
+## First-time setup
+1) Clone
 ```bash
 git clone https://github.com/sanjeevakumarh/SAGExtention.git
 cd SAGExtention
 ```
 
-### 2) Start the orchestration service
-```bash
-dotnet run --project src/SAGIDE.Service/SAGIDE.Service.csproj
-```
-Leave this running; it hosts named pipes, task orchestration with scheduler/queue/DLQ, SQLite WAL persistence (~50 task history limit), prompt registry/templates, RAG pipeline, and provider routing.
+2) Configure
+- Copy `src/SAGIDE.Service/appsettings.Template.json` to `src/SAGIDE.Service/appsettings.json`.
+- Fill API keys (Anthropic/OpenAI/Google) and set Ollama server/models and optional `Rag.SearchUrl` (SearXNG).
+- Align VS Code setting `sagIDE.pipeName` with `SAGIDE:NamedPipeName` (default `SAGIDEPipe`).
 
-### 3) Start the VS Code extension
-1. Open the repo in VS Code.
-2. Open `src/vscode-extension`.
-3. Install deps:
-   ```bash
-  npm ci
-   ```
-4. Press F5 to launch the Extension Development Host.
+3) Install prerequisites
+- Verify: `dotnet --version` (9.x), `node --version` (20.x), `npm --version`, `vsce --version`.
+- Pull models: `ollama pull qwen2.5-coder:7b-instruct` and `ollama pull nomic-embed-text`.
 
-### 4) Optional: start CLI
-```bash
-dotnet run --project tools/cli/sag/sag.csproj -- --help
+4) Build, test, deploy
+```powershell
+./build-all.ps1          # builds service, CLI, extension (packages VSIX), Logseq plugin
+dotnet test tests/SAGIDE.Service.Tests
+./deploy.ps1             # installs VSIX locally and starts service (if scripted)
 ```
 
-### 5) Optional: start Logseq plugin (dev)
-- Install Logseq, enable dev plugins, and point to `tools/logseq-plugin` after running `npm install && npm run build` there.
+5) Run the stack
+- Service: `dotnet run --project src/SAGIDE.Service/SAGIDE.Service.csproj` (or keep deploy.ps1 running).
+- Extension: install `src/vscode-extension/sag-ide-0.1.0.vsix` then press F5 or reload VS Code.
+- CLI: `dotnet run --project tools/cli/sag/sag.csproj -- --help`.
+- Web dashboard: open `http://localhost:5100`.
+- Logseq (optional): load `tools/logseq-plugin/` as unpacked plugin (Developer Mode), set `baseUrl=http://localhost:5100`.
 
-### 6) Run a task or workflow
-- In the Extension Host window, open a code file.
-- Press Ctrl+Shift+P and run `SAG: Submit Task`.
-- Choose an agent and model (local or paid).
-- Watch Active Tasks, Streaming Output, and History panes.
+## Use the features 
+- VS Code extension: submit tasks (`SAGIDE: Submit Task`), review files, run prompt library items, manage DLQ (retry/discard), compare models, stream output, start/pause/resume workflows, and toggle git auto-commit/activity logging.
+- CLI: `sag health`, `sag prompts [domain]`, `sag submit --prompt <domain/name> --var key=val`, `sag status [taskId]`, `sag results`, `sag cancel <taskId>`, `sag reports [domain] [file]`.
+- Web dashboard: monitor tasks, prompts, reports, and workflows (cancel/pause/resume) at `http://localhost:5100`.
+- Scheduler: add `schedule: "* * * * *"` (cron) to a prompt; scheduler fires and tags results (e.g., `scheduled_finance`).
+- Workflows: run via VS Code (`Run Workflow`) or API; supports sequential/parallel, router branches, pause/resume, human approval gates, convergence loops, and restart recovery.
+- RAG pipeline: use prompts with `data_collection` (web_api/web_search_batch) and embeddings; ensure `nomic-embed-text` is running in Ollama.
+- Logseq plugin: `/sag run`, `/sag status`, `/sag prompts` with insert modes (current-block/new-page/notification-only).
+- REST API: `POST /api/tasks`, `GET /api/tasks/{id}`, `POST /api/prompts/{domain}/{name}/run`, `GET /api/reports`.
+
+## Quick validation
+- `curl http://localhost:5100/api/health` → `{"status":"ok"...}`
+- VS Code status bar shows `SAG: Connected`; prompt library lists domains; tasks stream output.
+- `sag status` returns recent tasks; web dashboard shows live task list; scheduler logs firing messages if cron prompts exist.
 
 ## Model and RAG configuration
 Configuration lives in two places:

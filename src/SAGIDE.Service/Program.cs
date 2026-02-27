@@ -23,7 +23,7 @@ using ServiceLifetimeHosted = SAGIDE.Service.Services.ServiceLifetime;
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
     .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
-    .WriteTo.File("logs/agentic-ide-.log", rollingInterval: RollingInterval.Day)
+    .WriteTo.File("logs/sagide-.log", rollingInterval: RollingInterval.Day)
     .CreateLogger();
 
 try
@@ -89,11 +89,11 @@ try
     builder.Configuration.GetSection("SAGIDE:Communication").Bind(commConfig);
     builder.Services.AddSingleton(commConfig);
 
-    // Register SQLite persistence — path configurable via SAGIDE:Database:Path (default: %LOCALAPPDATA%/SAGIDE/agentic-ide.db)
+    // Register SQLite persistence — path configurable via SAGIDE:Database:Path (default: %LOCALAPPDATA%/SAGIDE/sagide.db)
     var configuredDbPath = builder.Configuration["SAGIDE:Database:Path"];
     var dbPath = !string.IsNullOrWhiteSpace(configuredDbPath)
         ? configuredDbPath
-        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SAGIDE", "agentic-ide.db");
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SAGIDE", "sagide.db");
     Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
 
     builder.Services.AddSingleton<ITaskRepository>(sp =>

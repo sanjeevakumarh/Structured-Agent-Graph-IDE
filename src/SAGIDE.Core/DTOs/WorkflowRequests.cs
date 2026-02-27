@@ -26,7 +26,7 @@ public class StartWorkflowRequest
     /// <summary>Explicit Ollama server URL override (same as task-level modelEndpoint).</summary>
     public string? ModelEndpoint { get; set; }
 
-    /// <summary>Workspace directory — used to discover custom .agentide/workflows/*.yaml files.</summary>
+    /// <summary>Workspace directory — used to discover custom .sagide/workflows/*.yaml files.</summary>
     public string? WorkspacePath { get; set; }
 
     /// <summary>

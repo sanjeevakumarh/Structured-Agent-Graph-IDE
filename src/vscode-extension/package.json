@@ -393,6 +393,11 @@
           "enum": ["claude", "codex", "gemini", "ollama"],
           "description": "Model to use for refactoring tasks"
         },
+        "sagIDE.serviceUrl": {
+          "type": "string",
+          "default": "http://localhost:5100",
+          "description": "Base URL of the SAGIDE REST API service"
+        },
         "sagIDE.pipeName": {
           "type": "string",
           "default": "SAGIDEPipe",
@@ -420,7 +425,7 @@
         },
         "sagIDE.workflowsPath": {
           "type": "string",
-          "default": ".agentide/workflows",
+          "default": ".sagide/workflows",
           "description": "Path (relative to workspace root) where workflow YAML files are stored"
         }
       }

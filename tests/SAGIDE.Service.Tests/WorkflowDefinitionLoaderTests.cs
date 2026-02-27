@@ -288,7 +288,7 @@ public class WorkflowDefinitionLoaderTests
     public void LoadFromWorkspace_ValidYaml_LoadsDefinition()
     {
         var workspace = Path.Combine(Path.GetTempPath(), $"wf-test-{Guid.NewGuid():N}");
-        var dir       = Path.Combine(workspace, ".agentide", "workflows");
+        var dir       = Path.Combine(workspace, ".sagide", "workflows");
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "my-review.yaml"), MinimalYaml);
 
@@ -311,7 +311,7 @@ public class WorkflowDefinitionLoaderTests
     public void LoadFromWorkspace_InvalidYaml_SkipsFile_ReturnsOthers()
     {
         var workspace = Path.Combine(Path.GetTempPath(), $"wf-test-{Guid.NewGuid():N}");
-        var dir       = Path.Combine(workspace, ".agentide", "workflows");
+        var dir       = Path.Combine(workspace, ".sagide", "workflows");
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "bad.yaml"), ": ::: invalid yaml ::");
         File.WriteAllText(Path.Combine(dir, "good.yaml"), MinimalYaml);

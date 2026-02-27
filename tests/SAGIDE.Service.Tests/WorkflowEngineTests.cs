@@ -46,7 +46,7 @@ internal sealed class FakeTaskSubmitter : ITaskSubmissionService
 
 /// <summary>
 /// Wires up a WorkflowEngine with a FakeTaskSubmitter and a temp workspace directory.
-/// Workflow YAML files are written to {WorkspaceDir}/.agentide/workflows/.
+/// Workflow YAML files are written to {WorkspaceDir}/.sagide/workflows/.
 /// </summary>
 internal sealed class WorkflowTestHarness : IDisposable
 {
@@ -61,7 +61,7 @@ internal sealed class WorkflowTestHarness : IDisposable
     public WorkflowTestHarness()
     {
         WorkspaceDir  = Path.Combine(Path.GetTempPath(), $"wf-test-{Guid.NewGuid():N}");
-        _workflowsDir = Path.Combine(WorkspaceDir, ".agentide", "workflows");
+        _workflowsDir = Path.Combine(WorkspaceDir, ".sagide", "workflows");
         Directory.CreateDirectory(_workflowsDir);
 
         // Loader: point built-in templates at a non-existent directory so none are loaded

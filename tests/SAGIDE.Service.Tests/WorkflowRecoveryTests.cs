@@ -47,7 +47,7 @@ internal sealed class RecoveryTestHarness : IDisposable
     public RecoveryTestHarness(IEnumerable<WorkflowInstance>? initialInstances = null)
     {
         WorkspaceDir  = Path.Combine(Path.GetTempPath(), $"wf-rec-{Guid.NewGuid():N}");
-        _workflowsDir = Path.Combine(WorkspaceDir, ".agentide", "workflows");
+        _workflowsDir = Path.Combine(WorkspaceDir, ".sagide", "workflows");
         Directory.CreateDirectory(_workflowsDir);
 
         Repository = new FakeWorkflowRepository(initialInstances);

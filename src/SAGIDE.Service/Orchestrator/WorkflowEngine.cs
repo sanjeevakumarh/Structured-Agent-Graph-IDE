@@ -1319,7 +1319,7 @@ public class WorkflowEngine
             return (false, $"Step '{stepId}' not found.");
         }
 
-        return (false, $"Unrecognised constraint expression: '{expr}'");
+        return (false, $"Unrecognized constraint expression: '{expr}'");
     }
 
     private static bool CompareInts(int actual, string op, int expected) => op switch

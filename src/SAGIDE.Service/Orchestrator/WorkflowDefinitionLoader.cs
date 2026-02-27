@@ -10,7 +10,7 @@ namespace SAGIDE.Service.Orchestrator;
 /// Loads WorkflowDefinition objects from:
 ///   1. Built-in YAML templates — directory configured by SAGIDE:BuiltInTemplatesPath
 ///      (defaults to "Orchestrator/Templates" relative to the executable; copied there by the build)
-///   2. Workspace .agentide/workflows/*.yaml files (workspace-specific)
+///   2. Workspace .sagide/workflows/*.yaml files (workspace-specific)
 /// </summary>
 public class WorkflowDefinitionLoader
 {
@@ -80,11 +80,11 @@ public class WorkflowDefinitionLoader
         return result;
     }
 
-    /// <summary>Scans workspacePath/.agentide/workflows/*.yaml and parses each file.</summary>
+    /// <summary>Scans workspacePath/.sagide/workflows/*.yaml and parses each file.</summary>
     public List<WorkflowDefinition> LoadFromWorkspace(string workspacePath)
     {
         var result = new List<WorkflowDefinition>();
-        var dir = Path.Combine(workspacePath, ".agentide", "workflows");
+        var dir = Path.Combine(workspacePath, ".sagide", "workflows");
         if (!Directory.Exists(dir))
             return result;
 

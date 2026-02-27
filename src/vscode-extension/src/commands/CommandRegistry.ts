@@ -20,7 +20,7 @@ import { pickContext } from '../utils/ContextPicker';
 /**
  * Tree-view inline commands receive the clicked TreeItem as their first argument,
  * while programmatic executeCommand calls pass the instanceId string directly.
- * This helper normalises both cases.
+ * This helper normalizes both cases.
  */
 function resolveInstanceId(arg?: string | WorkflowRunningItem): string | undefined {
     if (!arg) { return undefined; }

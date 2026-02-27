@@ -47,10 +47,19 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-02-27)
+
+- Research report improvements — Fixed the web dashboard's prompt variable input parser, which was silently failing to pass "key": "value" pairs. Changed report output filenames from a static -weekly suffix to a topic-derived keyword slug (e.g. 2026-02-27-subject_slug.md).
+
+- Build pipeline and extension hardening — Fixed build script, eliminated hardcoded http://localhost:5100 URL baked into the VS Code extension — it now reads from the sagIDE.serviceUrl workspace setting.
+
+
+
 ## Updates (2026-02-26)
 - Dynamic weekly digest now plans sections with Scriban templating, replacing fixed headings and hardcoded query categories.
 - Pipe security tightened with optional shared-secret handshake across service, extension, and client; logging gains safe redaction plus expanded template rendering.
 - Resilience and recovery strengthened with new workflow/orchestrator/provider tests, refined SubtaskCoordinator/WorkflowEngine behavior, and hardened pipe/message handling.
+
 
 ## Updates (2026-02-25)
 - Added full RAG pipeline and orchestration stack (workflow engine, prompt registry/templates, subtask coordinator, scheduler, RAG fetch/chunk/embed/vector store/search) with new API endpoints and resilience/plumbing updates.
@@ -177,7 +186,7 @@ Then select the provider in `SAG: Submit Task`.
 
 ## Defining Workflows and Prompts (YAML)
 - Prompts/templates live under `prompts/` and are loaded by the Prompt Registry.
-- Workflows live in `.agentide/workflows/*.yaml` (or built-in templates); they support DAG dependencies, conditional routing, context vars, human approval gates, and convergence policies.
+- Workflows live in `.sagide/workflows/*.yaml` (or built-in templates); they support DAG dependencies, conditional routing, context vars, human approval gates, and convergence policies.
 
 ```yaml
 name: "Refactor and Test"
@@ -222,34 +231,34 @@ convergencePolicy:
 
 ### Quick connectivity check
 - `ollama list` shows at least one model (if using local).
-- Service terminal shows `dotnet run` logs with NamedPipeServer listening on the configured pipe name (Windows: `\\.\pipe\AgenticIDEPipe` or Unix: `/tmp/AgenticIDEPipe`).
+- Service terminal shows `dotnet run` logs with NamedPipeServer listening on the configured pipe name (Windows: `\\.\pipe\SAGIDEPipe` or Unix: `/tmp/SAGIDEPipe`).
 - VS Code status bar shows `$(check) SAG: Connected`; Output panel → `SAG IDE` shows heartbeat/connection logs.
 
 ### How do I run only local models?
 - Install Ollama, pull a model: `ollama pull qwen2.5-coder:7b-instruct`.
 - In `SAG: Submit Task`, select your Ollama model from the list (detected via ProviderFactory affinity routing).
-- Leave `AgenticIDE:ApiKeys` section empty in `appsettings.json` (no cloud keys configured = no cloud access).
+- Leave `SAGIDE:ApiKeys` section empty in `appsettings.json` (no cloud keys configured = no cloud access).
 
 ### How do I fix "Service not running"?
 - Start the backend: `cd src/SAGIDE.Service && dotnet run` (will log NamedPipeServer startup and DI registration).
-- Verify `sagIDE.pipeName` in VS Code settings matches `AgenticIDE:NamedPipeName` in `appsettings.json` (default: `AgenticIDEPipe`).
+- Verify `sagIDE.pipeName` in VS Code settings matches `SAGIDE:NamedPipeName` in `appsettings.json` (default: `SAGIDEPipe`).
 - Check firewall: Windows Defender may block named pipes on first run (allow when prompted).
 - If extension shows "Disconnected" but service is running, extension auto-reconnects every 3 seconds (exponential backoff).
 
 ### Where do workflows live?
 - Built-in workflows: shipped with the service (in memory, loaded by WorkflowEngine on startup).
-- Custom workflows: `.agentide/workflows/*.yaml` in your workspace root (parsed by AgentOrchestrator during `start_workflow` message handling).
+- Custom workflows: `.sagide/workflows/*.yaml` in your workspace root (parsed by AgentOrchestrator during `start_workflow` message handling).
 - Syntax validation: DAG topological sort, step type validation (agent/router/tool/constraint/human_approval), dependency resolution.
 
 ## Troubleshooting quick links
 - Ollama install: https://ollama.com
 - Service logs: `src/SAGIDE.Service/logs/` (Serilog, daily rolling files, Info+ level)
 - Extension logs: Output panel → `SAG IDE` (connects, submits tasks, receives broadcasts)
-- Named pipe (Windows): Resource Monitor → Handles, search for `AgenticIDEPipe` to verify listening
+- Named pipe (Windows): Resource Monitor → Handles, search for `SAGIDEPipe` to verify listening
 - Streaming stalls: Check agent output token rate; if <100 tok/sec, model may be overloaded or rate-limited
 - DLQ inspection: `sagIDE.showDlq` command shows failed tasks with error codes and retry counts
 
-## Roadmap (short)
+## Roadmap 
 - Harden streaming reliability at high token rates (>1000 tok/sec agents).
 - Expand workflow templates (security audit, API generation, code migration templates).
 - Improve DLQ UI (batch retry, error classification, escalation alerts).

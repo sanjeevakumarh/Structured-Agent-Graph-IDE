@@ -29,7 +29,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const dlqTreeProvider = new DlqTreeProvider();
     const diagnosticsManager = new DiagnosticsManager();
     const workflowExplorer  = new WorkflowExplorerProvider();
-    const restBaseUrl       = 'http://localhost:5100';
+    const restBaseUrl       = Configuration.serviceUrl;
     const promptLibrary     = new PromptLibraryProvider(restBaseUrl);
 
     // Register tree views in sidebar
@@ -133,12 +133,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     connection.onStreamingOutput(streamMsg => {
         // Look up the agentType/modelId from the active task tree so the panel title is informative
         const activeTask = taskTreeProvider.getTask(streamMsg.taskId);
-        const agentType = activeTask?.agentType ?? 'Agent';
+        const agentType = activeTask?.agentType ?? 'CodeReview';
         const modelId = activeTask?.modelId ?? 'model';
         StreamingOutputPanel.update(
             context,
             streamMsg.taskId,
-            agentType as any,
+            agentType,
             modelId,
             streamMsg.textChunk,
             streamMsg.tokensGeneratedSoFar,

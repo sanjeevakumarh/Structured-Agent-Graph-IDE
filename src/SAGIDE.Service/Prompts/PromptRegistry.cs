@@ -100,7 +100,7 @@ public sealed class PromptRegistry : IDisposable
         IEnumerable<string> files;
         try
         {
-            // Materialise the list immediately — the directory could be deleted between
+            // Materialize the list immediately — the directory could be deleted between
             // the Exists check above and the enumeration (race condition in tests / deployment).
             files = Directory.EnumerateFiles(_promptsRoot, "*.yaml", SearchOption.AllDirectories).ToList();
         }

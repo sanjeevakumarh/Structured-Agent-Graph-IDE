@@ -30,12 +30,17 @@ try {
     }
 
     Invoke-Step "Build VS Code extension" {
-        # npm install (not npm ci) — package-lock.json is git-ignored
-        npm install --prefix "src/vscode-extension" --no-audit --no-fund
-        # compile runs tsc via the locally installed typescript in node_modules
-        npm run compile --prefix "src/vscode-extension"
-        # package the extension (.vsix) so downstream consumers find the artifact
-        npx vsce package --no-dependencies --out "src/vscode-extension/sag-ide-0.1.0.vsix" --cwd "src/vscode-extension"
+        Push-Location "src/vscode-extension"
+        try {
+            # npm install (not npm ci) — package-lock.json is git-ignored
+            npm install --no-audit --no-fund
+            # compile runs tsc via the locally installed typescript in node_modules
+            npm run compile
+            # package the extension (.vsix) so downstream consumers find the artifact
+            "y" | npx vsce package --no-dependencies --allow-star-activation --allow-missing-repository
+        } finally {
+            Pop-Location
+        }
     }
 
     Invoke-Step "Build Logseq plugin" {

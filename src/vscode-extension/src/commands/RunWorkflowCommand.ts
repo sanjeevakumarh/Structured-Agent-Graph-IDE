@@ -26,7 +26,7 @@ export async function runWorkflowCommand(
     }
 
     if (definitions.length === 0) {
-        vscode.window.showWarningMessage('No workflow definitions found. Check .agentide/workflows/ in your workspace.');
+        vscode.window.showWarningMessage('No workflow definitions found. Check .sagide/workflows/ in your workspace.');
         return;
     }
 

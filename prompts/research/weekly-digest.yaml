@@ -14,7 +14,7 @@ model_preference:
   subtasks:
     assembler: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
     analyst:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
-    planning:  ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    planning:  claude-sonnet-4-6
 
 # ── Variables ────────────────────────────────────────────────────────────────
 # Override via POST /api/prompts/research/weekly-digest/run
@@ -171,5 +171,5 @@ synthesis:
 
 output:
   format: markdown
-  destination: "~/reports/{{output_subdir}}/{{date}}-weekly.md"
+  destination: "~/reports/{{output_subdir}}/{{date}}-{{topic_slug}}.md"
   notify: true

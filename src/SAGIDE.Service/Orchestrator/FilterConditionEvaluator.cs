@@ -37,7 +37,7 @@ internal static class FilterConditionEvaluator
 
         var m = ConditionRegex.Match(condition.Trim());
         if (!m.Success)
-            return ApplyLimit(input, limit); // unrecognised syntax → pass-through
+            return ApplyLimit(input, limit); // unrecognized syntax → pass-through
 
         var field = m.Groups["field"].Value;
         var op    = m.Groups["op"].Value.ToLowerInvariant();

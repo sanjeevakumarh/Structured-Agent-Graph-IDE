@@ -14,6 +14,10 @@ export class Configuration {
         return this.config.get<number>('maxConcurrentTasks', 5);
     }
 
+    static get serviceUrl(): string {
+        return this.config.get<string>('serviceUrl', 'http://localhost:5100');
+    }
+
     static get pipeName(): string {
         return this.config.get<string>('pipeName', 'SAGIDEPipe');
     }

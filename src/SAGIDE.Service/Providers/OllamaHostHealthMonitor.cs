@@ -34,7 +34,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
         _logger  = logger;
         _allUrls = knownUrls.Select(u => u.TrimEnd('/')).Distinct().ToList();
 
-        // Initialise all hosts as unknown until the first poll
+        // Initialize all hosts as unknown until the first poll
         foreach (var url in _allUrls)
             _state[url] = new HostState(false, [], DateTime.MinValue);
     }
@@ -70,7 +70,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     {
         var list = candidates.Select(u => u.TrimEnd('/')).Distinct().ToList();
 
-        // rule 1: honour static routing if the preferred host is reachable
+        // rule 1: honor static routing if the preferred host is reachable
         var normalized = preferredUrl.TrimEnd('/');
         if (_state.TryGetValue(normalized, out var preferred) && preferred.IsReachable)
             return normalized;

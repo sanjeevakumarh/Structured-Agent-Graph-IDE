@@ -35,6 +35,14 @@ public sealed class SubtaskCoordinator
     // Tracks a submitted subtask together with the actual endpoint used, for retry purposes.
     private sealed record SubtaskSubmission(string Name, string TaskId, string ModelId, string Endpoint);
 
+    // Common English stop words excluded when building topic_slug.
+    private static readonly HashSet<string> _slugStopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "a", "an", "the", "in", "on", "of", "for", "to", "and", "or",
+        "with", "is", "are", "at", "by", "as", "from", "its", "it",
+        "this", "that", "be", "was", "were", "about", "into", "over",
+    };
+
     public SubtaskCoordinator(
         AgentOrchestrator orchestrator,
         WebFetcher fetcher,
@@ -113,6 +121,11 @@ public sealed class SubtaskCoordinator
         if (overrides is not null)
             foreach (var kv in overrides)
                 vars[kv.Key] = kv.Value;
+
+        // Derive topic_slug from the final topic value so prompts can use it in output paths.
+        // e.g. "Microsoft stock outlook" → "Microsoft_stock_outlook"
+        if (vars.TryGetValue("topic", out var topicVal))
+            vars["topic_slug"] = BuildTopicSlug(topicVal?.ToString() ?? string.Empty);
 
         // Make model_preference available so subtask model fields like
         // "{{model_preference.subtasks.fundamental}}" resolve correctly.
@@ -535,7 +548,7 @@ public sealed class SubtaskCoordinator
                 {
                     var status = _orchestrator.GetTaskStatus(s.TaskId);
                     if (status?.Status != SAGIDE.Core.Models.AgentTaskStatus.Failed) return;
-                    if (!IsRetriableServerError(status.StatusMessage ?? string.Empty)) return;
+                    if (!IsRetryableServerError(status.StatusMessage ?? string.Empty)) return;
 
                     // Find a healthy alternative, explicitly excluding the endpoint that failed
                     var alternatives = _allOllamaUrls
@@ -654,7 +667,7 @@ public sealed class SubtaskCoordinator
         }
     }
 
-    private static bool IsRetriableServerError(string errorMessage)
+    private static bool IsRetryableServerError(string errorMessage)
         => errorMessage.Contains("cudaMalloc", StringComparison.OrdinalIgnoreCase)
         || errorMessage.Contains("out of memory", StringComparison.OrdinalIgnoreCase)
         || errorMessage.Contains("connection refused", StringComparison.OrdinalIgnoreCase)
@@ -839,6 +852,34 @@ public sealed class SubtaskCoordinator
     /// </summary>
     private static string ResolveSimpleTemplate(string template, Dictionary<string, object> vars) =>
         PromptTemplate.RenderRaw(template, vars);
+
+    /// <summary>
+    /// Derives a file-safe slug from a topic string: up to 4 meaningful keywords joined by underscores.
+    /// Stop words are filtered first; if fewer than 2 words remain after filtering, the first 4 raw
+    /// words are used instead.
+    /// Examples:
+    ///   "Microsoft stock outlook"          → "Microsoft_stock_outlook"
+    ///   "The future of edge AI hardware"   → "future_edge_AI_hardware"
+    ///   "Learn AI In C#"                   → "Learn_AI_C"
+    /// </summary>
+    private static string BuildTopicSlug(string topic)
+    {
+        if (string.IsNullOrWhiteSpace(topic)) return "digest";
+
+        // Strip non-alphanumeric characters from each word (keeps letters and digits only).
+        var words = topic.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Select(w => new string(w.Where(char.IsLetterOrDigit).ToArray()))
+            .Where(w => w.Length > 0)
+            .ToList();
+
+        var keywords = words.Where(w => !_slugStopWords.Contains(w)).Take(4).ToList();
+
+        // Fall back to first 4 raw words if stop-word filtering leaves fewer than 2.
+        if (keywords.Count < 2)
+            keywords = words.Take(4).ToList();
+
+        return keywords.Count > 0 ? string.Join("_", keywords) : "digest";
+    }
 
     /// <summary>
     /// Resolves an expression like "{{watchlist.symbols}}" into its var name ("watchlist"),

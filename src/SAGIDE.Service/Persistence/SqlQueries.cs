@@ -1,7 +1,7 @@
 ﻿namespace SAGIDE.Service.Persistence;
 
 /// <summary>
-/// All SQL statements used by SqliteTaskRepository, centralised so they are easy to find and edit.
+/// All SQL statements used by SqliteTaskRepository, centralized so they are easy to find and edit.
 /// </summary>
 internal static class SqlQueries
 {

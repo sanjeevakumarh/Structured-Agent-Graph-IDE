@@ -162,7 +162,7 @@
         <div class="form-row">
           <select id="run-domain"></select>
           <select id="run-name"></select>
-          <input id="run-vars" type="text" placeholder='Variables: key=val, key2=val2'/>
+          <input id="run-vars" type="text" placeholder='Variables: "key": "val", "key2": "val2"  or  key=val, key2=val2'/>
           <button class="btn btn-primary" onclick="runPrompt()">Run</button>
         </div>
       </div>
@@ -410,12 +410,19 @@ async function runPrompt() {
   const domain = document.getElementById('run-domain').value;
   const name   = document.getElementById('run-name').value;
   const rawVars = document.getElementById('run-vars').value.trim();
-  const vars = {};
+  let vars = {};
   if (rawVars) {
-    rawVars.split(',').forEach(pair => {
-      const [k, ...rest] = pair.trim().split('=');
-      if (k && rest.length) vars[k.trim()] = rest.join('=').trim();
-    });
+    // Try JSON first — accepts {"key":"val"} or bare "key":"val","key2":"val2"
+    const jsonStr = rawVars.startsWith('{') ? rawVars : `{${rawVars}}`;
+    try {
+      vars = JSON.parse(jsonStr);
+    } catch {
+      // Fall back to key=value, key2=value2 format (values may not contain commas)
+      rawVars.split(',').forEach(pair => {
+        const [k, ...rest] = pair.trim().split('=');
+        if (k && rest.length) vars[k.trim()] = rest.join('=').trim();
+      });
+    }
   }
   try {
     const resp = await fetch(`${API}/api/prompts/${domain}/${name}/run`, {

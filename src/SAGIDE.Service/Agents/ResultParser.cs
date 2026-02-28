@@ -114,6 +114,19 @@ public partial class ResultParser
     {
         foreach (var item in array.EnumerateArray())
         {
+            // LLM may return an array of plain strings instead of objects
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                result.Issues.Add(new Issue
+                {
+                    Message  = item.GetString() ?? "",
+                    Severity = IssueSeverity.Medium,
+                });
+                continue;
+            }
+
+            if (item.ValueKind != JsonValueKind.Object) continue;
+
             result.Issues.Add(new Issue
             {
                 FilePath = item.TryGetProperty("filePath", out var fp) ? fp.GetString() ?? ""

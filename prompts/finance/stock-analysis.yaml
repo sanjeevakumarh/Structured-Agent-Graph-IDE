@@ -1,0 +1,302 @@
+name: stock-analysis
+version: 1
+domain: finance
+source_tag: finance_analysis
+
+description: >
+  On-demand deep-dive for any stock or ETF: technical analysis, fundamental analysis,
+  competitive landscape, and investment thesis. No schedule — trigger manually from
+  the web UI or POST /api/prompts/finance/stock-analysis/run with ticker + context.
+
+model_preference:
+  orchestrator: workstation
+  subtasks:
+    # Fast structured-output model for query planning
+    planner:   claude-haiku-4-5-20251001
+    # Strong local model for the four parallel analysis sections
+    analyst:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    # Frontier model for final assembly — coherence + writing quality matter here
+    assembler: ollama/qwq:32b-preview-q4_K_M@workstation
+
+# ── Variables ─────────────────────────────────────────────────────────────────
+# Override any of these via POST body when running from the web UI:
+#   { "ticker": "ko", "context": "food and beverage market impact due to ozempic" }
+variables:
+  ticker: "ko"
+
+  # stock | etf — prompts adapt their instructions accordingly
+  asset_type: "stock"
+
+  # Your analytical lens — drives query framing and thesis tailoring
+  context: >
+    General investor. Interested in medium-term (3-12 month) opportunities.
+    Moderate risk tolerance. Dividend-paying equities and sector rotation plays.
+
+  # Optional: personal investment notes file (silent no-op if missing)
+  context_file: "~/projects/context/INVESTMENT_CONTEXT.md"
+
+  max_results: "5"
+  output_subdir: "finance"
+
+# ── Data collection ────────────────────────────────────────────────────────────
+data_collection:
+  steps:
+    # Step 1 — LLM plans 12 targeted queries (3 per analysis track) and executes them
+    - name: plan_and_search
+      type: llm_queries
+      model: "{{model_preference.subtasks.planner}}"
+      planning_prompt: |
+        You are planning web research for a deep-dive {{asset_type}} analysis.
+        Ticker: {{ticker_upper}}
+        Analyst context: {{context}}
+        Date: {{date}}
+
+        Generate exactly 12 targeted search queries, 3 per track below:
+
+        Track 1 — Technical Analysis
+          · Current price, 52-week range, recent trend direction
+          · RSI (14-day), MACD, moving averages (50-day, 200-day)
+          · Key support/resistance levels, chart patterns, volume trends
+
+        Track 2 — Fundamental Analysis
+          · Latest earnings: revenue, EPS, guidance, analyst consensus
+          · Valuation ratios: P/E, P/B, EV/EBITDA vs sector peers
+          · Balance sheet: debt, free cash flow, dividend / buyback history
+
+        Track 3 — Competitive Landscape
+          · Market share, top 3 competitors, recent competitive moves
+          · Industry tailwinds and headwinds, regulatory environment
+          · Disruption risks, new entrants, moat sustainability
+
+        Track 4 — News & Catalysts
+          · Analyst upgrades/downgrades and price target changes ({{date}})
+          · Upcoming earnings date, product launches, regulatory decisions
+          · Insider activity, institutional positioning, short interest
+
+        Rules:
+        - EVERY query must include "{{ticker_upper}}" — no generic queries
+        - Include {{date}} or the current year in at least 5 queries for recency
+        - Let the analyst's context shape query angles: {{context}}
+        - For ETFs: replace competitor queries with peer ETF comparison, holdings analysis
+
+        Return ONLY a valid JSON array of exactly 12 strings. No explanation, no markdown:
+        ["query1", "query2", "query3", "query4", "query5", "query6", "query7", "query8", "query9", "query10", "query11", "query12"]
+      limit: "{{max_results}}"
+      output_var: all_search_results
+
+    # Step 2 — Load personal investment notes (silent no-op if file missing)
+    - name: load_personal_context
+      type: read_file
+      source: "{{context_file}}"
+      output_var: personal_context
+
+    # Step 3 — Run all four analysis sections in parallel via llm_per_section.
+    # The planning prompt returns exactly the 4 section titles; each section then
+    # receives a tailored analysis prompt routed by {{section_name}}.
+    - name: run_analyses
+      type: llm_per_section
+      model: "{{model_preference.subtasks.analyst}}"
+      max_sections: "4"
+      search_results_var: all_search_results
+      output_var: section_analyses
+
+      # Phase 1: return exactly these 4 titles in this order (no variation)
+      planning_prompt: |
+        Return exactly this JSON array — no changes to the titles, no explanation:
+        ["Technical Analysis", "Fundamental Analysis", "Competitive Landscape", "Investment Thesis"]
+
+      # Phase 2: runs once per section title in parallel.
+      # Scriban conditionals route to the right instructions for each section.
+      section_analysis_prompt: |
+        Ticker: {{ticker_upper}} ({{asset_type}})
+        Analyst context: {{context}}
+        Date: {{date}}
+        Personal notes: {{personal_context}}
+
+        Source material (web search results):
+        ---
+        {{search_results}}
+        ---
+
+        {{ if section_name == "Technical Analysis" }}
+        You are a technical analyst. Write a focused technical analysis using the sub-headings below.
+
+        ### Trend & Price Structure
+        Current trend direction, recent swing highs/lows, distance from 52-week high/low.
+
+        ### Momentum Indicators
+        RSI (14-day), MACD line vs signal line — overbought, oversold, or neutral?
+
+        ### Moving Averages
+        Price vs 50-day and 200-day MA. Any golden cross or death cross in effect?
+
+        ### Volume Analysis
+        Recent volume vs 30-day average. Signs of accumulation or distribution?
+
+        ### Support & Resistance
+        Three key support levels and three resistance levels with specific price points.
+
+        ### Chart Patterns
+        Any active formations: flags, wedges, head-and-shoulders, cup-with-handle, base, etc.
+
+        ### Technical Signal
+        End with exactly one line: **Signal: BULLISH / NEUTRAL / BEARISH** — one sentence rationale.
+
+        {{ else if section_name == "Fundamental Analysis" }}
+        You are a fundamental analyst. Write a focused fundamental analysis using the sub-headings below.
+
+        ### Revenue & Earnings
+        Most recent quarter: revenue, EPS, YoY growth, beat or miss vs consensus estimate.
+
+        ### Profitability
+        Gross, operating, and net margin — trend YoY and vs sector peers.
+
+        ### Valuation
+        P/E (TTM + forward), P/B, EV/EBITDA. Premium or discount to sector? Explain the gap.
+
+        ### Balance Sheet
+        Debt-to-equity ratio, cash & equivalents, free cash flow yield, interest coverage ratio.
+
+        ### Guidance & Analyst Estimates
+        Management full-year guidance. Analyst consensus EPS and revenue for next quarter and year.
+
+        ### Capital Allocation
+        Dividend yield and payout ratio (if applicable). Buyback authorisation and history.
+
+        ### Fundamental Signal
+        End with exactly one line: **Signal: OVERVALUED / FAIRLY VALUED / UNDERVALUED** — one sentence rationale.
+
+        For ETFs: replace company metrics with expense ratio, AUM, tracking error, yield, top-10 holdings concentration.
+
+        {{ else if section_name == "Competitive Landscape" }}
+        You are a competitive intelligence analyst. Write a focused competitive assessment using the sub-headings below.
+
+        ### Market Position
+        Estimated market share, rank among peers, recent market share gains or losses.
+
+        ### Key Competitors
+        Top 3 competitors — one-line relative strength and weakness for each.
+
+        ### Competitive Moat
+        Rate: **WIDE / NARROW / NONE**. Source: brand, switching costs, network effects, cost leadership, IP, regulatory licence, or distribution.
+
+        ### Industry Dynamics
+        Two or three structural tailwinds and two or three structural headwinds active in the sector right now.
+
+        ### Disruption & Regulatory Risk
+        Emerging technologies, new entrants, or regulatory changes that could erode the moat.
+
+        ### Context-Specific Impact
+        How does "{{context}}" specifically affect {{ticker_upper}}'s competitive position?
+
+        ### Competitive Signal
+        End with exactly one line: **Signal: STRENGTHENING / STABLE / WEAKENING** — one sentence rationale.
+
+        For ETFs: replace company moat with sector/thematic thesis quality; compare vs two peer ETFs.
+
+        {{ else if section_name == "Investment Thesis" }}
+        You are a portfolio manager writing a structured investment thesis. Be direct — no hedging.
+
+        ### Summary
+        What {{ticker_upper}} is and why it is worth analysing right now (2-3 sentences).
+
+        ### Bull Case
+        Exactly 3 numbered reasons to own it — each backed by at least one specific data point or named event.
+
+        ### Bear Case
+        Exactly 3 numbered risks or reasons to avoid — be specific, no generic "macro risk."
+
+        ### Key Catalysts
+        Two or three upcoming events, data releases, or milestones that could materially re-rate the {{asset_type}}
+        (e.g. earnings date, product launch, regulatory ruling, macro data print).
+
+        ### Risk Matrix
+        | Risk | Severity | Monitor |
+        |---|---|---|
+        | [Risk 1] | HIGH / MEDIUM / LOW | [one-line monitoring note] |
+        | [Risk 2] | HIGH / MEDIUM / LOW | [one-line monitoring note] |
+        | [Risk 3] | HIGH / MEDIUM / LOW | [one-line monitoring note] |
+
+        ### Conviction
+        - **Rating:** STRONG BUY / BUY / HOLD / SELL / STRONG SELL
+        - **Best Horizon:** Short-term (0-3M) / Medium-term (3-12M) / Long-term (1Y+)
+        - **Entry/Exit:** Ideal entry price range or trigger condition
+
+        Tailor every point to the analyst's stated context: "{{context}}"
+        Reference personal investment notes where relevant.
+
+        {{ end }}
+
+        Rules (all sections):
+        - Use specific figures where available in the source material
+        - Write "Data unavailable" for any metric not found — do not estimate
+        - Start directly with the first sub-heading; no preamble
+
+# ── Assembler subtask ─────────────────────────────────────────────────────────
+# Single Claude Sonnet pass: assembles sections into a polished final report
+# with an executive summary, signals table, and action items.
+subtasks:
+  - name: assembler
+    model: "{{model_preference.subtasks.assembler}}"
+    input_vars: [section_analyses, personal_context]
+    prompt_template: |
+      You are assembling a final investment analysis report.
+      Ticker: {{ticker_upper}} ({{asset_type}})
+      Date: {{date}}
+      Analyst context: {{context}}
+
+      Four specialist analysts produced the sections below.
+      READ THEM CAREFULLY — assemble and refine, do not rewrite or cut content.
+
+      {{section_analyses}}
+
+      ASSEMBLE THE FINAL REPORT in this exact structure:
+
+      1. **Title line:** # {{ticker_upper}} — Investment Analysis ({{date}})
+         Subtitle: > *{{context}}*
+
+      2. **## Signals At A Glance**
+         A markdown table with exactly 4 rows — extract the signal line from each section:
+         | Dimension | Signal | One-Line Rationale |
+         |---|---|---|
+         | Technical | BULLISH / NEUTRAL / BEARISH | [from section] |
+         | Fundamental | OVERVALUED / FAIRLY VALUED / UNDERVALUED | [from section] |
+         | Competitive | STRENGTHENING / STABLE / WEAKENING | [from section] |
+         | Thesis | STRONG BUY / BUY / HOLD / SELL / STRONG SELL | [from section] |
+
+      3. **## Executive Summary**
+         3-5 sentences: the single most important insight from each analysis dimension
+         and what the combined picture means for the analyst's stated context.
+
+      4. **## Technical Analysis** — include the section verbatim with its sub-headings
+
+      5. **## Fundamental Analysis** — include the section verbatim with its sub-headings
+
+      6. **## Competitive Landscape** — include the section verbatim with its sub-headings
+
+      7. **## Investment Thesis** — include the section verbatim with its sub-headings
+
+      8. **## Action Items**
+         3-5 numbered, concrete actions the analyst should take NOW based on this report.
+         Tailor to the stated context: "{{context}}"
+         If personal notes are available and relevant, reference them.
+
+      9. **Footer:**
+         ---
+         *Report generated {{date}} by SAGIDE Research · Ticker: {{ticker_upper}} · Do your own due diligence.*
+
+      STRICT OUTPUT RULES:
+      - Output ONLY clean Markdown — no JSON, no meta-commentary, no instructions
+      - Sections 4-7: include analyst text verbatim, only add ## heading if missing
+      - Every signal in the table must match the text in its section exactly
+      - Personal notes: {{personal_context}}
+
+# ── Synthesis ─────────────────────────────────────────────────────────────────
+synthesis:
+  prompt_template: |
+    {{assembler_result}}
+
+output:
+  format: markdown
+  destination: "~/reports/{{output_subdir}}/{{date}}-{{ticker}}-analysis.md"
+  notify: true

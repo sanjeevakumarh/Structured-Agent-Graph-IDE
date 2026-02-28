@@ -51,6 +51,11 @@ public class WorkflowEngine
     // Per-instance semaphore to serialize DAG evaluation (prevents races when parallel steps complete)
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
+    // Pre-computed reverse adjacency: instanceId → (dependencyStepId → list of dependent stepIds)
+    // Built at instance start; used by SubmitReadyStepsAsync to limit DAG evaluation to successors
+    // of the just-completed step instead of scanning all N steps (P1 — O(n) → O(k))
+    private readonly ConcurrentDictionary<string, Dictionary<string, List<string>>> _revDepsCache = new();
+
     public event Action<WorkflowInstance>? OnWorkflowUpdate;
 
     /// <summary>
@@ -114,8 +119,9 @@ public class WorkflowEngine
         foreach (var step in def.Steps)
             inst.StepExecutions[step.Id] = new WorkflowStepExecution { StepId = step.Id };
 
-        _active[inst.InstanceId] = (inst, def);
-        _locks[inst.InstanceId]  = new SemaphoreSlim(1, 1);
+        _active[inst.InstanceId]    = (inst, def);
+        _locks[inst.InstanceId]     = new SemaphoreSlim(1, 1);
+        _revDepsCache[inst.InstanceId] = BuildReverseDeps(def);
 
         _logger.LogInformation(
             "Workflow '{Name}' started (instance {Id}, {StepCount} steps)",
@@ -162,8 +168,9 @@ public class WorkflowEngine
                     inst.StepExecutions[step.Id] = new WorkflowStepExecution { StepId = step.Id };
             }
 
-            _active[inst.InstanceId] = (inst, def);
-            _locks[inst.InstanceId]  = new SemaphoreSlim(1, 1);
+            _active[inst.InstanceId]       = (inst, def);
+            _locks[inst.InstanceId]        = new SemaphoreSlim(1, 1);
+            _revDepsCache[inst.InstanceId] = BuildReverseDeps(def);
 
             // Re-register reverse lookup for steps that have a TaskId
             foreach (var (stepId, stepExec) in inst.StepExecutions)
@@ -200,6 +207,25 @@ public class WorkflowEngine
             if (pendingSteps.Count > 0)
                 await SubmitReadyStepsAsync(inst, def, ct);
 
+            // Re-schedule SLA timeouts for WaitingForApproval steps whose deadline was persisted (C2)
+            foreach (var (stepId, stepExec) in inst.StepExecutions)
+            {
+                if (stepExec.Status != WorkflowStepStatus.WaitingForApproval
+                    || stepExec.SlaDeadline is null) continue;
+
+                var step = def.Steps.FirstOrDefault(s => s.Id == stepId);
+                if (step is null) continue;
+
+                var remaining = stepExec.SlaDeadline.Value - DateTime.UtcNow;
+                // If deadline already passed, fire almost immediately to fail the step
+                if (remaining <= TimeSpan.Zero) remaining = TimeSpan.FromMilliseconds(100);
+
+                ScheduleApprovalTimeout(inst.InstanceId, stepId, remaining, step.TimeoutAction, ct);
+                _logger.LogInformation(
+                    "Re-scheduled SLA timeout for step '{StepId}' in instance {Id} (remaining: {Remaining:g})",
+                    stepId, inst.InstanceId, remaining);
+            }
+
             _logger.LogInformation(
                 "Recovered workflow '{Name}' (instance {Id}, {Pending} step(s) re-submitted)",
                 inst.DefinitionName, inst.InstanceId, pendingSteps.Count);
@@ -216,6 +242,8 @@ public class WorkflowEngine
             return;
 
         var (instanceId, stepId) = stepRef;
+
+        using var _scope = _logger.BeginScope(new { TaskId = status.TaskId, WorkflowInstanceId = instanceId, StepId = stepId });
         if (!_active.TryGetValue(instanceId, out var entry))
             return;
 
@@ -439,13 +467,13 @@ public class WorkflowEngine
     }
 
     private void ScheduleApprovalTimeout(
-        string instanceId, string stepId, int slaHours, string timeoutAction, CancellationToken ct)
+        string instanceId, string stepId, TimeSpan delay, string timeoutAction, CancellationToken ct)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(TimeSpan.FromHours(slaHours), ct);
+                await Task.Delay(delay, ct);
                 if (!_active.TryGetValue(instanceId, out var entry)) return;
 
                 var (inst, def) = entry;
@@ -457,10 +485,10 @@ public class WorkflowEngine
                     if (stepExec?.Status != WorkflowStepStatus.WaitingForApproval) return;
 
                     _logger.LogWarning(
-                        "Workflow {Id} step '{StepId}' SLA ({Hrs}h) exceeded — action: {Action}",
-                        instanceId, stepId, slaHours, timeoutAction);
+                        "Workflow {Id} step '{StepId}' SLA ({Hours:F1}h) exceeded — action: {Action}",
+                        instanceId, stepId, delay.TotalHours, timeoutAction);
 
-                    var slaReason = $"SLA of {slaHours} hour(s) exceeded with no human response.";
+                    var slaReason = $"SLA of {delay.TotalHours:F1} hour(s) exceeded with no human response.";
                     stepExec.Error       = slaReason;
                     stepExec.CompletedAt = DateTime.UtcNow;
                     RecordAudit(stepExec, WorkflowStepStatus.Failed, slaReason);
@@ -540,6 +568,9 @@ public class WorkflowEngine
 
     public List<WorkflowInstance> GetAllInstances()
         => _active.Values.Select(e => e.Inst).ToList();
+
+    /// <summary>Number of workflow instances currently in memory (Running or Paused).</summary>
+    public int ActiveInstanceCount => _active.Count;
 
     // ── Private: DAG evaluation ────────────────────────────────────────────────
 
@@ -655,17 +686,33 @@ public class WorkflowEngine
         // Don't submit new steps while paused (Item 5)
         if (inst.IsPaused) return;
 
-        await SubmitReadyStepsAsync(inst, def, CancellationToken.None);
+        await SubmitReadyStepsAsync(inst, def, CancellationToken.None, completedStepId);
     }
 
     /// <summary>
     /// Evaluate routers and constraint steps (synchronous), then submit all ready
     /// agent and tool steps (async). Loops until no more synchronous steps are ready
     /// so that chains of constraints/routers resolve in a single call.
+    /// <para>
+    /// When <paramref name="triggerStepId"/> is provided, the initial candidate set is limited
+    /// to the direct successors of that step (P1 — avoids O(n) scan per completion event).
+    /// The candidate set is expanded as synchronous steps complete, so cascades are handled
+    /// correctly. When null (startup, resume, recovery) all steps are considered.
+    /// </para>
     /// </summary>
     private async Task SubmitReadyStepsAsync(
-        WorkflowInstance inst, WorkflowDefinition def, CancellationToken ct)
+        WorkflowInstance inst, WorkflowDefinition def, CancellationToken ct,
+        string? triggerStepId = null)
     {
+        // Build initial candidate set: successors of the trigger step (if known) or all steps
+        HashSet<string>? candidates = null;
+        if (triggerStepId is not null
+            && _revDepsCache.TryGetValue(inst.InstanceId, out var revDeps)
+            && revDeps.TryGetValue(triggerStepId, out var directSuccessors))
+        {
+            candidates = new HashSet<string>(directSuccessors, StringComparer.Ordinal);
+        }
+
         // ── Pass 1: drain synchronous steps (routers + constraints) ───────────
         // Loop until no more synchronous steps become ready; this handles chains
         // where a constraint's completion immediately unlocks another constraint.
@@ -675,7 +722,7 @@ public class WorkflowEngine
             anySync = false;
 
             // Routers
-            var readyRouters = def.Steps
+            var readyRouters = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
                 .Where(s => s.Type == "router"
                          && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                          && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -693,10 +740,11 @@ public class WorkflowEngine
                         await SubmitStepAsync(targetDef, inst, def, ct);
                 }
                 anySync = true;
+                ExpandCandidates(router.Id);
             }
 
             // Constraints (evaluate synchronously, no I/O)
-            var readyConstraints = def.Steps
+            var readyConstraints = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
                 .Where(s => s.Type == "constraint"
                          && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                          && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -707,10 +755,11 @@ public class WorkflowEngine
             {
                 ExecuteConstraintStep(constraint, inst, def);
                 anySync = true;
+                ExpandCandidates(constraint.Id);
             }
 
             // Context retrieval (synchronous aggregation, no I/O)
-            var readyCtxRetrieval = def.Steps
+            var readyCtxRetrieval = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
                 .Where(s => s.Type == "context_retrieval"
                          && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                          && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -721,10 +770,11 @@ public class WorkflowEngine
             {
                 ExecuteContextRetrievalStep(ctxStep, inst);
                 anySync = true;
+                ExpandCandidates(ctxStep.Id);
             }
 
             // workspace_provision — creates isolated shadow worktree ()
-            var readyProvisions = def.Steps
+            var readyProvisions = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
                 .Where(s => s.Type == "workspace_provision"
                          && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                          && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -734,10 +784,11 @@ public class WorkflowEngine
             {
                 await ExecuteWorkspaceProvisionStepAsync(ps, inst, def, ct);
                 anySync = true;
+                ExpandCandidates(ps.Id);
             }
 
             // workspace_teardown — promotes or destroys shadow worktree ()
-            var readyTeardowns = def.Steps
+            var readyTeardowns = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
                 .Where(s => s.Type == "workspace_teardown"
                          && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                          && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -747,6 +798,7 @@ public class WorkflowEngine
             {
                 await ExecuteWorkspaceTeardownStepAsync(ts, inst, def, ct);
                 anySync = true;
+                ExpandCandidates(ts.Id);
             }
         }
         while (anySync);
@@ -754,7 +806,7 @@ public class WorkflowEngine
         // ── Pass 1b: activate human_approval gates ───────────────────────────
         // When all dependencies are complete the gate transitions to WaitingForApproval
         // and the workflow is effectively paused for that branch until approved/rejected.
-        var readyApprovals = def.Steps
+        var readyApprovals = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
             .Where(s => s.Type == "human_approval"
                      && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                      && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -775,18 +827,22 @@ public class WorkflowEngine
             _logger.LogInformation(
                 "Workflow {Id} step '{StepId}' is waiting for human approval", inst.InstanceId, approvalStep.Id);
 
+            // Schedule SLA timeout if configured; persist deadline so the timer survives restart (C2)
+            if (approvalStep.SlaHours > 0)
+            {
+                var slaDelay = TimeSpan.FromHours(approvalStep.SlaHours);
+                stepExec.SlaDeadline = DateTime.UtcNow.Add(slaDelay);
+                ScheduleApprovalTimeout(inst.InstanceId, approvalStep.Id, slaDelay, approvalStep.TimeoutAction, ct);
+            }
+
             await PersistInstanceAsync(inst);
             OnWorkflowUpdate?.Invoke(inst);
             OnApprovalNeeded?.Invoke(inst.InstanceId, approvalStep.Id, prompt);
-
-            // Schedule SLA timeout if configured
-            if (approvalStep.SlaHours > 0)
-                ScheduleApprovalTimeout(inst.InstanceId, approvalStep.Id, approvalStep.SlaHours, approvalStep.TimeoutAction, ct);
         }
 
         // ── Pass 2: submit async steps (tools + agents) ───────────────────────
 
-        var readyTools = def.Steps
+        var readyTools = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
             .Where(s => s.Type == "tool"
                      && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                      && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -796,7 +852,7 @@ public class WorkflowEngine
         foreach (var tool in readyTools)
             ExecuteToolStepInBackground(tool, inst, def);
 
-        var readyAgents = def.Steps
+        var readyAgents = (candidates is null ? def.Steps : def.Steps.Where(s => candidates.Contains(s.Id)))
             .Where(s => s.Type == "agent"
                      && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
                      && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
@@ -805,6 +861,13 @@ public class WorkflowEngine
 
         if (readyAgents.Count > 0)
             await Task.WhenAll(readyAgents.Select(s => SubmitStepAsync(s, inst, def, ct)));
+
+        void ExpandCandidates(string completedId)
+        {
+            if (candidates is null || !_revDepsCache.TryGetValue(inst.InstanceId, out var rv)) return;
+            if (rv.TryGetValue(completedId, out var successors))
+                foreach (var s in successors) candidates.Add(s);
+        }
     }
 
     private async Task SubmitStepAsync(
@@ -1600,11 +1663,33 @@ public class WorkflowEngine
             }
             // Remove the semaphore entry to bound _locks size, but do NOT dispose it.
             _locks.TryRemove(instanceId, out _);
+            _revDepsCache.TryRemove(instanceId, out _);
             _logger.LogDebug("Cleaned up completed instance {Id} from active set", instanceId);
         });
     }
 
     private void BroadcastUpdate(WorkflowInstance inst) => OnWorkflowUpdate?.Invoke(inst);
+
+    /// <summary>
+    /// Builds a reverse adjacency map for a workflow definition.
+    /// Returns: dependencyStepId → list of stepIds that list it in their DependsOn.
+    /// Used by SubmitReadyStepsAsync to limit DAG evaluation to the successors of a
+    /// just-completed step rather than scanning all steps (P1 — avoids O(n) scan per event).
+    /// </summary>
+    private static Dictionary<string, List<string>> BuildReverseDeps(WorkflowDefinition def)
+    {
+        var revDeps = new Dictionary<string, List<string>>(def.Steps.Count, StringComparer.Ordinal);
+        foreach (var step in def.Steps)
+        {
+            foreach (var dep in step.DependsOn)
+            {
+                if (!revDeps.TryGetValue(dep, out var list))
+                    revDeps[dep] = list = new List<string>(4);
+                list.Add(step.Id);
+            }
+        }
+        return revDeps;
+    }
 
     // ── Audit helper (BaseNode contract) ─────────────────────────────────
 

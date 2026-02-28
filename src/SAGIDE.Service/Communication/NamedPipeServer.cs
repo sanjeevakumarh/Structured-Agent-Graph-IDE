@@ -21,8 +21,10 @@ public class NamedPipeServer
     private readonly ConcurrentDictionary<string, ClientEntry> _clients = new();
     // Maps taskId → clientId so streaming output is routed only to the submitting window
     private readonly ConcurrentDictionary<string, string> _taskOwners = new();
-    // bounded channel — BroadcastAsync enqueues here; drain loop fans out to all clients
+    // bounded channel — high-volume streaming messages (DropOldest prevents producer blockage)
     private readonly Channel<PipeMessage> _broadcastChannel;
+    // unbounded channel — lifecycle/state events that must never be dropped (R2)
+    private readonly Channel<PipeMessage> _lifecycleChannel;
     private CancellationTokenSource? _cts;
 
     /// <summary>
@@ -58,6 +60,14 @@ public class NamedPipeServer
             SingleReader      = true,   // only DrainBroadcastChannelAsync reads
             SingleWriter      = false   // multiple threads may broadcast concurrently
         });
+
+        // Unbounded — lifecycle events (TaskUpdate, WorkflowUpdate, ApprovalNeeded, etc.) must never
+        // be dropped. These are low-volume compared to streaming_output tokens. (R2)
+        _lifecycleChannel = Channel.CreateUnbounded<PipeMessage>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+        });
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -65,10 +75,11 @@ public class NamedPipeServer
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _logger.LogInformation("Named pipe server starting on: {PipeName}", _pipeName);
 
-        // Run accept loop and broadcast drain loop concurrently.
+        // Run accept loop and both drain loops concurrently.
         await Task.WhenAll(
             RunAcceptLoopAsync(_cts.Token),
-            DrainBroadcastChannelAsync(_cts.Token));
+            DrainBroadcastChannelAsync(_cts.Token),
+            DrainLifecycleChannelAsync(_cts.Token));
     }
 
     private async Task RunAcceptLoopAsync(CancellationToken ct)
@@ -208,9 +219,11 @@ public class NamedPipeServer
     }
 
     /// <summary>
-    /// Background drain loop — reads broadcast messages from the bounded channel and
+    /// Background drain loop — reads high-volume broadcast messages from the bounded channel and
     /// fans each one out to all connected clients in parallel with per-client timeouts.
     /// The producer (BroadcastAsync) is never blocked by a slow or stalled client.
+    /// Only <see cref="MessageTypes.StreamingOutput"/> messages are routed here; all other
+    /// message types go through the unbounded lifecycle channel (R2).
     /// </summary>
     private async Task DrainBroadcastChannelAsync(CancellationToken ct)
     {
@@ -224,6 +237,26 @@ public class NamedPipeServer
 
             // Fire all per-client sends in parallel; don't await the aggregate — if one
             // client's timeout fires and disconnects it, the others are unaffected.
+            _ = Task.WhenAll(connected.Select(
+                kvp => SendWithTimeoutAsync(kvp.Key, kvp.Value, message, ct)));
+        }
+    }
+
+    /// <summary>
+    /// Background drain loop for lifecycle/state events (TaskUpdate, WorkflowUpdate,
+    /// WorkflowApprovalNeeded, etc.). Uses an unbounded channel so these messages are
+    /// never silently dropped under streaming backpressure (R2).
+    /// </summary>
+    private async Task DrainLifecycleChannelAsync(CancellationToken ct)
+    {
+        await foreach (var message in _lifecycleChannel.Reader.ReadAllAsync(ct))
+        {
+            var connected = _clients
+                .Where(kvp => kvp.Value.Stream.IsConnected)
+                .ToList();
+
+            if (connected.Count == 0) continue;
+
             _ = Task.WhenAll(connected.Select(
                 kvp => SendWithTimeoutAsync(kvp.Key, kvp.Value, message, ct)));
         }
@@ -330,18 +363,29 @@ public class NamedPipeServer
     }
 
     /// <summary>
-    /// Non-blocking broadcast — enqueues into the bounded channel and returns immediately.
-    /// The drain loop fans the message out to all connected clients asynchronously.
-    /// If the channel is full, the oldest undelivered message is dropped (DropOldest policy).
+    /// Non-blocking broadcast — routes the message to the appropriate drain channel and returns immediately.
+    /// <para>
+    /// <see cref="MessageTypes.StreamingOutput"/> messages go to the bounded channel (DropOldest);
+    /// all other message types (TaskUpdate, WorkflowUpdate, ApprovalNeeded, etc.) go to the
+    /// unbounded lifecycle channel so they are never silently dropped (R2).
+    /// </para>
     /// </summary>
     public Task BroadcastAsync(PipeMessage message, CancellationToken ct = default)
     {
-        if (!_broadcastChannel.Writer.TryWrite(message))
+        if (message.Type == MessageTypes.StreamingOutput)
         {
-            Interlocked.Increment(ref _droppedMessageCount);
-            _logger.LogWarning(
-                "Broadcast channel full; dropped oldest message (type={Type}, total dropped={Count})",
-                message.Type, DroppedMessageCount);
+            if (!_broadcastChannel.Writer.TryWrite(message))
+            {
+                Interlocked.Increment(ref _droppedMessageCount);
+                _logger.LogWarning(
+                    "Broadcast channel full; dropped oldest streaming message (total dropped={Count})",
+                    DroppedMessageCount);
+            }
+        }
+        else
+        {
+            // Lifecycle events are written to an unbounded channel — TryWrite always succeeds.
+            _lifecycleChannel.Writer.TryWrite(message);
         }
         return Task.CompletedTask;
     }
@@ -395,6 +439,7 @@ public class NamedPipeServer
     public async Task StopAsync()
     {
         _broadcastChannel.Writer.Complete();
+        _lifecycleChannel.Writer.Complete();
         _cts?.Cancel();
         foreach (var entry in _clients.Values)
         {

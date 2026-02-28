@@ -96,6 +96,14 @@ public class WorkflowStepExecution
     /// Null for tool, constraint, router, and human_approval steps.
     /// </summary>
     public IntentPackage? IntentPackage { get; set; }
+
+    /// <summary>
+    /// UTC deadline for a human_approval gate. Set when the gate becomes active and SlaHours > 0.
+    /// Persisted in the workflow instance JSON so the SLA timer can be re-scheduled after a
+    /// service restart (C2 — SLA timeouts survive restarts).
+    /// Null for non-approval steps or approval steps with no configured SLA.
+    /// </summary>
+    public DateTime? SlaDeadline { get; set; }
 }
 
 public enum WorkflowStatus

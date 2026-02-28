@@ -16,9 +16,15 @@ export class NamedPipeClient extends EventEmitter {
     private reconnectTimer: NodeJS.Timeout | null = null;
     private requestCounter = 0;
 
-    constructor(pipeName: string = '\\\\.\\pipe\\SAGIDEPipe', sharedSecret?: string) {
+    constructor(pipeName?: string, sharedSecret?: string) {
         super();
-        this.pipeName = pipeName;
+        // ServiceConnection always supplies the full platform-resolved path.
+        // The default here handles any direct instantiation (e.g. tests).
+        this.pipeName = pipeName ?? (
+            process.platform === 'win32'
+                ? '\\\\.\\pipe\\SAGIDEPipe'
+                : '/tmp/CoreFxPipe_SAGIDEPipe'
+        );
         this.sharedSecret = sharedSecret;
     }
 

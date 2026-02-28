@@ -22,7 +22,17 @@ public class WorkflowDefinition
 public class WorkflowParameter
 {
     public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Data type of the parameter. Valid values:
+    ///   string  (default) — any text value
+    ///   integer / int     — whole number
+    ///   boolean / bool    — true or false
+    ///   number  / float   — decimal number
+    /// Used for documentation; parameters are always passed as strings at runtime.
+    /// </summary>
     public string Type { get; set; } = "string";
+
     public string? Default { get; set; }
 }
 

@@ -7,6 +7,7 @@ using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Agents;
+using SAGIDE.Service.Observability;
 using SAGIDE.Service.Resilience;
 using SAGIDE.Service.ActivityLogging;
 
@@ -30,6 +31,7 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly SemaphoreSlim _concurrencyLimiter;
     private readonly int _broadcastThrottleMs;
     private readonly Infrastructure.LoggingConfig _loggingConfig;
+    private readonly SagideMetrics? _metrics;
     private CancellationTokenSource? _processingCts;
 
     /// <summary>
@@ -61,7 +63,8 @@ public class AgentOrchestrator : ITaskSubmissionService
         int broadcastThrottleMs = 200,
         int maxFileSizeChars = 32_000,
         Providers.ProviderFactory? providerFactory = null,
-        Infrastructure.LoggingConfig? loggingConfig = null)
+        Infrastructure.LoggingConfig? loggingConfig = null,
+        SagideMetrics? metrics = null)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
@@ -84,6 +87,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         _broadcastThrottleMs = broadcastThrottleMs;
         _maxFileSizeChars = maxFileSizeChars;
         _loggingConfig = loggingConfig ?? new Infrastructure.LoggingConfig();
+        _metrics = metrics;
     }
 
     // R001: Idempotent — duplicate task ID returns existing, no re-execution
@@ -97,6 +101,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         }
 
         var taskId = _taskQueue.Enqueue(task);
+        _metrics?.RecordTaskSubmitted();
         _logger.LogInformation(
             "Task {TaskId} queued: {AgentType} on {ModelProvider}/{ModelId}",
             taskId, task.AgentType, task.ModelProvider, task.ModelId);
@@ -190,6 +195,8 @@ public class AgentOrchestrator : ITaskSubmissionService
     private async Task ExecuteTaskAsync(AgentTask task, CancellationToken ct)
     {
         int retryCount = 0;
+
+        using var _scope = _logger.BeginScope(new { TaskId = task.Id, Provider = task.ModelProvider.ToString(), SourceTag = task.SourceTag });
 
         try
         {
@@ -291,6 +298,7 @@ public class AgentOrchestrator : ITaskSubmissionService
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 lastResponse = await StreamToStringAsync(provider, prompt, modelConfig, task, taskCt);
                 sw.Stop();
+                _metrics?.RecordLlmCall(sw.ElapsedMilliseconds, provider.LastInputTokens, provider.LastOutputTokens);
 
                 // After streaming completes, show a brief "Parsing" state before the final 100%.
                 task.Progress = (int)((double)iteration / maxIterations * 80);
@@ -329,6 +337,7 @@ public class AgentOrchestrator : ITaskSubmissionService
             task.Status = AgentTaskStatus.Completed;
             task.StatusMessage = "Done";
             task.CompletedAt = DateTime.UtcNow;
+            _metrics?.RecordTaskCompleted();
             BroadcastUpdate(task);
             // Atomic: task Completed status + final result in one transaction
             await PersistCompletedAsync(task, lastResult!);
@@ -490,6 +499,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         task.Status = AgentTaskStatus.Failed;
         task.StatusMessage = errorMessage;
         task.CompletedAt = DateTime.UtcNow;
+        _metrics?.RecordTaskFailed();
         BroadcastUpdate(task);
         await PersistTaskAsync(task);
 
@@ -765,18 +775,23 @@ public class AgentOrchestrator : ITaskSubmissionService
 
     private async Task<string> BuildPrompt(AgentTask task)
     {
-        // Read actual file contents for the prompt
+        // Read actual file contents for the prompt.
+        // Cache by absolute path so duplicate entries in FilePaths are read only once.
         var fileContents = new List<string>();
+        var fileCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var filePath in task.FilePaths)
         {
-            if (File.Exists(filePath))
+            if (!File.Exists(filePath)) continue;
+
+            if (!fileCache.TryGetValue(filePath, out var content))
             {
-                var content = await File.ReadAllTextAsync(filePath);
+                content = await File.ReadAllTextAsync(filePath);
                 if (content.Length > _maxFileSizeChars)
                     content = string.Concat(content.AsSpan(0, _maxFileSizeChars),
                         $"\n... [file truncated to {_maxFileSizeChars:N0} chars]");
-                fileContents.Add($"### {Path.GetFileName(filePath)}\n```\n{content}\n```");
+                fileCache[filePath] = content;
             }
+            fileContents.Add($"### {Path.GetFileName(filePath)}\n```\n{content}\n```");
         }
 
         var fileContext = fileContents.Count > 0

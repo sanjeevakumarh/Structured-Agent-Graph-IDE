@@ -47,19 +47,22 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-02-28)
+- Observability and DI cleanup — Added /api/metrics with cumulative counts and gauges, centralized DI setup via AddSagide* extension methods, and enabled OpenAPI export for development.
+- Workflow resilience and performance — SLA deadlines on human-approval steps persist across restarts, approval timers are re-scheduled on recovery, and DAG evaluation now uses reverse dependencies to avoid O(n) scans.
+- Finance assets —  finance prompts for daily stock screens plus on-demand stock analysis.
+
+
 ## Updates (2026-02-27)
 
 - Research report improvements — Fixed the web dashboard's prompt variable input parser, which was silently failing to pass "key": "value" pairs. Changed report output filenames from a static -weekly suffix to a topic-derived keyword slug (e.g. 2026-02-27-subject_slug.md).
 
 - Build pipeline and extension hardening — Fixed build script, eliminated hardcoded http://localhost:5100 URL baked into the VS Code extension — it now reads from the sagIDE.serviceUrl workspace setting.
 
-
-
 ## Updates (2026-02-26)
 - Dynamic weekly digest now plans sections with Scriban templating, replacing fixed headings and hardcoded query categories.
 - Pipe security tightened with optional shared-secret handshake across service, extension, and client; logging gains safe redaction plus expanded template rendering.
 - Resilience and recovery strengthened with new workflow/orchestrator/provider tests, refined SubtaskCoordinator/WorkflowEngine behavior, and hardened pipe/message handling.
-
 
 ## Updates (2026-02-25)
 - Added full RAG pipeline and orchestration stack (workflow engine, prompt registry/templates, subtask coordinator, scheduler, RAG fetch/chunk/embed/vector store/search) with new API endpoints and resilience/plumbing updates.

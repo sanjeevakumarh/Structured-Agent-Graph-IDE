@@ -38,7 +38,7 @@ export class ServiceConnection implements vscode.Disposable {
     constructor(pipeName: string, sharedSecret?: string) {
         const fullPipeName = process.platform === 'win32'
             ? `\\\\.\\pipe\\${pipeName}`
-            : `/tmp/${pipeName}`;
+            : `/tmp/CoreFxPipe_${pipeName}`;
 
         this.client = new NamedPipeClient(fullPipeName, sharedSecret);
         this.statusBarItem = vscode.window.createStatusBarItem(

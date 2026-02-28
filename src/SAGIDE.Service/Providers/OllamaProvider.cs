@@ -18,6 +18,9 @@ public class OllamaProvider : IAgentProvider
     private readonly string _defaultBaseUrl;
     private readonly Dictionary<string, string> _modelEndpoints; // modelId -> baseUrl (static routing)
     private readonly OllamaHostHealthMonitor? _healthMonitor;   // dynamic routing (optional)
+    // One HttpClient per base URL; uses SocketsHttpHandler with PooledConnectionLifetime to
+    // recycle connections every 2 min, preventing socket exhaustion and DNS staleness (A4).
+    // This is the recommended pattern when IHttpClientFactory is not available.
     private readonly ConcurrentDictionary<string, HttpClient> _clientsByUrl = new();
     private readonly RetryPolicy _retryPolicy;
     private readonly TimeSpan _timeout;
@@ -48,10 +51,16 @@ public class OllamaProvider : IAgentProvider
     }
 
     private HttpClient GetClient(string baseUrl) =>
-        _clientsByUrl.GetOrAdd(baseUrl, url => new HttpClient
+        _clientsByUrl.GetOrAdd(baseUrl, url => new HttpClient(
+            new SocketsHttpHandler
+            {
+                // Recycle the connection pool every 2 minutes so DNS changes are picked up
+                // and long-running services don't exhaust ephemeral ports (A4).
+                PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            })
         {
             BaseAddress = new Uri(url),
-            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+            Timeout     = System.Threading.Timeout.InfiniteTimeSpan,
         });
 
     /// <summary>

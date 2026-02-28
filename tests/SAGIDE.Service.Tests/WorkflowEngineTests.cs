@@ -40,6 +40,19 @@ internal sealed class FakeTaskSubmitter : ITaskSubmissionService
         CancelledTaskIds.Add(taskId);
         return Task.CompletedTask;
     }
+
+    public TaskStatusResponse? GetTaskStatus(string taskId)
+    {
+        if (!SubmittedTasks.TryGetValue(taskId, out var task)) return null;
+        return new TaskStatusResponse
+        {
+            TaskId        = taskId,
+            Status        = AgentTaskStatus.Completed,
+            AgentType     = task.AgentType,
+            ModelProvider = task.ModelProvider,
+            ModelId       = task.ModelId ?? string.Empty,
+        };
+    }
 }
 
 // ── Test harness ──────────────────────────────────────────────────────────────

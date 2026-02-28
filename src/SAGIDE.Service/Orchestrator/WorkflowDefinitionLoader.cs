@@ -247,6 +247,17 @@ public class WorkflowDefinitionLoader
             }
         }
 
+        // Validate parameter types
+        var validParamTypes = new[] { "string", "integer", "int", "boolean", "bool", "number", "float" };
+        foreach (var param in def.Parameters)
+        {
+            if (!string.IsNullOrEmpty(param.Type) &&
+                !validParamTypes.Contains(param.Type, StringComparer.OrdinalIgnoreCase))
+                errors.Add(
+                    $"Parameter '{param.Name}' has invalid type '{param.Type}'. " +
+                    $"Valid values: string, integer, boolean, number (int/bool/float are aliases).");
+        }
+
         // Workflows with back-edges (next:) should declare a convergence_policy.
         var hasLoop = def.Steps.Any(s => s.Next is not null);
         if (hasLoop && def.ConvergencePolicy is null)

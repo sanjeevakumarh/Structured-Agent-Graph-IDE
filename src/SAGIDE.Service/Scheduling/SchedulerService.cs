@@ -18,7 +18,7 @@ namespace SAGIDE.Service.Scheduling;
 public sealed class SchedulerService : BackgroundService
 {
     private readonly PromptRegistry _registry;
-    private readonly AgentOrchestrator _orchestrator;
+    private readonly ITaskSubmissionService _taskSubmission;
     private readonly SubtaskCoordinator _coordinator;
     private readonly ISchedulerRepository _schedulerRepo;
     private readonly bool _enabled;
@@ -29,18 +29,18 @@ public sealed class SchedulerService : BackgroundService
 
     public SchedulerService(
         PromptRegistry registry,
-        AgentOrchestrator orchestrator,
+        ITaskSubmissionService taskSubmission,
         SubtaskCoordinator coordinator,
         ISchedulerRepository schedulerRepo,
         IConfiguration configuration,
         ILogger<SchedulerService> logger)
     {
-        _registry      = registry;
-        _orchestrator  = orchestrator;
-        _coordinator   = coordinator;
-        _schedulerRepo = schedulerRepo;
-        _enabled       = configuration.GetValue("SAGIDE:Scheduler:Enabled", true);
-        _logger        = logger;
+        _registry       = registry;
+        _taskSubmission = taskSubmission;
+        _coordinator    = coordinator;
+        _schedulerRepo  = schedulerRepo;
+        _enabled        = configuration.GetValue("SAGIDE:Scheduler:Enabled", true);
+        _logger         = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -179,7 +179,7 @@ public sealed class SchedulerService : BackgroundService
             },
         };
 
-        var taskId = await _orchestrator.SubmitTaskAsync(task, ct);
+        var taskId = await _taskSubmission.SubmitTaskAsync(task, ct);
         _logger.LogInformation("Scheduler submitted task {TaskId} for {Domain}/{Name}",
             taskId, prompt.Domain, prompt.Name);
     }

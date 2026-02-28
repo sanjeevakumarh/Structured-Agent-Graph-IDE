@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Prompts;
 using SAGIDE.Service.Providers;
@@ -24,7 +25,7 @@ namespace SAGIDE.Service.Orchestrator;
 /// </summary>
 public sealed class SubtaskCoordinator
 {
-    private readonly AgentOrchestrator _orchestrator;
+    private readonly ITaskSubmissionService _taskSubmission;
     private readonly WebFetcher _fetcher;
     private readonly WebSearchAdapter _search;
     private readonly IConfiguration _config;
@@ -44,15 +45,15 @@ public sealed class SubtaskCoordinator
     };
 
     public SubtaskCoordinator(
-        AgentOrchestrator orchestrator,
+        ITaskSubmissionService taskSubmission,
         WebFetcher fetcher,
         WebSearchAdapter search,
         IConfiguration config,
         ILogger<SubtaskCoordinator> logger,
         OllamaHostHealthMonitor? healthMonitor = null)
     {
-        _orchestrator  = orchestrator;
-        _fetcher       = fetcher;
+        _taskSubmission = taskSubmission;
+        _fetcher        = fetcher;
         _search        = search;
         _config        = config;
         _logger        = logger;
@@ -126,6 +127,11 @@ public sealed class SubtaskCoordinator
         // e.g. "Microsoft stock outlook" → "Microsoft_stock_outlook"
         if (vars.TryGetValue("topic", out var topicVal))
             vars["topic_slug"] = BuildTopicSlug(topicVal?.ToString() ?? string.Empty);
+
+        // Derive ticker_upper so finance prompts can use {{ticker_upper}} for display.
+        // e.g. "ko" → "KO"
+        if (vars.TryGetValue("ticker", out var tickerVal))
+            vars["ticker_upper"] = tickerVal?.ToString()?.ToUpperInvariant() ?? string.Empty;
 
         // Make model_preference available so subtask model fields like
         // "{{model_preference.subtasks.fundamental}}" resolve correctly.
@@ -328,7 +334,7 @@ public sealed class SubtaskCoordinator
                 if (!string.IsNullOrEmpty(planEndpoint))
                     planTask.Metadata["modelEndpoint"] = planEndpoint;
 
-                var planTaskId = await _orchestrator.SubmitTaskAsync(planTask, ct);
+                var planTaskId = await _taskSubmission.SubmitTaskAsync(planTask, ct);
                 _logger.LogInformation(
                     "llm_queries '{Name}': planning task {TaskId} submitted (model: {Model}@{Host})",
                     step.Name, planTaskId, planModelId, planEndpoint ?? "auto");
@@ -397,7 +403,7 @@ public sealed class SubtaskCoordinator
                 };
                 if (!string.IsNullOrEmpty(secEndpoint)) planTask.Metadata["modelEndpoint"] = secEndpoint;
 
-                var planTaskId = await _orchestrator.SubmitTaskAsync(planTask, ct);
+                var planTaskId = await _taskSubmission.SubmitTaskAsync(planTask, ct);
                 var planResult = await WaitForTaskAsync(planTaskId, ct);
                 var sectionNames = ParseJsonStringArray(planResult);
 
@@ -451,7 +457,7 @@ public sealed class SubtaskCoordinator
                     };
                     if (!string.IsNullOrEmpty(secEndpoint)) sTask.Metadata["modelEndpoint"] = secEndpoint;
 
-                    var sTaskId = await _orchestrator.SubmitTaskAsync(sTask, ct);
+                    var sTaskId = await _taskSubmission.SubmitTaskAsync(sTask, ct);
                     _logger.LogDebug("llm_per_section '{Name}': section '{Section}' → task {TaskId}",
                         step.Name, sectionName, sTaskId);
                     var result = await WaitForTaskAsync(sTaskId, ct);
@@ -546,7 +552,7 @@ public sealed class SubtaskCoordinator
                 .Where(s => string.IsNullOrEmpty(results.GetValueOrDefault(s.Name)))
                 .Select(async s =>
                 {
-                    var status = _orchestrator.GetTaskStatus(s.TaskId);
+                    var status = _taskSubmission.GetTaskStatus(s.TaskId);
                     if (status?.Status != SAGIDE.Core.Models.AgentTaskStatus.Failed) return;
                     if (!IsRetryableServerError(status.StatusMessage ?? string.Empty)) return;
 
@@ -654,7 +660,7 @@ public sealed class SubtaskCoordinator
             if (!string.IsNullOrEmpty(endpoint))
                 task.Metadata["modelEndpoint"] = endpoint;
 
-            var taskId = await _orchestrator.SubmitTaskAsync(task, ct);
+            var taskId = await _taskSubmission.SubmitTaskAsync(task, ct);
             _logger.LogInformation(
                 "Subtask '{Name}' submitted as task {TaskId} (model: {Model}@{Host})",
                 subtask.Name, taskId, modelId, endpoint ?? "auto");
@@ -683,16 +689,26 @@ public sealed class SubtaskCoordinator
         if (subtask.InputVars.Count == 0)
             return allVars; // No filter — pass everything
 
-        // Include base vars + the explicitly listed input vars
+        // Seed with auto-computed date vars.
         var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
         {
             ["date"]     = allVars.GetValueOrDefault("date", string.Empty),
             ["datetime"] = allVars.GetValueOrDefault("datetime", string.Empty),
         };
 
+        // Copy all YAML prompt-level variables (topic, context, output_subdir, …)
+        // from allVars — not from prompt.Variables — so caller overrides (POST body)
+        // are applied instead of the YAML defaults.
         foreach (var kv in prompt.Variables)
-            result[kv.Key] = kv.Value;
+            if (allVars.TryGetValue(kv.Key, out var overriddenVal))
+                result[kv.Key] = overriddenVal;
 
+        // Propagate auto-derived keys that are not in prompt.Variables.
+        foreach (var key in (ReadOnlySpan<string>)["topic_slug", "ticker_upper", "model_preference"])
+            if (allVars.TryGetValue(key, out var computedVal))
+                result[key] = computedVal;
+
+        // Add data-collection outputs explicitly declared by this subtask.
         foreach (var key in subtask.InputVars)
             if (allVars.TryGetValue(key, out var val))
                 result[key] = val;
@@ -710,7 +726,7 @@ public sealed class SubtaskCoordinator
         {
             await Task.Delay(2_000, ct);
 
-            var status = _orchestrator.GetTaskStatus(taskId);
+            var status = _taskSubmission.GetTaskStatus(taskId);
             if (status is null) break;
 
             switch (status.Status)

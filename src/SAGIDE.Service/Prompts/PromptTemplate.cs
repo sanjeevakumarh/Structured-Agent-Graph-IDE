@@ -118,8 +118,9 @@ public static class PromptTemplate
             var ctx = new TemplateContext { MemberRenamer = m => m.Name };
             var globals = new ScriptObject();
 
-            globals["date"]     = now.ToString("yyyy-MM-dd");
-            globals["datetime"] = now.ToString("O");
+            globals["date"]      = now.ToString("yyyy-MM-dd");
+            globals["datestamp"] = now.ToString("yyyy-MM-dd-HH-mm");
+            globals["datetime"]  = now.ToString("O");
 
             // Flat context variables (user-supplied InputContext)
             foreach (var kv in inputContext)
@@ -166,8 +167,9 @@ public static class PromptTemplate
 
         // Auto-inject date/time
         var now = DateTime.UtcNow;
-        globals["date"]     = now.ToString("yyyy-MM-dd");
-        globals["datetime"] = now.ToString("O");
+        globals["date"]      = now.ToString("yyyy-MM-dd");
+        globals["datestamp"] = now.ToString("yyyy-MM-dd-HH-mm");
+        globals["datetime"]  = now.ToString("O");
 
         // Inject YAML-declared variables (lowest priority)
         foreach (var kv in definition.Variables)

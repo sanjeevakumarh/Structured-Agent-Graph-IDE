@@ -1,0 +1,505 @@
+# yaml-language-server: $schema=../docs/prompt-schema.json
+name: stock-analysis
+version: 2
+domain: finance
+source_tag: finance_analysis
+
+description: >
+  On-demand deep-dive for any stock or ETF: technical analysis, fundamental/portfolio-structure
+  analysis, competitive landscape, and investment thesis. Includes scoring gates,
+  bull/base/bear cases with probability estimates, PEG validation, cyclical analysis,
+  structured risk matrix, and ETF-specific portfolio structure analysis.
+  No schedule — trigger manually from the web UI or
+  POST /api/prompts/finance/stock-analysis/run with ticker + context.
+
+model_preference:
+  orchestrator: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+  subtasks:
+    # Fast structured-output model for query planning
+    planner:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    # Strong local model for the four parallel analysis sections
+    analyst:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    # Frontier model for final assembly — coherence + writing quality matter here
+    assembler: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+
+# ── Variables ─────────────────────────────────────────────────────────────────
+# Override any of these via POST body when running from the web UI:
+#   { "ticker": "ko", "context": "food and beverage market impact due to ozempic" }
+variables:
+  ticker: "ko"
+
+  # Exchange prefix for unambiguous search — avoids ticker/keyword collisions.
+  # Set to the listing exchange (NASDAQ, NYSE, AMEX, etc.) when the ticker
+  # is a common word or crypto term (e.g. COIN, HOOD, DASH, OPEN, REAL).
+  # Leave blank for unambiguous tickers like AAPL, MSFT, KO.
+  exchange: ""
+
+  # stock | etf — prompts adapt their instructions accordingly
+  asset_type: "stock"
+
+  # Your analytical lens — drives query framing and thesis tailoring
+  context: >
+    General investor. Interested in medium-term (3-12 month) opportunities.
+    Moderate risk tolerance. Dividend-paying equities and sector rotation plays.
+
+  # Optional: personal investment notes file (silent no-op if missing)
+  context_file: "~/projects/context/INVESTMENT_CONTEXT.md"
+
+  max_results: "8"
+  output_subdir: "finance"
+  analyst_model_override: ""
+  assembler_model_override: ""
+
+# ── Skill object: stock data track ─────────────────────────────────────────────
+objects:
+  - name: stock_data
+    skill: finance/stock-data-track
+    args:
+      ticker: "{{ticker}}"
+      exchange: "{{exchange}}"
+      asset_type: "{{asset_type}}"
+      context: "{{context}}"
+      max_results: "{{max_results}}"
+      output_var: all_search_results
+
+# ── Workflow: collect stock data ────────────────────────────────────────────────
+workflow:
+  - call: stock_data.collect
+
+# ── Data collection ────────────────────────────────────────────────────────────
+data_collection:
+  steps:
+    # Step 1 — Load personal investment notes (silent no-op if file missing)
+    - name: load_personal_context
+      type: read_file
+      source: "{{context_file}}"
+      output_var: personal_context
+
+    # Step 3 — Run all four analysis sections in parallel via llm_per_section.
+    # The planning prompt returns exactly the 4 section titles; each section then
+    # receives a tailored analysis prompt routed by {{section_name}}.
+    - name: run_analyses
+      type: llm_per_section
+      model: '{{ if analyst_model_override != "" }}{{analyst_model_override}}{{ else }}{{model_preference.subtasks.analyst}}{{ end }}'
+      max_sections: "4"
+      search_results_var: all_search_results
+      output_var: section_analyses
+
+      # Phase 1: return exactly these 4 titles in this order (no variation)
+      planning_prompt: |
+        Return exactly this JSON array — no changes to the titles, no explanation:
+        ["Technical Analysis", "Fundamental Analysis", "Competitive Landscape", "Investment Thesis"]
+
+      # Phase 2: runs once per section title in parallel.
+      # Scriban conditionals route to the right instructions for each section.
+      section_analysis_prompt: |
+        Ticker: {{ticker_upper}} ({{asset_type}})
+        Analyst context: {{context}}
+        Date: {{date}}
+        Personal notes: {{personal_context}}
+
+        Regulatory context: ONLY if {{context}} explicitly names a specific bill, act, or regulation
+        (e.g. "CLARITY Act", "SEC market structure reform"), add a "Regulatory Lens" subsection.
+        If the context does NOT mention any specific legislation, do NOT add a Regulatory Lens subsection
+        and do NOT invent or assume any regulatory developments.
+
+        Source material (web search results):
+        ---
+        {{search_results}}
+        ---
+
+        STEP 1 — SCAN: Before writing anything, read every search snippet above and
+        list the numbers you find (prices, percentages, ratios, volumes, dates,
+        revenue, EPS, etc.). Search snippets are SHORT — a number like "54.437" in a
+        snippet that says "RSI...is 54.437" IS valid source data. Use it.
+
+        {{ if section_name == "Technical Analysis" }}
+        You are a technical analyst. Write a focused technical analysis using the sub-headings below.
+        {{ if asset_type == "etf" -}}
+
+        ### ETF Type Classification
+        Identify which type this ETF is: Passive index tracker / Smart beta / Active strategy /
+        Leveraged / Covered call / Inverse.
+        State how the type affects technical weighting (e.g. leverage decay distorts moving averages;
+        reduce technical signal weight for leveraged and inverse ETFs accordingly).
+
+        ### Trend & Price Structure
+        Current trend direction, recent swing highs/lows, distance from 52-week high/low.
+
+        ### Momentum Indicators
+        RSI (14-day), MACD — signals adjusted for ETF type (lower weight for leveraged/inverse).
+
+        ### Moving Averages
+        Price vs 50-day and 200-day MA. Golden cross or death cross in effect?
+
+        ### Volume Analysis
+        Recent volume vs 30-day average. Signs of accumulation or distribution?
+
+        ### Correlation & Overlap
+        - Correlation vs SPY: positive / negative / uncorrelated (estimate from sector/theme)
+        - Overlap vs QQQ: % of holdings in common (estimated)
+        - Overlap vs user portfolio: reference personal notes if specific holdings are mentioned
+
+        ### Support & Resistance
+        Three key support levels and three resistance levels with specific price points.
+
+        ### Technical Signal
+        Technical Score: [+1 = BULLISH | 0 = NEUTRAL | -1 = BEARISH]
+        **Score: [write exactly +1, 0, or -1 — no other values]**
+        **Signal: BULLISH / NEUTRAL / BEARISH** — one sentence rationale.
+
+        ### Context Impact
+        In 2-3 sentences, state how "{{context}}" influences the technical setup (e.g., liquidity, regulatory catalysts, event risk).
+
+        ### Regulatory Lens
+        If a bill/regulation is in context, specify how approval/rejection would alter technical levels, volume, or volatility; include trigger prices or volume thresholds.
+
+        {{- else }}
+        ### Trend & Price Structure
+        Current trend direction, recent swing highs/lows, distance from 52-week high/low.
+
+        ### Momentum Indicators
+        RSI (14-day), MACD line vs signal line — overbought, oversold, or neutral?
+
+        ### Moving Averages
+        Price vs 50-day and 200-day MA. Any golden cross or death cross in effect?
+
+        ### Volume Analysis
+        Recent volume vs 30-day average. Signs of accumulation or distribution?
+
+        ### Support & Resistance
+        Three key support levels and three resistance levels with specific price points.
+
+        ### Chart Patterns
+        Any active formations: flags, wedges, head-and-shoulders, cup-with-handle, base, etc.
+
+        ### Technical Signal
+        Technical Score: [+1 = BULLISH | 0 = NEUTRAL | -1 = BEARISH]
+        **Score: [write exactly +1, 0, or -1 — no other values]**
+        **Signal: BULLISH / NEUTRAL / BEARISH** — one sentence rationale.
+
+        {{ end -}}
+        {{ else if section_name == "Fundamental Analysis" }}
+        {{ if asset_type == "etf" -}}
+        You are an ETF analyst. Write a Portfolio Structure Analysis.
+
+        ### Portfolio Structure
+        List top 10 holdings with their % weight allocation.
+        - Concentration risk: are the top 3 holdings combined > 40%?
+        - Sector breakdown (% weight by GICS sector or equivalent)
+        - Geographic exposure (% US / Developed International / Emerging Markets)
+        - Single-stock dependency: flag any single holding > 7% with:
+          "WARNING: Single-stock dependency — [name] at [%]"
+
+        ### Valuation Profile
+        - Weighted portfolio P/E (aggregate P/E of holdings weighted by % allocation)
+        - Sector P/E comparison: is the ETF's portfolio at a premium or discount to sector average?
+        - Premium/discount vs historical ETF NAV range (if data available)
+
+        ### Expense & Liquidity
+        - Expense ratio (annual %)
+        - Tracking error vs benchmark index (annualised %)
+        - AUM size (in billions USD)
+        - Liquidity: average daily volume (shares); note "adequate liquidity" if > 1M shares/day
+
+        ### Flow Dynamics
+        - 30-day net flows: positive = inflows, negative = outflows (in $M if available)
+        - 90-day trend: accelerating / decelerating / reversing
+        - Creation/redemption pressure: any signs of NAV premium or discount?
+
+        ### ETF Structure Scores
+        Rate each dimension [+1, 0, or -1] with a one-line justification:
+        Structure Quality Score:  [+1 = diversified, sound methodology | 0 = adequate | -1 = concentrated or flawed]
+        Expense Efficiency Score: [+1 = low cost vs peers | 0 = market rate | -1 = high cost]
+        Concentration Risk Score: [+1 = well-diversified | 0 = moderate | -1 = high concentration]
+        Flow Strength Score:      [+1 = strong sustained inflows | 0 = neutral | -1 = outflows or redemption pressure]
+
+        {{- else }}
+        You are a fundamental analyst.
+
+        ## UNIT VERIFICATION (apply before writing — correct any mismatches)
+        - EPS: must be per-share (not total dollars)
+        - Revenue: express in billions (e.g. $14.2B)
+        - Valuation multiples: must be ratios (e.g. P/E 22x, not "22 dollars")
+        If any unit mismatch is detected, correct it before output.
+
+        ### Revenue & Earnings
+        Most recent quarter: revenue (in billions), EPS (per-share), YoY growth, beat or miss vs consensus estimate.
+
+        ### Margins
+        Gross, operating, and net margin — trend YoY and vs sector peers.
+        FLAG: If both margins AND EPS are declining quarter-over-quarter, explicitly note:
+        "WARNING: Declining margins + declining EPS — must include forward improvement argument or downgrade rating."
+
+        ### Valuation
+        P/E (TTM + forward), P/B, EV/EBITDA. Premium or discount to sector? Explain the gap.
+        If claiming undervalued:
+        - Compare against 5-year historical P/E range (state the range)
+        - Calculate PEG ratio = forward P/E ÷ EPS growth rate
+        - If PEG > 2: state "WARNING: PEG > 2 — valuation not compelling despite apparent discount"
+
+        ### Cyclical Analysis
+        Identify whether this company is cyclical (materials, energy, industrials, consumer discretionary, financials).
+        If cyclical:
+        - State current position in economic cycle: early expansion / mid-cycle / late cycle / contraction
+        - Adjust valuation expectation (e.g. late cycle: expect P/E compression; early expansion: expect expansion)
+
+        ### Balance Sheet
+        Debt-to-equity ratio, cash & equivalents, free cash flow yield, interest coverage ratio.
+
+        ### Guidance & Analyst Estimates
+        Management full-year guidance. Analyst consensus EPS and revenue for next quarter and full year.
+
+        ### Capital Allocation
+        Dividend yield and payout ratio (if applicable). Share buyback authorisation and history.
+
+        ### Fundamental Signal
+        Fundamental Score: [+1 = UNDERVALUED | 0 = FAIRLY VALUED | -1 = OVERVALUED]
+        **Score: [write exactly +1, 0, or -1 — no other values]**
+        **Signal: OVERVALUED / FAIRLY VALUED / UNDERVALUED** — one sentence rationale.
+
+        DATA INTEGRITY RULES (apply before scoring):
+        - If any of forward P/E, margins (gross/operating/net), or EPS growth are missing from source snippets, write "Data unavailable" for that metric.
+        - If two or more of those metrics are unavailable, set Fundamental Score to 0 unless you have sufficient coverage to justify otherwise.
+        - If both margins AND EPS are declining QoQ, include the warning and consider downgrading the score.
+        - P/E ratio: if the company has negative earnings, write "P/E: N/A (negative earnings)" — NEVER report a positive P/E for an unprofitable company.
+        - Do NOT copy financial data from search results about OTHER companies — verify the ticker matches before using any number.
+
+        ### Context Impact
+        In 2-3 sentences, tie valuation sensitivity to "{{context}}" (e.g., regulation affecting fee take rates, volumes, or cost to comply).
+
+        ### Regulatory Lens
+        Summarize bill/act impact on revenue, costs, and capital needs under bull/base/bear passage scenarios; note how it would change valuation multiples.
+
+        {{ end -}}
+        {{ else if section_name == "Competitive Landscape" }}
+        You are a competitive intelligence analyst. Write a focused competitive assessment.
+
+        ### Market Position
+        Estimated market share, rank among peers, recent gains or losses.
+        {{ if asset_type == "etf" -}}
+
+        ### ETF Peer Comparison
+        Compare this ETF against 2 peer ETFs tracking a similar index or strategy.
+        For each peer: name, AUM, expense ratio, 1-year return differential.
+
+        ### Index Methodology Durability
+        Assess index construction rules: replication method, rebalancing frequency, constituent eligibility.
+        Is the methodology robust, or are there survivorship bias or gaming risks?
+
+        ### Sector/Thematic Thesis Quality
+        How well does this ETF capture its stated sector or theme?
+        Any constituent drift, index reconstitution impact, or thematic dilution?
+
+        {{- else }}
+        ### Key Competitors
+        Top 3 competitors — one-line relative strength and weakness for each (name them specifically).
+
+        ### Competitive Moat
+        Rate: **WIDE / NARROW / NONE**.
+        Source: brand / switching costs / network effects / cost leadership / IP / regulatory licence / distribution.
+
+        {{ end -}}
+        ### Industry Dynamics
+        Two or three structural tailwinds and two or three structural headwinds active in the sector right now.
+
+        ### Disruption & Regulatory Risk
+        Emerging technologies, new entrants, or regulatory changes that could erode the moat.
+
+        ### Context-Specific Impact
+        How does "{{context}}" specifically affect {{ticker_upper}}'s competitive position?
+
+        ### Top 3 Risks
+        For each risk, provide all four fields:
+        - Risk name: [name]
+        - Mechanism: [how this risk would materialise in practice]
+        - Financial metric affected: [revenue / EPS / margins / cash flow / AUM / etc.]
+        - Magnitude: High / Medium / Low
+
+        ### Competitive Signal
+        Competitive Score: [+1 = STRENGTHENING | 0 = STABLE | -1 = WEAKENING]
+        **Score: [write exactly +1, 0, or -1 — no other values]**
+        **Signal: STRENGTHENING / STABLE / WEAKENING** — one sentence rationale.
+
+        ### Context Impact
+        2-3 sentences on how "{{context}}" shifts moat or market share.
+
+        ### Regulatory Lens
+        Rate whether the bill/act strengthens or weakens the moat; include a "Regulatory Moat Score" [+1 / 0 / -1] with a one-line justification.
+
+        {{ else if section_name == "Investment Thesis" }}
+        You are a portfolio manager writing a structured investment thesis. Be direct — no hedging.
+
+        ### Summary
+        What {{ticker_upper}} is and why it is worth analysing right now (2-3 sentences).
+        {{ if asset_type == "etf" -}}
+
+        ### ETF vs Equity Equivalence
+        | Equity Metric      | ETF Equivalent for {{ticker_upper}}    |
+        |---|---|
+        | Revenue Growth     | Underlying earnings growth of holdings |
+        | EPS                | Portfolio earnings yield               |
+        | Margins            | Sector margin exposure                 |
+        | Competitive Moat   | Index methodology durability           |
+        | Buybacks           | Net flows                              |
+
+        {{ end -}}
+        ### Base / Bull / Bear Cases
+        Provide a probability estimate for each case. All three must sum to 100%.
+
+        Base Case (most likely outcome): [1-2 sentence description]
+        Probability: [X%]
+
+        Bull Case (what must go right): [1-2 sentence description]
+        Probability: [X%]
+
+        Bear Case (what must go wrong): [1-2 sentence description]
+        Probability: [X%]
+
+        ### Key Catalysts
+        Two or three upcoming events, data releases, or milestones that could materially re-rate
+        {{ticker_upper}} (e.g. earnings date, product launch, regulatory ruling, index rebalancing, macro data print).
+
+        Regulatory Catalysts (if applicable):
+        - Timeline and probability for the bill/act/reg change.
+        - Price/volume triggers for re-rating on passage/failure.
+        - Operational/fee-structure impacts across bull/base/bear scenarios.
+
+        ### Risk Matrix
+        | Risk | Mechanism | Financial Metric Affected | Magnitude |
+        |---|---|---|---|
+        | [Risk 1] | [how it materialises] | [metric] | HIGH / MEDIUM / LOW |
+        | [Risk 2] | [how it materialises] | [metric] | HIGH / MEDIUM / LOW |
+        | [Risk 3] | [how it materialises] | [metric] | HIGH / MEDIUM / LOW |
+
+        ### Conviction
+        - **Rating:** STRONG BUY / BUY / HOLD / SELL / STRONG SELL
+        - **Best Horizon:** Short-term (0-3M) / Medium-term (3-12M) / Long-term (1Y+)
+        - **Entry/Exit:** Ideal entry price range or specific trigger condition
+
+        ### Confidence Level
+        **Level: High / Medium / Low**
+        Drivers:
+        - Data freshness: [are search results current — within 30 days?]
+        - Signal alignment: [are technical, fundamental, and competitive signals pointing the same direction?]
+        - Competitive clarity: [how well understood is the competitive landscape from available source material?]
+
+        ## PRE-OUTPUT CHECKLIST (internal verification — do NOT include this section in your output)
+        1. Unit consistency: EPS per-share, revenue in billions, multiples as ratios
+        2. Internal contradictions: is the bull case consistent with the risk matrix?
+        3. Rating justified: does conviction rating match bull/base/bear probability distribution?
+        4. Evidence: every numeric claim from source material or flagged as [Model Estimate]
+        5. Uncertainty: explicitly stated where data is missing or ambiguous
+
+        [Internal instruction — do not output this line] Tailor every point to the analyst's stated context: "{{context}}"
+        Reference personal investment notes where relevant.
+
+        {{ end }}
+
+        ## DATA RULES
+        1. Copy numbers VERBATIM from the source material. Search snippets are
+           abbreviated — a snippet saying "P/E Ratio of 22.5" or "RSI...is 54"
+           IS valid data. Extract and use it.
+        2. Only write "Data unavailable" for a metric when NO snippet mentions it.
+        3. DO NOT use training knowledge to fill gaps.
+        4. Start directly with the first sub-heading; no preamble or commentary.
+
+# ── Assembler subtask ─────────────────────────────────────────────────────────
+# Single Claude Sonnet pass: assembles sections into a polished final report
+# with an executive summary, signals table, and action items.
+subtasks:
+  - name: assembler
+    model: '{{ if assembler_model_override != "" }}{{assembler_model_override}}{{ else }}{{model_preference.subtasks.assembler}}{{ end }}'
+    input_vars: [section_analyses, personal_context]
+    prompt_template: |
+      You are assembling a final investment analysis report.
+      Ticker: {{ticker_upper}} ({{asset_type}})
+      Date: {{date}}
+      Analyst context: {{context}}
+
+      Four specialist analysts produced the sections below.
+      READ THEM CAREFULLY — assemble and refine, do not rewrite or cut content.
+
+      {{section_analyses}}
+
+      SCORE EXTRACTION (perform before assembling):
+      Scan each section for a line containing "Score: +1", "Score: 0", or "Score: -1".
+      {{ if asset_type == "etf" -}}
+      Extract: Technical Score, Structure Quality Score, Expense Efficiency Score,
+               Concentration Risk Score, Flow Strength Score.
+      ETF Total Score = sum of all 5 dimension scores.
+      {{- else -}}
+      Extract: Technical Score, Fundamental Score, Competitive Score.
+      Total Score = sum of the 3 scores (range: -3 to +3).
+      GATE RULE: If Total Score < +2 AND the Investment Thesis rates STRONG BUY, DOWNGRADE the rating to BUY unless an explicit catalyst in Key Catalysts justifies override; in all cases annotate the gate warning.
+      {{ end -}}
+
+      ASSEMBLE THE FINAL REPORT in this exact structure:
+
+      1. **Title:** # {{ticker_upper}} — Investment Analysis ({{date}})
+         Subtitle: > *{{context}}*
+
+      2. **## Signals At A Glance**
+         {{ if asset_type == "etf" -}}
+         Extract scores and signals from each section. Include all ETF dimensions:
+         | Dimension | Score | Signal | One-Line Rationale |
+         |---|---|---|---|
+         | Technical | [score] | BULLISH / NEUTRAL / BEARISH | [from section] |
+         | Structure Quality | [score] | SOUND / ADEQUATE / FLAWED | [from section] |
+         | Expense Efficiency | [score] | LOW / AVERAGE / HIGH COST | [from section] |
+         | Concentration Risk | [score] | LOW / MODERATE / HIGH | [from section] |
+         | Flow Strength | [score] | STRONG / NEUTRAL / WEAK | [from section] |
+         | Conviction | [total] | STRONG BUY / BUY / HOLD / SELL / STRONG SELL | [from section] |
+         {{- else -}}
+         Extract score and signal from each section:
+         | Dimension | Score | Signal | One-Line Rationale |
+         |---|---|---|---|
+         | Technical | [score] | BULLISH / NEUTRAL / BEARISH | [from section] |
+         | Fundamental | [score] | OVERVALUED / FAIRLY VALUED / UNDERVALUED | [from section] |
+         | Competitive | [score] | STRENGTHENING / STABLE / WEAKENING | [from section] |
+         | Conviction | [total] | STRONG BUY / BUY / HOLD / SELL / STRONG SELL | [from section] |
+         Apply gate rule: if Total Score < +2 and the Investment Thesis rates STRONG BUY without an explicit regulatory or fundamental catalyst spelled out in Key Catalysts, DOWNGRADE the rating to BUY and annotate the warning. If core metrics are missing (marked "Data unavailable"), cap rating at BUY.
+         {{ end -}}
+
+      3. **## Executive Summary**
+         3-5 sentences: the single most important insight from each analysis dimension
+         and what the combined picture means for the analyst's stated context.
+
+      4. **## Technical Analysis** — include the section verbatim with its sub-headings
+
+      5. **## Fundamental Analysis** — include the section verbatim with its sub-headings
+
+      6. **## Competitive Landscape** — include the section verbatim with its sub-headings
+
+      7. **## Investment Thesis** — include the section verbatim with its sub-headings
+
+        If the Investment Thesis rating conflicts with the gate rule above, adjust the rating per the rule and note the adjustment inline.
+
+      8. **Duplicate Check**
+        Ensure no section text is duplicated; if any section appears twice, keep the first and drop repeats while preserving headings.
+
+      9. **## Action Items**
+         3-5 numbered, concrete actions the analyst should take NOW based on this report.
+         Tailor to the stated context: "{{context}}"
+         If personal notes are available and relevant, reference them.
+
+      10. **Footer:**
+         ---
+         *Report generated {{date}} by SAGIDE Research · Ticker: {{ticker_upper}} · Do your own due diligence.*
+
+      STRICT OUTPUT RULES:
+      - Output ONLY clean Markdown — no JSON, no meta-commentary, no instructions
+      - Sections 4-7: include analyst text verbatim, only add ## heading if missing
+      - Every signal and score in the Signals table must match the text in its section exactly
+      - Apply gate rule if applicable (Strong Buy with total score < +2)
+      - Personal notes: {{personal_context}}
+
+# ── Synthesis ─────────────────────────────────────────────────────────────────
+synthesis:
+  prompt_template: |
+    {{assembler_result}}
+
+output:
+  format: markdown
+  destination: "~/reports/{{output_subdir}}/{{datestamp}}-{{ticker}}-analysis.md"
+  notify: true

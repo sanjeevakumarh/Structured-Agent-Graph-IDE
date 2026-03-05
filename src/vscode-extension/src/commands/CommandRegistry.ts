@@ -239,7 +239,7 @@ export function registerCommands(
         })
     );
 
-    // Approve/Reject task (A005 approval workflow)
+    // Approve/Reject task
     context.subscriptions.push(
         vscode.commands.registerCommand('sagIDE.approveTask', async (item?: any) => {
             const taskId = item?.task?.taskId;

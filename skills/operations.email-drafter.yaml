@@ -1,0 +1,157 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: email-drafter
+version: 1
+domain: operations
+protocol_implements: [Analyzable]
+
+description: >
+  Drafts professional emails from stated intent and context. Produces a complete
+  email with subject line, suggested recipients, body, and follow-up actions.
+  Calibrates tone (formal, professional, casual, diplomatic, urgent) and length
+  to the audience and purpose. Flags ambiguous intent or insufficient context
+  rather than guessing.
+  Fail-loudly: outputs "DRAFT FAILURE" when intent is missing, and marks
+  uncertain elements as "[NEEDS CLARIFICATION]" rather than fabricating details.
+
+inputs:
+  intent:
+    type: string
+    required: true
+    description: What the email should accomplish — the goal, ask, or message to convey
+  context:
+    type: string
+    required: true
+    description: Background information, prior conversation thread, data to reference, or source material
+  tone:
+    type: string
+    required: false
+    description: "formal | professional | casual | diplomatic | urgent (default: professional)"
+  audience:
+    type: string
+    required: false
+    description: Recipient description — role, relationship, expectations, seniority level
+  constraints:
+    type: string
+    required: false
+    description: Length limits, format requirements, specific asks to include, things to avoid, corporate style guide notes
+
+outputs_schema:
+  type: object
+  required: [subject_line, body, follow_up_actions, tone_check]
+  properties:
+    subject_line:
+      type: string
+      description: Concise, actionable email subject line
+    body:
+      type: string
+      description: Complete email body ready for review and sending
+    follow_up_actions:
+      type: array
+      description: Suggested follow-up reminders or next steps after sending
+    tone_check:
+      type: string
+      description: Brief assessment of whether the draft matches the requested tone and audience
+
+capability_requirements:
+  fast_general:
+    needs: [professional_writing, tone_calibration, structured_output]
+    context_window_min: 8k
+
+parameters:
+  intent: "{{intent}}"
+  context: "{{context}}"
+  tone: "professional"
+  audience: ""
+  constraints: ""
+
+implementation:
+  - name: draft
+    type: llm_per_section
+    model: "{{capability.fast_general}}"
+    max_sections: "1"
+    section_title: "Email Draft"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Subject Line" — {{blocks.no_preamble}}
+
+      Intent: {{ if parameters.intent == "" }}MISSING — output "DRAFT FAILURE: No intent provided. Cannot draft email without knowing what it should accomplish." and stop.{{ else }}{{parameters.intent}}{{ end }}
+      Context: {{ if parameters.context == "" }}MISSING — output "DRAFT FAILURE: No context provided. Cannot draft email without background information." and stop.{{ else }}provided below.{{ end }}
+      Tone: {{parameters.tone}}
+      {{ if parameters.audience != "" -}}
+      Audience: {{parameters.audience}}
+      {{ end -}}
+      {{ if parameters.constraints != "" -}}
+      Constraints: {{parameters.constraints}}
+      {{ end -}}
+
+      Background / context:
+      ─────────────────────────────────────────────
+      {{parameters.context}}
+      ─────────────────────────────────────────────
+
+      ---
+      Produce the email draft using exactly these sections:
+
+      ## Subject Line
+      Write a concise, actionable subject line (under 60 characters preferred).
+      - For **urgent** tone: prefix with "[URGENT] " or "[ACTION REQUIRED] "
+      - For **formal** tone: clear and professional, no colloquialisms
+      - For all tones: the subject MUST reflect the core ask or information
+
+      ## Suggested Recipients
+      Based on the context and audience description, suggest:
+      - **To**: [Primary recipient(s) — who MUST read and act]
+      - **CC**: [Secondary recipient(s) — who SHOULD be aware, or "None suggested"]
+
+      If recipients cannot be determined from context, write "[NEEDS CLARIFICATION — specify recipients]".
+
+      ## Email Body
+
+      {{blocks.content_integrity_rules}}
+
+      Write the complete email body. Structure:
+
+      **Opening** (1-2 sentences):
+      - formal: "Dear [Name]," — state purpose immediately
+      - professional: "Hi [Name]," — brief context then purpose
+      - casual: "Hey [Name]," — conversational opener
+      - diplomatic: "Dear [Name]," — acknowledge relationship/situation before the ask
+      - urgent: "Hi [Name]," — lead with the urgency and deadline
+
+      **Body** (core message):
+      - Lead with the most important information or ask
+      - Use bullet points for multiple items or action requests
+      - Keep paragraphs to 2-3 sentences maximum
+      - For **executive** audience: bottom-line up front (BLUF)
+      - For data-heavy content: use a brief table or numbered list
+      - If making a request: be specific about what is needed and by when
+
+      **Closing** (1-2 sentences):
+      - Restate the key ask or next step
+      - Include a clear call to action with timeline if applicable
+      - Match the sign-off to the tone:
+        - formal: "Sincerely," / "Best regards,"
+        - professional: "Best," / "Thanks,"
+        - casual: "Thanks!" / "Cheers,"
+        - diplomatic: "I appreciate your consideration," / "Thank you for your time,"
+        - urgent: "Please confirm by [deadline]," / "Thanks for the quick turnaround,"
+
+      {{ if parameters.constraints != "" -}}
+      Apply these constraints: {{parameters.constraints}}
+      {{ end -}}
+
+      ## Follow-Up Actions
+      Suggest 1-3 follow-up actions after sending:
+      - **[Action]**: [When to do it] — [Why it matters]
+
+      Examples: "Follow up if no response in 48 hours", "Schedule meeting referenced in email",
+      "Prepare attachment mentioned in body".
+
+      ## Tone Check
+      In 1-2 sentences, confirm:
+      - Does the draft match the requested "{{parameters.tone}}" tone?
+      - Is the language appropriate for the described audience?
+      - Flag any phrases that might be misread or could be softened/strengthened.
+
+      ### GATE_SIGNAL
+      SIGNAL: [READY_TO_SEND | NEEDS_REVIEW | INSUFFICIENT_CONTEXT]
+      RATIONALE: [one sentence — e.g., "Draft is complete with all referenced data present" or "3 placeholder fields require sender input before sending"]

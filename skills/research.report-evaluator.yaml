@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: report-evaluator
+version: 1
+domain: research
+
+description: >
+  Scores an assembled research report against the 8-phase rubric.
+  Evaluates named entity density, data integrity (citation discipline),
+  signal clarity (GATE_SIGNAL format), phase coverage, and overall quality.
+  Produces a structured evaluation with numeric scores and improvement recommendations.
+
+inputs:
+  report:
+    type: string
+    required: true
+    description: The assembled report to evaluate (assembler_result or report_content)
+  idea:
+    type: string
+    required: false
+
+outputs_schema:
+  type: string
+  description: >
+    A structured evaluation report in markdown containing:
+    - A score table with numeric scores per dimension
+    - Per-phase signal review
+    - Missing evidence inventory
+    - Improvement recommendations
+
+capability_requirements:
+  critic:
+    needs: [deep_reasoning, structured_output]
+    context_window_min: 32k
+
+parameters:
+  report: "{{assembler_result}}"
+  idea: "{{idea}}"
+  output_var: evaluator_result
+
+implementation:
+  - name: evaluate
+    type: llm_per_section
+    model: "{{capability.critic}}"
+    max_sections: "1"
+    output_var: "{{parameters.output_var}}"
+    section_title: "Evaluation Report"
+    section_analysis_prompt: |
+      {{ if parameters.report == "" }}EVALUATION FAILURE: No report provided. Cannot evaluate.{{ end }}
+      You are an independent quality evaluator scoring a product research report.
+      Idea under evaluation: {{parameters.idea}}
+
+      Report to evaluate:
+      ---
+      {{parameters.report}}
+      ---
+
+      ⚠ OUTPUT RULE: Start immediately with the evaluation header — no preamble.
+
+      # Evaluation Report: {{parameters.idea}}
+
+      ## Dimension Scores
+
+      Score each dimension 0–100 based on the rubric below:
+
+      | Dimension | Score | Finding |
+      |---|---|---|
+      | Phase Coverage | /100 | All 8 phases present and substantive? |
+      | Named Entity Density | /100 | ≥3 competitors + ≥3 technologies named per phase? |
+      | Data Integrity | /100 | Numeric claims cited [Source: Name Year]? [Model Estimate] used for projections? |
+      | Signal Clarity | /100 | Every phase ends with correctly formatted GATE_SIGNAL block? |
+      | Acquisition Analysis | /100 | Exit section names ≥3 specific potential acquirers with strategic rationale? |
+      | Overall Coherence | /100 | Consistent idea framing, logical flow, actionable recommendations? |
+
+      **Total: /600**
+
+      ## Phase Signal Review
+
+      | Phase | Signal Found | Format Correct | Rationale Quality |
+      |---|---|---|---|
+      | Thesis & Market Fit | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Technology Strategy | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Financial Viability & Exit | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Risk & Compliance | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Product Scope & Roadmap | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Architecture & Implementation | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Support & Compatibility | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+      | Implementation Plan & Release Cycles | [GO/CONDITIONAL/NO-GO/MISSING] | [YES/NO] | [1–10] |
+
+      ## Missing Evidence Inventory
+      List specific named entities (companies, technologies, regulations) that should have been
+      cited but were absent from the report. Be specific — name what is missing.
+
+      ## Top 5 Improvement Recommendations
+      1. [Most impactful improvement with specific instruction]
+      2.
+      3.
+      4.
+      5.

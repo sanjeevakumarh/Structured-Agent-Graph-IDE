@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: security-threat-analyzer
+version: 2
+domain: security
+protocol_implements: [Analyzable]
+
+description: >
+  STRIDE-based threat modeling for systems, code, or architecture.
+  Identifies attack surface, vulnerabilities with CVSS-calibrated severity,
+  exploitation scenarios, and prioritized mitigations. Fails loudly on empty input.
+
+inputs:
+  system_description:
+    type: string
+    required: true
+    description: Architecture, data flows, trust boundaries, and components.
+  code_or_logs:
+    type: string
+    required: false
+    description: Code snippets, config files, or log samples for deeper analysis.
+  threat_model_context:
+    type: string
+    required: false
+    description: Threat actor profile, compliance scope (SOC2/PCI/HIPAA), asset sensitivity.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Attack Surface, ## STRIDE Threat Matrix,
+    ## Critical Vulnerabilities (CVSS severity), ## Exploitation Scenarios,
+    ## Prioritized Mitigations, ## Residual Risk.
+
+capability_requirements:
+  deep_analyst:
+    needs: [threat_modeling, deep_reasoning, structured_output]
+    context_window_min: 16k
+
+parameters:
+  system_description: ""
+  code_or_logs: ""
+  threat_model_context: ""
+  output_var: security_report
+
+implementation:
+  - name: analyze
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    section_title: "Threat Analysis"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Attack Surface" — no preamble.
+
+      System description: {{ if parameters.system_description == "" }}MISSING — output "THREAT ANALYSIS FAILURE: No system description provided." and stop.{{ else }}provided below.{{ end }}
+
+      System description:
+      {{parameters.system_description}}
+
+      Code / logs: {{ if parameters.code_or_logs == "" }}None provided — flag any findings that require code/log evidence as [UNCONFIRMED — requires manual code review].{{ else }}{{parameters.code_or_logs}}{{ end }}
+      Threat context: {{parameters.threat_model_context ?? "None provided — assume opportunistic external attacker"}}
+
+      ---
+      Produce a threat model using exactly these headings:
+
+      ## Attack Surface
+      List all external entry points: APIs, UIs, file uploads, third-party integrations,
+      admin interfaces, network ports, and authentication boundaries.
+      For each: trust level (untrusted / semi-trusted / trusted) and data sensitivity.
+
+      ## STRIDE Threat Matrix
+      | Threat | Component | Description | Likelihood | Impact |
+      |---|---|---|---|---|
+      Apply STRIDE to each component. Likelihood: High/Med/Low. Impact: Critical/High/Med/Low.
+      STRIDE = Spoofing, Tampering, Repudiation, Info Disclosure, DoS, Privilege Escalation.
+
+      ## Critical Vulnerabilities
+      For each Critical or High finding:
+      - **Vuln name**: [OWASP category or CVE pattern if applicable]
+      - **Location**: [component / endpoint / function]
+      - **Severity**: Critical / High / Medium / Low (CVSS calibrated)
+      - **Evidence**: [specific code line, config, or pattern from input]
+      Write "Not identified in provided input" if no critical vulns found.
+
+      ## Exploitation Scenarios
+      Describe the top 2–3 realistic attack chains step-by-step.
+      Format: Attacker → [step 1] → [step 2] → [impact].
+      Base scenarios ONLY on identified vulnerabilities above.
+
+      ## Prioritized Mitigations
+      | Priority | Finding | Mitigation | Effort |
+      |---|---|---|---|
+      Order by (Severity × Exploitability). Effort: Hours / Days / Weeks.
+      Include specific technical controls (not vague "add validation").
+
+      ## Residual Risk
+      After mitigations are applied: what threats remain acceptable?
+      What requires ongoing monitoring?
+
+      For every Critical or High severity finding, include a CVSS severity rationale or base vector string (e.g. CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H).
+
+      Rules:
+      - Base every finding on the provided input — do not invent vulnerabilities
+      - Label "[Hypothesis — requires code review to confirm]" for unconfirmed findings
+      - If code_or_logs is absent, note which findings require manual code review
+    output_var: "{{parameters.output_var}}"

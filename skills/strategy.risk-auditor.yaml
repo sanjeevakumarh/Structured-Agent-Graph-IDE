@@ -1,0 +1,133 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: risk-auditor
+version: 2
+domain: strategy
+protocol_implements: [Analyzable]
+
+description: >
+  Audits an existing risk register, plan, or decision document for completeness,
+  consistency, and coverage gaps. Complements risk-and-dependency-analyzer by
+  reviewing artifacts rather than producing them from scratch.
+  Outputs a scored audit with specific gap findings and remediation actions.
+
+inputs:
+  artifact:
+    type: string
+    required: true
+    description: The risk register, plan, or document text to audit
+  subject:
+    type: string
+    required: false
+    description: Short description of what the artifact covers (for context)
+  audit_focus:
+    type: string
+    required: false
+    description: "Specific audit angles (e.g. completeness, owner coverage, mitigation quality)"
+
+outputs_schema:
+  type: object
+  required: [audit_score, findings, remediation_actions, verdict]
+  properties:
+    audit_score:
+      type: integer
+      minimum: 0
+      maximum: 100
+      description: Overall risk register quality score
+    findings:
+      type: array
+      description: Specific gaps, inconsistencies, or missing fields
+    remediation_actions:
+      type: array
+      description: Concrete steps to address each finding
+    verdict:
+      type: string
+      enum: [APPROVED, APPROVED_WITH_CONDITIONS, REJECTED]
+
+capability_requirements:
+  critic:
+    needs: [long_context_reasoning, structured_output, critical_evaluation]
+    context_window_min: 16k
+
+parameters:
+  artifact: "{{artifact}}"
+  subject: ""
+  audit_focus: "completeness, owner coverage, mitigation quality, likelihood/impact calibration"
+
+implementation:
+  - name: audit
+    type: llm_per_section
+    model: "{{capability.critic}}"
+    planning_prompt: |
+      You are a risk audit specialist reviewing a risk artifact.
+
+      {{ if parameters.subject != "" -}}
+      Subject: {{parameters.subject}}
+      {{ end -}}
+      Audit focus: {{parameters.audit_focus}}
+
+      Artifact to audit:
+      ─────────────────────────────────────────────
+      {{parameters.artifact}}
+      ─────────────────────────────────────────────
+
+      Generate exactly these section titles (one per line, no numbering):
+      Coverage Analysis
+      Owner & Accountability Audit
+      Mitigation Quality Review
+      Scoring Calibration
+      Audit Verdict
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a risk audit specialist writing the "{{section_name}}" section.
+
+      Artifact under review:
+      ─────────────────────────────────────────────
+      {{parameters.artifact}}
+      ─────────────────────────────────────────────
+      {{ if parameters.subject != "" -}}
+      Subject: {{parameters.subject}}
+      {{ end -}}
+
+      ─────────────────────────────────────────────
+      ## AUDIT RULES
+      1. Every finding MUST cite a specific item, field, or line in the artifact.
+      2. Write "[NO ISSUE FOUND]" for areas that pass, not silence.
+      3. Do NOT invent risks that aren't in scope of the artifact.
+      4. Scores are based solely on the artifact — not assumed external context.
+      ─────────────────────────────────────────────
+
+      ### {{section_name}}
+
+      **Coverage Analysis** — check for:
+      - Missing risk categories (technical / schedule / resource / external / security / compliance)
+      - Risks present in the artifact but lacking description
+      - Obvious blind spots given the subject matter
+      Format: FINDING [#]: [Description] | Severity: Critical/High/Medium/Low
+
+      **Owner & Accountability Audit** — for each risk:
+      - Is an owner named? If not: FINDING [#]: No owner for risk [ID] | Severity: High
+      - Is the owner a role (good) or vague ("team", "TBD")? Flag vague owners.
+      - Are escalation paths defined? If not, note gap.
+
+      **Mitigation Quality Review** — for each High/Critical risk:
+      - Is mitigation specific and actionable? Vague = finding.
+      - Does mitigation have a trigger condition? Missing trigger = finding.
+      - FINDING [#]: [Specific gap] | Risk ID: [X] | Severity: [level]
+
+      **Scoring Calibration** — review likelihood × impact assignments:
+      - Identify over- or under-scored risks with reasoning.
+      - Check consistency: similar risks should have similar scores.
+      - FINDING [#]: Risk [ID] scored [X/Y]; calibration suggests [A/B] because [reason].
+
+      **Audit Verdict** — provide:
+      - Overall quality score (0–100) with breakdown
+      - Top 3 remediation actions in priority order
+      - Final verdict: APPROVED / APPROVED_WITH_CONDITIONS / REJECTED
+        REJECTED requires at least one Critical finding with no mitigation.
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [APPROVED | APPROVED_WITH_CONDITIONS | REJECTED]
+      RATIONALE: [one sentence citing the most critical finding]

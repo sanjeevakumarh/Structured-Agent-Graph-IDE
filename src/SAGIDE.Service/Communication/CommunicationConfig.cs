@@ -28,7 +28,7 @@ public class CommunicationConfig
     public int PerClientBroadcastTimeoutSec { get; set; } = 5;
 
     /// <summary>
-    /// Capacity of the bounded broadcast channel (C4).
+    /// Capacity of the bounded broadcast channel.
     /// When full, the oldest undelivered broadcast is dropped so the producer never blocks.
     /// Default 10 000 — covers ~20 s of 500-token/s streaming at typical message sizes.
     /// </summary>

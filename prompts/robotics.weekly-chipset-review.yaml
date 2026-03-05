@@ -1,0 +1,139 @@
+# yaml-language-server: $schema=../docs/prompt-schema.json
+name: weekly-robotics-catchup
+version: 4
+domain: robotics
+source_tag: robotics_weekly
+schedule: "0 9 * * 1"
+
+description: >
+  Weekly digest of robotics developments — chipsets, software frameworks, hardware,
+  research papers — cross-referenced with active projects. Runs every Monday at 9am.
+
+model_preference:
+  orchestrator: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+  subtasks:
+    hardware_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    software_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    paper_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+
+variables:
+  max_results: "6"
+
+data_collection:
+  steps:
+    - name: fetch_hardware_news
+      type: web_search_batch
+      query: "robotics chipset edge AI hardware announcement {{date}}"
+      limit: "{{max_results}}"
+      output_var: hardware_news
+
+    - name: fetch_software_news
+      type: web_search_batch
+      query: "ROS2 OpenCV PyTorch TensorRT release update {{date}}"
+      limit: "{{max_results}}"
+      output_var: software_news
+
+    - name: fetch_arxiv_ro
+      type: web_search_batch
+      query: "site:semanticscholar.org OR site:paperswithcode.com robotics perception edge deployment {{date}}"
+      limit: "{{max_results}}"
+      output_var: arxiv_ro
+
+    - name: fetch_arxiv_cv
+      type: web_search_batch
+      query: "site:semanticscholar.org OR site:paperswithcode.com computer vision multi-camera real-time inference {{date}}"
+      limit: "{{max_results}}"
+      output_var: arxiv_cv
+
+    - name: load_project_context
+      type: read_file
+      source: "~/projects/robotics/KNOWLEDGE_BASE.md"
+      output_var: project_context
+
+subtasks:
+  - name: hardware_scan
+    model: "{{model_preference.subtasks.hardware_scan}}"
+    input_vars: [hardware_news, project_context]
+    prompt_template: |
+      Review these hardware/chipset developments from the past week:
+      {{hardware_news}}
+
+      My current projects: {{project_context}}
+
+      Identify:
+      1. New chips/boards relevant to edge robotics
+      2. Price/performance changes in existing hardware
+      3. Anything relevant to my specific projects
+      4. Hyperlinks
+      Output as structured JSON.
+
+  - name: software_scan
+    model: "{{model_preference.subtasks.software_scan}}"
+    input_vars: [software_news, project_context]
+    prompt_template: |
+      Review these software/framework developments:
+      {{software_news}}
+
+      My stack: ROS2, OpenCV, PyTorch, TensorRT
+      Projects: {{project_context}}
+
+      Identify:
+      1. New releases or breaking changes in my stack
+      2. New tools/libraries worth evaluating
+      3. Deprecations or migrations I should plan for
+      4. Hyperlinks
+      Output as structured JSON.
+
+  - name: paper_scan
+    model: "{{model_preference.subtasks.paper_scan}}"
+    input_vars: [arxiv_ro, arxiv_cv]
+    prompt_template: |
+      Review these recent papers:
+
+      ## Robotics / Perception:
+      {{arxiv_ro}}
+
+      ## Computer Vision:
+      {{arxiv_cv}}
+
+      My research areas: computer vision for robotics, perception systems,
+      edge deployment, multi-camera systems.
+
+      For each relevant paper:
+      1. One-sentence summary
+      2. Relevance to my work (high/medium/low)
+      3. Key technique or result
+      4. Should I read the full paper? (yes/no with reason)
+      5. Hyperlinks
+      Output as structured JSON.
+
+synthesis:
+  prompt_template: |
+    # Weekly Robotics Catchup — {{date}}
+
+    # Executive Summary
+    Summarize highlights from software, hardware, and papers components under 100 words total from  {{hardware_scan_result}},  {{software_scan_result}}, {{paper_scan_result}}
+
+    # Body
+    Hardware: {{hardware_scan_result}}
+    Software: {{software_scan_result}}
+    Papers: {{paper_scan_result}}
+
+    # References
+    Extract Hyper links from  {{hardware_scan_result}},  {{software_scan_result}}, {{paper_scan_result}} and list them under references
+
+    Generate a weekly briefing in markdown:
+    ## Action Items (things to do this week)
+    ## Key Developments (need-to-know)
+    ## Papers to Read
+    ## Trends to Watch
+    ## Research Areas to Explore
+
+    Be concise. Prioritize by relevance to edge robotics and computer vision.
+
+    Dont include the prompt text thats not mentioned in one of the sections above. 
+
+output:
+  format: markdown
+  destination: "~/reports/robotics/{{datestamp}}-weekly.md"
+  notify: true

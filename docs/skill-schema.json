@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagide/schemas/skill-schema.json",
+  "title": "SAGIDE Skill Definition",
+  "description": "Schema for skill YAML files under skills/{domain}/{name}.yaml",
+  "type": "object",
+  "required": ["name", "domain"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Skill identifier — must match the filename without .yaml extension."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Increment on breaking changes to outputs_schema (the stable interface contract)."
+    },
+    "domain": {
+      "type": "string",
+      "description": "Must match the parent directory name (e.g. research, finance, shared)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this skill does."
+    },
+    "protocol_implements": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Protocol names this skill satisfies (e.g. Collectible, Analyzable, Reportable)."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Typed parameter declarations callers must supply.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "type": { "type": "string", "description": "Parameter type: string | array | object | integer | boolean" },
+          "required": { "type": "boolean", "default": false },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "outputs_schema": {
+      "type": "object",
+      "description": "JSON Schema describing the skill's output. This is the stable interface contract — changing outputs_schema is a breaking change (bump version). Changing only the implementation prompt is not.",
+      "additionalProperties": true
+    },
+    "capability_requirements": {
+      "type": "object",
+      "description": "Named capability slots resolved by routing config. Skills declare what they need; appsettings.json maps capabilities to actual model@machine specs.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "needs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Required model capabilities (e.g. deep_reasoning, long_context_understanding)."
+          },
+          "context_window_min": {
+            "type": "string",
+            "description": "Minimum context window required (e.g. 8k, 32k)."
+          }
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "description": "Default values for implementation template variables. Callers override via the parameters: block in data_collection steps.",
+      "additionalProperties": true
+    },
+    "implementation": {
+      "type": "array",
+      "description": "Ordered list of data_collection step primitives that implement this skill. Same step types as in prompt data_collection.",
+      "items": { "$ref": "prompt-schema.json#/$defs/DataCollectionStep" },
+      "minItems": 1
+    }
+  }
+}

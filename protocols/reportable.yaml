@@ -1,0 +1,23 @@
+# Protocol: Reportable
+# A skill that can produce a final human-readable report from analysis inputs.
+
+name: Reportable
+version: 1
+
+description: >
+  Defines the interface for report-assembly skills. A Reportable skill accepts
+  one or more analysis outputs and produces a polished, verdict-first document
+  suitable for decision-making.
+
+methods:
+  compile:
+    description: Assemble a decision-ready report from analysis inputs.
+    inputs:
+      analyses:
+        type: string
+        required: true
+        description: Structured analyses from one or more Analyzable skills
+    outputs:
+      report:
+        type: string
+        description: Polished decision memo or report in markdown

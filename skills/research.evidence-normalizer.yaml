@@ -1,0 +1,93 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: evidence-normalizer
+version: 1
+domain: research
+protocol_implements: [Collectible]
+
+description: >
+  Runs two LLM passes on collected search evidence. First pass extracts a named-entity
+  inventory (competitors, technologies, standards, publications) as a JSON object.
+  Second pass normalises all numeric claims into citable evidence cards as a JSON array.
+  Outputs entity_inventory and evidence_cards for downstream section-analyst use.
+
+inputs:
+  market_results:
+    type: string
+    required: false
+    description: Raw market/business search results.
+  tech_results:
+    type: string
+    required: false
+    description: Raw technology search results.
+  finance_results:
+    type: string
+    required: false
+    description: Raw financial search results.
+  risk_results:
+    type: string
+    required: false
+    description: Raw risk/compliance search results.
+
+outputs_schema:
+  type: object
+  description: >
+    Two output variables written to the data collection context:
+    entity_inventory (JSON object with named-entity arrays) and
+    evidence_cards (JSON array of citable numeric-claim records).
+
+capability_requirements:
+  extractor:
+    needs: [instruction_following, structured_output]
+    context_window_min: 8k
+
+parameters: {}
+
+implementation:
+  - name: entity_inventory
+    type: llm
+    model: "{{capability.extractor}}"
+    output_var: entity_inventory
+    prompt_template: |
+      {{ if market_results == "" && tech_results == "" && finance_results == "" && risk_results == "" -}}
+      {"competitors":[],"technologies_platforms":[],"standards_regulations":[],"publications_analysts":[],"_no_evidence":true}
+      {{- else -}}
+      OUTPUT FORMAT: Your entire response must be a single JSON object.
+      Start with { and end with }. No explanation before or after. No markdown.
+      Fill in this exact structure with names extracted from the evidence:
+      {"competitors":[],"technologies_platforms":[],"standards_regulations":[],"publications_analysts":[]}
+
+      Extract ONLY names that appear verbatim in the evidence below.
+      Each array must contain only proper names (company names, product names, tech names, framework names).
+      No descriptions. No sentences. Only names as short strings.
+
+      Evidence to extract from:
+      MARKET: {{market_results}}
+      TECH: {{tech_results}}
+      FINANCE: {{finance_results}}
+      RISK: {{risk_results}}
+      {{- end }}
+
+  - name: normalize_evidence
+    type: llm
+    model: "{{capability.extractor}}"
+    output_var: evidence_cards
+    prompt_template: |
+      {{ if market_results == "" && tech_results == "" && finance_results == "" && risk_results == "" -}}
+      []
+      {{- else -}}
+      OUTPUT FORMAT: Your entire response must be a JSON array.
+      Start with [ and end with ]. No explanation before or after. No markdown.
+      Fill in this exact structure — one object per numeric claim found in the evidence:
+      [{"id":"E1","category":"market","source_name":"","date":"","claim":"","numbers":[]},
+       {"id":"E2","category":"tech","source_name":"","date":"","claim":"","numbers":[]}]
+
+      Only include claims that contain at least one number (market size, cost, percentage, count).
+      Extract ONLY numbers and names that appear verbatim in the evidence.
+      Use ids E1, E2, E3, ... in sequence. Use categories: market, tech, finance, risk.
+
+      Evidence to extract from:
+      MARKET: {{market_results}}
+      TECH: {{tech_results}}
+      FINANCE: {{finance_results}}
+      RISK: {{risk_results}}
+      {{- end }}

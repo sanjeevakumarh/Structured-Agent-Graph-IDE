@@ -44,7 +44,7 @@ public static class MessageTypes
     public const string CancelWorkflow         = "cancel_workflow";
     public const string WorkflowUpdate         = "workflow_update";   // push event (no request ID)
 
-    // Workflow intervention: pause / resume / context update (Item 5)
+    // Workflow intervention: pause / resume / context update
     public const string PauseWorkflow          = "pause_workflow";
     public const string ResumeWorkflow         = "resume_workflow";
     public const string UpdateWorkflowContext  = "update_workflow_context";

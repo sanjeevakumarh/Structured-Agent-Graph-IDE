@@ -1,0 +1,116 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: report-assembler
+version: 1
+domain: research
+protocol_implements: [Reportable]
+
+description: >
+  Assembles section analyses into a polished verdict-first decision memo.
+  Reads the QA gate result to determine overall signal and surfaces the
+  Signals At A Glance table at the top. Takes human context into account
+  for persona and constraint framing.
+
+inputs:
+  qa_gate_result:
+    type: string
+    required: true
+    description: Output from qa-gate skill containing validation status and individual signals
+  human_context:
+    type: string
+    required: false
+    description: Personal project context loaded from context_file
+  idea:
+    type: string
+    required: false
+  constraints:
+    type: string
+    required: false
+
+outputs_schema:
+  type: string
+  description: >
+    A verdict-first decision memo in markdown. Structure:
+    - Verdict header with overall GO/CONDITIONAL/NO-GO signal
+    - Signals At A Glance table (one row per phase)
+    - Strategic Acquirers (Consolidated) table extracted from Financial Viability & Exit
+    - Full section analyses with headings
+    - Strategic Recommendation section at the end
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, long_form_writing]
+    context_window_min: 32k
+
+parameters:
+  output_var: assembler_result
+
+implementation:
+  - name: assemble
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    output_var: "{{parameters.output_var}}"
+    section_title: "Decision Memo"
+    section_analysis_prompt: |
+      You are writing the HEADER of a decision memo for a senior investment or product committee.
+      Idea under evaluation: {{idea}}
+      Constraints: {{constraints}}
+      Personal context: {{human_context}}
+
+      QA validation result:
+      ---
+      {{qa_gate_result}}
+      ---
+
+      Section analyses (read these to extract signals and acquirers):
+      ---
+      {{section_analyses}}
+      ---
+
+      ⚠ OUTPUT RULE: Start immediately with the title line — no preamble, no introduction.
+      ⚠ SCOPE RULE: Write ONLY the 5 sections listed below.
+      The full section analyses will be appended automatically after your output.
+
+      # {{idea}} — Investment Decision Memo
+
+      ## Overall Verdict
+      Read the GATE_SIGNAL blocks above.
+      Majority GO → OVERALL SIGNAL: GO.  Any NO-GO → CONDITIONAL or NO-GO.
+
+      **OVERALL SIGNAL: [GO / CONDITIONAL / NO-GO]**
+      Two-sentence rationale citing the two strongest signals found.
+
+      ## Signals At A Glance
+      Copy each SIGNAL value and RATIONALE line exactly from the GATE_SIGNAL blocks.
+
+      | Phase | Signal | Rationale |
+      |---|---|---|
+      | Thesis & Market Fit | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Technology Strategy | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Financial Viability & Exit | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Risk & Compliance | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Product Scope & Roadmap | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Architecture & Implementation | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Support & Compatibility | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Implementation Plan & Release Cycles | [copy SIGNAL] | [copy RATIONALE exactly] |
+
+      ## Strategic Acquirers (Consolidated)
+      Find "### Strategic Acquirers" inside the Financial Viability & Exit section above.
+      Copy the named acquirers, their strategic gap, probability, and evidence citation.
+      If no named acquirers are found, write only: Data unavailable
+
+      | Acquirer | Strategic Gap | Probability | Evidence |
+      |---|---|---|---|
+      | [name] | [gap] | [probability] | [citation] |
+      | [name] | [gap] | [probability] | [citation] |
+      | [name] | [gap] | [probability] | [citation] |
+
+      ## Human-in-the-Loop Gates
+      List the 3 most critical decisions requiring human judgment before proceeding.
+      Focus on CONDITIONAL or NO-GO phases and the highest-risk dependencies.
+      1. [Decision 1]
+      2. [Decision 2]
+      3. [Decision 3]
+
+      ## Strategic Recommendation
+      3–5 sentences: the key risks, the key opportunity, and the single most important action item.

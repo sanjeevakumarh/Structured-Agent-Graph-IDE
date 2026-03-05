@@ -1,0 +1,151 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: research-synthesizer
+version: 2
+domain: research
+protocol_implements: [Analyzable, Reportable]
+
+description: >
+  Synthesizes multi-source research evidence into a coherent, structured report.
+  Cross-references claims across sources, resolves contradictions, identifies
+  consensus and dissent, and produces an evidence-weighted conclusion.
+  Fail-loudly: marks claims as [UNVERIFIED] when only a single source supports them,
+  and [CONTRADICTED] when sources conflict without resolution.
+
+inputs:
+  question:
+    type: string
+    required: true
+    description: The research question or thesis to synthesize evidence for
+  evidence:
+    type: string
+    required: true
+    description: Collected research evidence — search results, articles, data, prior reports
+  context:
+    type: string
+    required: false
+    description: Audience, purpose, or specific angles to emphasize
+  synthesis_depth:
+    type: string
+    required: false
+    description: "brief | standard | deep (default: standard)"
+
+outputs_schema:
+  type: object
+  required: [executive_summary, key_findings, evidence_map, contradictions, conclusion]
+  properties:
+    executive_summary:
+      type: string
+      description: 3–5 sentence synthesis readable by a non-expert
+    key_findings:
+      type: array
+      description: Top findings with confidence level and source count
+    evidence_map:
+      type: object
+      description: Claims mapped to supporting / contradicting sources
+    contradictions:
+      type: array
+      description: Unresolved conflicts between sources with notes on which to trust
+    conclusion:
+      type: string
+      description: Evidence-weighted answer to the research question
+
+capability_requirements:
+  deep_analyst:
+    needs: [long_context_reasoning, structured_output, evidence_synthesis]
+    context_window_min: 32k
+
+parameters:
+  question: "{{question}}"
+  evidence: "{{evidence}}"
+  context: ""
+  synthesis_depth: "standard"
+
+implementation:
+  - name: synthesize
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    planning_prompt: |
+      You are a research synthesis expert.
+
+      Research question: {{parameters.question}}
+      Synthesis depth: {{parameters.synthesis_depth}}
+      {{ if parameters.context != "" -}}
+      Context/audience: {{parameters.context}}
+      {{ end -}}
+
+      Evidence available:
+      ─────────────────────────────────────────────
+      {{parameters.evidence}}
+      ─────────────────────────────────────────────
+
+      Generate exactly these section titles (one per line, no numbering):
+      Executive Summary
+      Key Findings
+      Evidence Map
+      Contradictions & Source Conflicts
+      Gaps & Unknowns
+      Conclusion
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a research synthesis expert writing the "{{section_name}}" section.
+
+      Research question: {{parameters.question}}
+      {{ if parameters.context != "" -}}
+      Context/audience: {{parameters.context}}
+      {{ end -}}
+
+      Evidence:
+      ─────────────────────────────────────────────
+      {{parameters.evidence}}
+      ─────────────────────────────────────────────
+
+      ─────────────────────────────────────────────
+      ## SYNTHESIS RULES — READ BEFORE WRITING
+      1. Every claim must cite at least one source from the evidence above.
+         Uncited claims → [UNVERIFIED — no source in evidence].
+      2. Claims from a single source → mark [SINGLE SOURCE — treat with caution].
+      3. Claims supported by 3+ independent sources → mark [CONSENSUS].
+      4. Conflicting claims → mark [CONTRADICTED] and note both positions.
+      5. Do NOT use training knowledge to fill evidence gaps — write "[GAP]" instead.
+      ─────────────────────────────────────────────
+
+      ### {{section_name}}
+
+      {{ if section_name == "Executive Summary" -}}
+      Write 3–5 sentences synthesizing the answer to: "{{parameters.question}}"
+      Write for a non-expert audience. Do not use jargon without definition.
+      If evidence is insufficient to answer, state that explicitly.
+      {{ else if section_name == "Key Findings" -}}
+      Present findings in table format:
+      | # | Finding | Confidence | Source Count | Evidence Quality |
+      Confidence: HIGH (3+ sources, consistent) / MEDIUM (2 sources or mixed) / LOW (1 source or conflicting)
+      Evidence Quality: Strong (primary data) / Moderate (secondary analysis) / Weak (opinion/blog)
+      {{ else if section_name == "Evidence Map" -}}
+      For each key claim:
+      - **[Claim]**
+        - Supports: [Source A], [Source B]
+        - Contradicts: [Source C] (if any)
+        - Verdict: [CONSENSUS | SINGLE SOURCE | CONTRADICTED]
+      {{ else if section_name == "Contradictions & Source Conflicts" -}}
+      For each conflict:
+      - **Conflict**: [Claim A] vs [Claim B]
+        - Source A says: [position]
+        - Source B says: [position]
+        - Resolution: [Which to trust and why, based on methodology/recency/authority]
+          If unresolvable: "[UNRESOLVED — recommend additional research]"
+      {{ else if section_name == "Gaps & Unknowns" -}}
+      What the evidence does NOT answer:
+      - [Gap]: [what is missing and why it matters]
+      - Recommended follow-up: [specific search query or data source to fill gap]
+      {{ else if section_name == "Conclusion" -}}
+      Evidence-weighted answer to: "{{parameters.question}}"
+      - State confidence level: HIGH / MEDIUM / LOW / INSUFFICIENT EVIDENCE
+      - If INSUFFICIENT EVIDENCE: list the 3 specific data points that would change this.
+      {{ end -}}
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [HIGH_CONFIDENCE | MEDIUM_CONFIDENCE | LOW_CONFIDENCE | INSUFFICIENT_EVIDENCE]
+      RATIONALE: [one sentence on the key gap or consensus]

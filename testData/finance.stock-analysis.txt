@@ -1,0 +1,30 @@
+ticker: ONDS
+exchange: NASDAQ
+context: Geopolitical and global political developments.
+asset_type: stock
+------
+ticker: TSLA
+exchange: NASDAQ
+context: Golbal competition like BYD, and Europe
+asset_type: stock
+------
+ticker: AMZN
+exchange: NASDAQ
+context: Consumer descretionary and cloud and AI
+asset_type: stock
+------
+ticker: MSFT
+exchange: NASDAQ
+context: growth investor focused on cloud and AI momentum
+asset_type: stock
+------
+ticker: GOOG
+exchange: NASDAQ
+context: growth investor focused on cloud and AI momentum
+asset_type: stock
+------
+ticker: RKLB
+exchange: NASDAQ
+context: space industry growth investor
+asset_type: stock
+------

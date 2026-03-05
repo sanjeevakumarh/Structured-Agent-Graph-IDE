@@ -1,0 +1,234 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: status-report-generator
+version: 1
+domain: operations
+protocol_implements: [Analyzable]
+
+description: >
+  Generates audience-appropriate status reports from raw project data such as
+  task completions, blockers, metrics, git commits, and sprint boards. Calibrates
+  detail level and language for the target audience (executive, team, client,
+  stakeholder). Surfaces blockers and risks with escalation recommendations.
+  Fail-loudly: outputs "REPORT FAILURE" when no updates data is provided, and
+  marks metrics as "[DATA UNAVAILABLE]" when underlying numbers are absent.
+
+inputs:
+  updates:
+    type: string
+    required: true
+    description: Raw status data — task completions, blockers, metrics, git commits, sprint board exports, standup notes, etc.
+  audience:
+    type: string
+    required: false
+    description: "executive | team | client | stakeholder (default: team)"
+  period:
+    type: string
+    required: false
+    description: "daily | weekly | monthly | sprint (default: weekly)"
+  project_name:
+    type: string
+    required: false
+    description: Project identifier for report header
+  context:
+    type: string
+    required: false
+    description: Project goals, milestones, KPIs, sprint objectives, or baseline metrics for trend comparison
+
+outputs_schema:
+  type: object
+  required: [executive_summary, progress, in_progress, blockers, upcoming, metrics, status_signal]
+  properties:
+    executive_summary:
+      type: string
+      description: 2-3 sentence audience-calibrated summary of the reporting period
+    progress:
+      type: array
+      description: Completed items with impact description
+    in_progress:
+      type: array
+      description: Current work items with expected completion
+    blockers:
+      type: array
+      description: Items needing attention with escalation recommendations
+    upcoming:
+      type: array
+      description: Next period priorities and planned work
+    metrics:
+      type: object
+      description: Key numbers and trends extracted from the raw data
+    status_signal:
+      type: string
+      enum: [ON_TRACK, AT_RISK, BLOCKED, INSUFFICIENT_DATA]
+      description: Overall project health signal
+
+capability_requirements:
+  deep_analyst:
+    needs: [structured_output, audience_calibration, information_extraction]
+    context_window_min: 16k
+
+parameters:
+  updates: "{{updates}}"
+  audience: "team"
+  period: "weekly"
+  project_name: ""
+  context: ""
+
+implementation:
+  - name: generate
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    planning_prompt: |
+      You are a status report writer. Produce a structured {{parameters.period}} status report.
+
+      {{ if parameters.project_name != "" -}}
+      Project: {{parameters.project_name}}
+      {{ end -}}
+      Audience: {{parameters.audience}}
+      Reporting period: {{parameters.period}}
+      {{ if parameters.context != "" -}}
+      Project context / goals / KPIs:
+      {{parameters.context}}
+      {{ end -}}
+
+      Raw updates data:
+      ─────────────────────────────────────────────
+      {{ if parameters.updates == "" -}}
+      MISSING — output "REPORT FAILURE: No updates data provided." and stop.
+      {{ else -}}
+      {{parameters.updates}}
+      {{ end -}}
+      ─────────────────────────────────────────────
+
+      Generate exactly these section titles (one per line, no numbering):
+      Executive Summary
+      Progress
+      In Progress
+      Blockers & Risks
+      Upcoming
+      Metrics
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a status report writer producing the "{{section_name}}" section of a {{parameters.period}} report.
+
+      {{ if parameters.project_name != "" -}}
+      Project: {{parameters.project_name}}
+      {{ end -}}
+      Audience: {{parameters.audience}}
+      Reporting period: {{parameters.period}}
+      {{ if parameters.context != "" -}}
+      Project context / goals / KPIs:
+      {{parameters.context}}
+      {{ end -}}
+
+      Raw updates data:
+      ─────────────────────────────────────────────
+      {{ if parameters.updates == "" -}}
+      REPORT FAILURE: No updates data provided. Cannot generate status report.
+      {{ else -}}
+      {{parameters.updates}}
+      {{ end -}}
+      ─────────────────────────────────────────────
+
+      {{blocks.data_integrity_rules_extraction}}
+
+      ## AUDIENCE CALIBRATION RULES
+      Audience is "{{parameters.audience}}". Adjust accordingly:
+      - **executive**: Lead with outcomes and business impact. Minimize technical jargon.
+        Use "shipped feature X, enabling Y" not "merged PR #1234". Bullet points, not paragraphs.
+        Focus on: what shipped, what's blocked, what needs a decision.
+      - **team**: Include technical detail. Reference specific tasks, PRs, components.
+        Include context for handoffs and dependencies.
+      - **client**: Professional, outcome-focused. Emphasize deliverables and timeline adherence.
+        Flag risks early with proposed mitigations. Avoid internal process details.
+      - **stakeholder**: Balance detail with readability. Tie progress to stated goals/KPIs.
+        Highlight decisions needed from stakeholders.
+
+      ### {{section_name}}
+
+      {{ if section_name == "Executive Summary" -}}
+      Write 2-3 sentences that:
+      1. State the overall status in the first sentence (on track / at risk / blocked)
+      2. Highlight the single most important achievement this period
+      3. Flag the single highest-priority risk or blocker (if any)
+
+      For **executive** audience: lead with business outcomes.
+      For **team** audience: lead with velocity and technical progress.
+      For **client** audience: lead with deliverable status.
+      For **stakeholder** audience: lead with milestone progress.
+
+      {{ else if section_name == "Progress" -}}
+      List completed items from the reporting period. For each item:
+      - **[Item]**: [What was completed] — **Impact**: [Why it matters]
+
+      Formatting by audience:
+      - executive: 3-5 highest-impact items only. Outcome language.
+      - team: All completed items with technical detail. Reference PRs/tickets if in data.
+      - client: Deliverables and features only. Map to agreed scope.
+      - stakeholder: Items tied to stated milestones or KPIs.
+
+      If no completions are evident in the data, write:
+      "No completed items reported for this period. See In Progress for current work."
+
+      {{ else if section_name == "In Progress" -}}
+      For each item currently being worked on:
+      - **[Item]**: [Current status] — **Expected completion**: [date or timeframe if stated, otherwise "[Not estimated]"]
+
+      Group by priority or workstream if the data supports it.
+      Flag items that appear stalled (mentioned in previous periods with no progress indicator).
+
+      {{ else if section_name == "Blockers & Risks" -}}
+      For each blocker or risk:
+      - **[Blocker/Risk]**: [Description]
+        - **Impact**: [What is delayed or at risk]
+        - **Severity**: CRITICAL (stopping all progress) | HIGH (blocking a key deliverable) |
+          MEDIUM (slowing progress) | LOW (potential future issue)
+        - **Escalation**: [Recommended action — who SHOULD resolve this and by when]
+        - **Mitigation**: [Workaround if available, or "[No workaround identified]"]
+
+      If no blockers are evident: "No blockers reported. [N] items flagged as potential risks below."
+      If no risks either: "No blockers or risks identified in the reported data."
+
+      IMPORTANT: Do NOT downplay blockers. If raw data mentions something is "stuck",
+      "waiting", "blocked", or "delayed", it MUST appear here.
+
+      {{ else if section_name == "Upcoming" -}}
+      List priorities for the next {{parameters.period}} period:
+      - **[Priority item]**: [What will be done] — **Depends on**: [prerequisite if any]
+
+      For **executive** audience: 3-5 strategic priorities.
+      For **team** audience: Detailed task list with owners if stated in data.
+      For **client** audience: Planned deliverables with target dates.
+
+      If the raw data does not contain forward-looking items, write:
+      "No upcoming work items were specified in the reported data."
+
+      {{ else if section_name == "Metrics" -}}
+      Extract and present any quantitative data from the raw updates:
+
+      | Metric | Value | Trend | Notes |
+      |--------|-------|-------|-------|
+
+      Potential metrics to extract (only if present in data):
+      - Tasks completed vs. planned
+      - Story points / velocity
+      - Bug count (opened vs. closed)
+      - Commit count / PR merge rate
+      - Uptime / incident count
+      - Customer-facing metrics (NPS, tickets, etc.)
+      - Budget burn rate
+
+      For each metric:
+      - **Value**: Extract the exact number from the data. If not present, write "[DATA UNAVAILABLE]".
+      - **Trend**: Up/Down/Flat compared to prior period, ONLY if prior period data exists.
+        Otherwise write "[No baseline]".
+
+      If no quantitative data is present: "No quantitative metrics were included in the reported data.
+      Consider adding: [2-3 specific metrics relevant to this project type]."
+      {{ end -}}
+
+      {{blocks.no_preamble}}
+
+      ### GATE_SIGNAL
+      SIGNAL: [ON_TRACK | AT_RISK | BLOCKED | INSUFFICIENT_DATA]
+      RATIONALE: [one sentence — e.g., "All deliverables progressing with no blockers" or "2 critical blockers with no identified owner require immediate escalation"]

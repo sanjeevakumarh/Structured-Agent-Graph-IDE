@@ -1,0 +1,93 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: sprint-planner
+version: 2
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Breaks a backlog into a concrete sprint plan with task decomposition,
+  story-point estimates, dependency ordering, and risk flags.
+  Uses team capacity if provided; estimates 40 SP/engineer if not.
+
+inputs:
+  backlog_items:
+    type: string
+    required: true
+    description: Feature descriptions, user stories, or bug tickets.
+  team_capacity:
+    type: string
+    required: false
+    description: Number of engineers, sprint length, known absences.
+  definition_of_done:
+    type: string
+    required: false
+    description: Acceptance criteria template or DoD checklist.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Capacity Assumptions, ## Task Breakdown (table),
+    ## Dependency Order, ## Risk Flags, ## Sprint Goal, ## What Didn't Fit.
+
+capability_requirements:
+  fast_general:
+    needs: [planning_reasoning, structured_output]
+    context_window_min: 8k
+
+parameters:
+  backlog_items: ""
+  team_capacity: ""
+  definition_of_done: ""
+  output_var: sprint_plan
+
+implementation:
+  - name: plan
+    type: llm_per_section
+    model: "{{capability.fast_general}}"
+    max_sections: "1"
+    section_title: "Sprint Plan"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Capacity Assumptions" — no preamble.
+
+      Backlog: {{ if parameters.backlog_items == "" }}MISSING — output "PLAN FAILURE: No backlog items provided." and stop.{{ else }}provided below.{{ end }}
+
+      Backlog items:
+      {{parameters.backlog_items}}
+
+      Team capacity: {{parameters.team_capacity ?? "Not specified — assume 1 engineer, 2-week sprint, 40 SP capacity"}}
+      Definition of done: {{parameters.definition_of_done ?? "Standard: tested, reviewed, deployed to staging"}}
+
+      ---
+      Produce a sprint plan using exactly these headings:
+
+      ## Capacity Assumptions
+      State the sprint length, team size, total SP capacity, and any absences
+      factored in. If team_capacity was not provided, state the assumption made.
+
+      ## Task Breakdown
+      | # | Task | Description | SP | Dependencies | Risk |
+      |---|---|---|---|---|---|
+      For each task: 1-sentence description, story point estimate (Fibonacci: 1,2,3,5,8,13),
+      upstream dependencies (by task #), risk flag (none / medium / high).
+      Split any task >8 SP into subtasks.
+
+      ## Dependency Order
+      List tasks in execution order. Mark which tasks can run in parallel.
+      Identify the critical path (longest dependency chain).
+
+      ## Risk Flags
+      For each flagged task: risk description, impact (slips sprint / blocks others),
+      mitigation action.
+
+      ## Sprint Goal
+      One sentence: what a successful sprint delivers to users or the business.
+
+      ## What Didn't Fit
+      List any backlog items that exceed capacity with a brief note.
+      If everything fits, write "All items fit within capacity."
+
+      Rules:
+      - Base estimates only on what is described in the backlog items
+      - Never invent tasks not implied by the input
+      - Prefer smaller tasks (≤5 SP) for predictability
+    output_var: "{{parameters.output_var}}"

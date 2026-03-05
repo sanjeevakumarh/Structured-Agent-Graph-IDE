@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: qa-gate
+version: 1
+domain: research
+
+description: >
+  Validates section analyses for completeness before the assembler runs.
+  Runs 6 checks: phase coverage, GATE_SIGNAL format, entity density, idea consistency,
+  entity source hallucination detection, and [E#] citation compliance.
+  Returns a structured VALIDATION_RESULT block that the assembler uses to decide
+  whether to proceed or flag for HITL review.
+
+inputs:
+  section_analyses:
+    type: string
+    required: true
+    description: Concatenated output from section-analyst
+  required_phases:
+    type: integer
+    required: false
+    description: Number of phases that must be present (default 8)
+  idea:
+    type: string
+    required: false
+  entity_inventory:
+    type: string
+    required: false
+    description: Pre-extracted entity inventory from entity_inventory llm step. Used for hallucination cross-check.
+  evidence_cards:
+    type: string
+    required: false
+    description: Pre-normalised evidence cards (JSON array) from normalize_evidence llm step. Used for citation compliance check.
+
+outputs_schema:
+  type: string
+  description: >
+    A QA report in markdown. Must contain a VALIDATION_RESULT block:
+      ### VALIDATION_RESULT
+      STATUS: [PASS / CONDITIONAL / FAIL]
+      MISSING_PHASES: [comma-separated list or "none"]
+      SIGNAL_ISSUES: [description or "none"]
+      ENTITY_ISSUES: [description or "none"]
+      ENTITY_SOURCE_ISSUES: [sections citing entities not in inventory, or "none"]
+      CITATION_ISSUES: [sections with unsourced numeric claims lacking [E#] notation, or "none"]
+      RECOMMENDATION: [one sentence for the assembler]
+
+capability_requirements:
+  critic:
+    needs: [instruction_following, structured_output]
+    context_window_min: 32k
+
+parameters:
+  required_phases: "8"
+  output_var: qa_gate_result
+
+implementation:
+  - name: validate
+    type: llm_per_section
+    model: "{{capability.critic}}"
+    max_sections: "1"
+    output_var: "{{parameters.output_var}}"
+    section_title: "QA Validation"
+    section_analysis_prompt: |
+      You are a QA reviewer. Validate the following section analyses for the idea: {{idea}}
+
+      Expected phases ({{parameters.required_phases}} total):
+      Thesis & Market Fit | Technology Strategy | Financial Viability & Exit | Risk & Compliance |
+      Product Scope & Roadmap | Architecture & Implementation | Support & Compatibility | Implementation Plan & Release Cycles
+
+      Section analyses to validate:
+      ---
+      {{section_analyses}}
+      ---
+
+      Check each of the following:
+
+      1. PHASE COVERAGE: Are all {{parameters.required_phases}} phases present? List any missing.
+      2. GATE_SIGNAL FORMAT: Does every section end with a properly formatted block?
+         Required format:
+         ### GATE_SIGNAL
+         SIGNAL: [GO / CONDITIONAL / NO-GO]
+         RATIONALE: [one sentence]
+         List any sections with missing or malformed GATE_SIGNAL blocks.
+      3. ENTITY DENSITY: Does each section name at least 3 specific competitors/companies AND 3 specific technologies?
+         List sections that fail this minimum.
+      4. IDEA CONSISTENCY: Does every section reference "{{idea}}" consistently?
+         Note any sections that appear to analyse a different topic.
+      5. ENTITY SOURCE CHECK: If {{entity_inventory}} is available and non-empty, verify that named
+         entities cited in sections appear in the pre-extracted inventory below. Flag any sections
+         citing entity names NOT present in the inventory as potential hallucinations.
+         Entity inventory: {{entity_inventory}}
+      6. CITATION COMPLIANCE: Verify that every numeric claim (market size, cost, growth rate,
+         performance figure) in the section analyses is followed by an [E#] evidence citation.
+         Flag every unsourced number as a data integrity violation.
+         {{ if evidence_cards != "" -}}
+         Available evidence cards: {{evidence_cards}}
+         {{ end -}}
+
+      At the end provide exactly:
+      ### VALIDATION_RESULT
+      STATUS: [PASS / CONDITIONAL / FAIL]
+      MISSING_PHASES: [comma-separated list or "none"]
+      SIGNAL_ISSUES: [description or "none"]
+      ENTITY_ISSUES: [description or "none"]
+      ENTITY_SOURCE_ISSUES: [sections citing entities not in inventory, or "none"]
+      CITATION_ISSUES: [sections with unsourced numeric claims lacking [E#] notation, or "none"]
+      RECOMMENDATION: [one sentence for the assembler on how to handle any issues found]

@@ -1,0 +1,145 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: financial-scenario-builder
+version: 2
+domain: finance
+protocol_implements: [Analyzable]
+
+description: >
+  Builds structured Bull / Base / Bear financial scenarios for a business,
+  product, or investment thesis. Produces scenario assumptions, key drivers,
+  financial projections (revenue, margins, cash flow), and break-even analysis.
+  Fail-loudly: outputs "[DATA UNAVAILABLE]" for any projection lacking stated inputs;
+  never fabricates numbers.
+
+inputs:
+  subject:
+    type: string
+    required: true
+    description: Business, product, or investment to model (company name, ticker, or description)
+  context:
+    type: string
+    required: false
+    description: Industry, stage, funding, known financials, analyst thesis
+  time_horizon:
+    type: string
+    required: false
+    description: "Projection period (e.g. '3 years', '5 years', default: 3 years)"
+  evidence:
+    type: string
+    required: false
+    description: Financial data, market research, earnings transcripts, or prior analysis
+
+outputs_schema:
+  type: object
+  required: [bull_case, base_case, bear_case, break_even, verdict]
+  properties:
+    bull_case:
+      type: object
+      description: Optimistic scenario with assumptions and projections
+    base_case:
+      type: object
+      description: Most-likely scenario with assumptions and projections
+    bear_case:
+      type: object
+      description: Pessimistic scenario with assumptions and projections
+    break_even:
+      type: object
+      description: Break-even conditions and runway analysis
+    verdict:
+      type: string
+      enum: [ATTRACTIVE, NEUTRAL, UNATTRACTIVE, INSUFFICIENT_DATA]
+
+capability_requirements:
+  deep_analyst:
+    needs: [long_context_reasoning, structured_output, numerical_reasoning]
+    context_window_min: 16k
+
+parameters:
+  subject: "{{subject}}"
+  context: ""
+  time_horizon: "3 years"
+  evidence: ""
+
+implementation:
+  - name: model
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    planning_prompt: |
+      You are a financial analyst building scenario models.
+
+      Subject: {{parameters.subject}}
+      Time horizon: {{parameters.time_horizon}}
+      {{ if parameters.context != "" -}}
+      Context: {{parameters.context}}
+      {{ end -}}
+      {{ if parameters.evidence != "" -}}
+      Evidence / financials:
+      {{parameters.evidence}}
+      {{ end -}}
+
+      Generate exactly these section titles (one per line, no numbering):
+      Key Assumptions & Drivers
+      Bull Case Scenario
+      Base Case Scenario
+      Bear Case Scenario
+      Break-Even & Runway Analysis
+      Scenario Verdict
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      {{ if parameters.subject == "" }}SCENARIO FAILURE: No subject provided. Cannot build scenarios.{{ end }}
+      You are a financial analyst writing the "{{section_name}}" section.
+
+      Subject: {{parameters.subject}}
+      Time horizon: {{parameters.time_horizon}}
+      {{ if parameters.context != "" -}}
+      Context: {{parameters.context}}
+      {{ end -}}
+      {{ if parameters.evidence != "" -}}
+      Evidence:
+      {{parameters.evidence}}
+      {{ end -}}
+
+      {{blocks.data_integrity_rules_strict}}
+
+      ### {{section_name}}
+
+      **Key Assumptions & Drivers** — tabulate:
+      | Driver | Bull | Base | Bear | Source |
+      Source must cite the evidence section or write "[assumed]" if stated as reasonable estimate.
+      Mark any driver with no evidence basis as [DATA UNAVAILABLE].
+
+      **Bull / Base / Bear Case** — for each scenario:
+      **Scenario trigger**: [What must be true for this scenario to unfold]
+      **Probability**: [H/M/L — based on evidence, not preference]
+
+      Revenue model (cite all inputs):
+      - Year 1: [figure] | Year 2: [figure] | Year 3: [figure]
+        (write [DATA UNAVAILABLE] for any year without a basis)
+
+      Margin structure:
+      - Gross margin: [%] | EBITDA margin: [%] | Net margin: [%]
+        (write [DATA UNAVAILABLE] if not stated)
+
+      Key risks to this scenario: [bullet list, max 3]
+
+      **Break-Even & Runway Analysis**:
+      - Break-even revenue: [figure or DATA UNAVAILABLE]
+      - Break-even timeline: [period or DATA UNAVAILABLE]
+      - Cash runway (if applicable): [months or DATA UNAVAILABLE]
+      - Burn rate assumption: [figure or DATA UNAVAILABLE]
+
+      **Scenario Verdict** — choose exactly one:
+      - **ATTRACTIVE** — Bull case probable (H), downside limited
+      - **NEUTRAL** — Base case realistic; Bull and Bear roughly symmetric
+      - **UNATTRACTIVE** — Bear case probable or downside significantly exceeds upside
+      - **INSUFFICIENT_DATA** — Evidence too sparse to reach a conclusion
+      {{ if parameters.evidence == "" -}}
+      NOTE: No evidence was provided. You MUST select INSUFFICIENT_DATA as your verdict.
+      {{- end }}
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [ATTRACTIVE | NEUTRAL | UNATTRACTIVE | INSUFFICIENT_DATA]
+      RATIONALE: [one sentence citing the key driver or data gap]

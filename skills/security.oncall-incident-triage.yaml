@@ -1,0 +1,97 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: oncall-incident-triage
+version: 2
+domain: security
+protocol_implements: [Analyzable]
+
+description: >
+  Rapid triage of production incidents from alerts, logs, and system context.
+  Produces severity, probable root cause, immediate mitigation steps, and
+  escalation recommendation within the first 5 minutes of an incident.
+  Fails loudly if no alert data is provided.
+
+inputs:
+  alert_description:
+    type: string
+    required: true
+    description: Alert text, metric breach, or customer-reported symptom.
+  logs:
+    type: string
+    required: false
+    description: Relevant log lines, stack traces, or error messages.
+  system_context:
+    type: string
+    required: false
+    description: Service name, dependencies, recent deploys, known flaky components.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Severity (P1-P4), ## Probable Root Cause,
+    ## Customer Impact, ## Immediate Mitigation Steps,
+    ## Long-Term Fix, ## Escalation Recommendation.
+
+capability_requirements:
+  fast_general:
+    needs: [causal_reasoning, rapid_diagnosis, structured_output]
+    context_window_min: 8k
+
+parameters:
+  alert_description: ""
+  logs: ""
+  system_context: ""
+  output_var: triage_result
+
+implementation:
+  - name: triage
+    type: llm_per_section
+    model: "{{capability.fast_general}}"
+    max_sections: "1"
+    section_title: "Incident Triage"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Severity" — no preamble.
+
+      Alert data: {{ if parameters.alert_description == "" }}MISSING — output "TRIAGE FAILURE: No alert description provided." and stop.{{ else }}provided below.{{ end }}
+
+      Alert: {{parameters.alert_description}}
+      Logs: {{parameters.logs ?? "None provided"}}
+      System context: {{parameters.system_context ?? "None provided"}}
+
+      ---
+      Produce a triage report using exactly these headings:
+
+      ## Severity
+      **P1 — Critical** (service down, data loss, security breach) |
+      **P2 — High** (major feature broken, >10% users impacted) |
+      **P3 — Medium** (degraded performance, workaround exists) |
+      **P4 — Low** (minor issue, cosmetic)
+      State the severity and a one-sentence justification.
+
+      ## Probable Root Cause
+      State the most likely root cause based on the evidence provided.
+      List 1–2 alternative hypotheses if evidence is ambiguous.
+      If insufficient data: "Insufficient data — see Immediate Steps for diagnostic actions."
+
+      ## Customer Impact
+      What is the user-visible symptom? How many users are affected (estimate)?
+      Is data at risk? Is the issue getting worse?
+
+      ## Immediate Mitigation Steps
+      Numbered list of actions to take RIGHT NOW (next 15 minutes):
+      1. Rollback / feature flag disable / traffic shift (if applicable)
+      2. Diagnostic commands to run (be specific — include example commands)
+      3. Who to notify immediately
+
+      ## Long-Term Fix
+      Root cause remediation after the incident is contained.
+      Include: code fix, config change, monitoring improvement, or process change.
+
+      ## Escalation Recommendation
+      Should this be escalated? To whom? At what threshold (SLA breach, data risk)?
+      Draft the one-line Slack/PagerDuty escalation message if needed.
+
+      Rules:
+      - Do NOT speculate beyond what the evidence supports
+      - Label uncertain claims as "[Hypothesis]"
+      - Speed > completeness: a focused 5-bullet triage beats a long analysis
+    output_var: "{{parameters.output_var}}"

@@ -1,0 +1,141 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: document-qa
+version: 1
+domain: shared
+protocol_implements: [Analyzable]
+
+description: >
+  Answers specific questions from a provided document with section/page citations.
+  Returns [NOT FOUND IN DOCUMENT] when the answer is not present. Never uses training
+  knowledge to fill gaps — every answer must be grounded in the supplied document text.
+  Supports brief, detailed, and table output formats. Ends with a confidence summary
+  indicating answerable percentage and key gaps.
+
+inputs:
+  document:
+    type: string
+    required: true
+    description: The full text of the document to query
+  questions:
+    type: string
+    required: true
+    description: One or more questions to answer (newline-separated)
+  document_title:
+    type: string
+    required: false
+    description: Name of the document for citation purposes
+  output_format:
+    type: string
+    required: false
+    description: "brief | detailed | table (default: detailed)"
+
+outputs_schema:
+  type: object
+  required: [answers, confidence_summary]
+  properties:
+    answers:
+      type: array
+      description: One entry per question with answer, citation, and confidence
+    confidence_summary:
+      type: string
+      description: Overall answerable percentage and key gaps
+
+capability_requirements:
+  deep_analyst:
+    needs: [long_context_reasoning, structured_output]
+    context_window_min: 32k
+
+parameters:
+  document: ""
+  questions: ""
+  document_title: "Untitled Document"
+  output_format: "detailed"
+  output_var: document_qa_result
+
+implementation:
+  - name: answer_questions
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    output_var: "{{parameters.output_var}}"
+    section_title: "Document Q&A"
+    section_analysis_prompt: |
+      {{ if parameters.document == "" }}QA FAILURE: No document provided. Cannot answer questions.{{ end }}
+      {{ if parameters.questions == "" }}QA FAILURE: No questions provided.{{ end }}
+
+      You are a document question-answering specialist. Your ONLY source of truth is
+      the document provided below. You must NEVER use training knowledge to answer
+      questions — only the document content.
+
+      {{ if parameters.document_title != "" -}}
+      Document title: {{parameters.document_title}}
+      {{ end -}}
+
+      ─────────────────────────────────────────────
+      DOCUMENT
+      ─────────────────────────────────────────────
+      {{parameters.document}}
+      ─────────────────────────────────────────────
+
+      QUESTIONS TO ANSWER (one per line):
+      ─────────────────────────────────────────────
+      {{parameters.questions}}
+      ─────────────────────────────────────────────
+
+      {{blocks.citation_rules}}
+
+      ## CONFIDENCE LEVELS
+      - HIGH: Direct quote or explicit statement in the document answers the question completely.
+      - MEDIUM: Answer is inferred from document context across multiple sections but not
+        stated verbatim. Cite all sections used for inference.
+      - LOW: Document contains loosely related content but does not directly address the
+        question. Cite the nearest relevant section and explain the gap.
+      - NOT_FOUND: The document does not contain information to answer this question.
+
+      ## OUTPUT FORMAT
+      {{ if parameters.output_format == "brief" -}}
+      For each question, output one line:
+      **Q{{question_number}}**: {{question}} → {{answer}} [Citation: {{source}}] ({{confidence}})
+
+      If NOT FOUND: **Q{{question_number}}**: {{question}} → [NOT FOUND IN DOCUMENT]
+      {{ else if parameters.output_format == "table" -}}
+      Output a markdown table with ALL questions:
+      | # | Question | Answer | Citation | Confidence |
+      |---|----------|--------|----------|------------|
+
+      For NOT FOUND entries, put "[NOT FOUND IN DOCUMENT]" in the Answer column,
+      "N/A" in Citation, and "NOT_FOUND" in Confidence.
+      {{ else -}}
+      For each question, output a detailed block:
+
+      ### Q{{question_number}}: {{question}}
+      **Answer**: {{answer}}
+      **Citation**: [Section: "{{section_name}}"] or [Quote: "{{exact_text}}"]
+      **Confidence**: {{HIGH | MEDIUM | LOW | NOT_FOUND}}
+      {{ if confidence == "MEDIUM" or confidence == "LOW" -}}
+      **Reasoning**: Explain what was found and what gap remains.
+      {{ end }}
+
+      For NOT FOUND entries:
+      ### Q{{question_number}}: {{question}}
+      **Answer**: [NOT FOUND IN DOCUMENT]
+      **Confidence**: NOT_FOUND
+      **Nearest relevant section**: {{section_name or "None identified"}}
+      {{ end -}}
+
+      ---
+
+      ## Confidence Summary
+      - **Total questions**: [count]
+      - **Fully answered (HIGH)**: [count] ([percentage]%)
+      - **Partially answered (MEDIUM/LOW)**: [count] ([percentage]%)
+      - **Not found**: [count] ([percentage]%)
+      - **Overall answerability**: [percentage]%
+      - **Key gaps**: [list the most important unanswerable questions and what document
+        content would be needed to answer them]
+
+      {{blocks.no_preamble}}
+
+      ### GATE_SIGNAL
+      SIGNAL: [FULLY_ANSWERED | PARTIALLY_ANSWERED | MOSTLY_UNANSWERABLE | NO_DOCUMENT]
+      RATIONALE: [one sentence — e.g. "8 of 10 questions answered at HIGH confidence; 2 not addressed in document"]

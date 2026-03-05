@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: code-review-auditor
+version: 2
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Reviews code for correctness, performance, readability, maintainability,
+  and security risks. Produces structured findings with severity ratings
+  and concrete refactor suggestions. Fails loudly when input is absent.
+
+inputs:
+  code_snippet:
+    type: string
+    required: true
+    description: The code to review (any language).
+  context:
+    type: string
+    required: false
+    description: Intent or PR description — helps calibrate the review scope.
+  language:
+    type: string
+    required: false
+    description: Programming language hint (e.g. C#, Python, TypeScript).
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Correctness Issues, ## Performance Risks,
+    ## Security Concerns, ## Maintainability, ## Suggested Refactors,
+    ## Verdict (APPROVE / REQUEST_CHANGES / BLOCK).
+
+capability_requirements:
+  coder:
+    needs: [code_analysis, structured_output]
+    context_window_min: 16k
+
+parameters:
+  code_snippet: ""
+  context: ""
+  language: ""
+  output_var: review_report
+
+implementation:
+  - name: review
+    type: llm_per_section
+    model: "{{capability.coder}}"
+    max_sections: "1"
+    section_title: "Code Review"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Input Check" — no preamble.
+
+      ## Input Check
+      Code provided: {{ if parameters.code_snippet == "" }}NO — output "REVIEW FAILURE: No code provided." and stop.{{ else }}YES — proceed.{{ end }}
+
+      Max issues: 20. If more found, prioritize by severity and list only the top 20.
+      Snippet size limit: if the code exceeds 500 lines, focus on the most critical issues only.
+
+      ---
+      Language: {{parameters.language ?? "auto-detect"}}
+      Context / PR intent: {{parameters.context ?? "none provided"}}
+
+      Code under review:
+      ```
+      {{parameters.code_snippet}}
+      ```
+
+      ---
+      Produce a structured code review using exactly these headings:
+
+      ## Correctness Issues
+      For each bug: describe the issue, the line/function it affects, and the fix.
+      If none found, write "None identified."
+
+      ## Performance Risks
+      Flag O(n²) loops, unnecessary allocations, blocking calls in async paths,
+      missing indexes, or N+1 query patterns. Severity: High / Medium / Low.
+      If none found, write "None identified."
+
+      ## Security Concerns
+      Check for injection (SQL, command, XSS), hardcoded secrets, insecure
+      deserialization, missing auth checks, OWASP Top-10 patterns.
+      If none found, write "None identified."
+
+      ## Maintainability
+      Flag: missing error handling, no tests, unclear naming, god classes/functions,
+      missing nullability annotations, magic numbers, deeply nested logic.
+
+      ## Suggested Refactors
+      Provide concrete before/after code snippets for the top 1–3 improvements.
+      If no refactors needed, write "No refactors suggested."
+
+      ## Verdict
+      One of: **APPROVE** / **REQUEST_CHANGES** / **BLOCK**
+      BLOCK = security hole or data-loss bug. REQUEST_CHANGES = fixable issues.
+      One sentence explaining the verdict.
+
+      Rules:
+      - Ground every finding in the actual code provided — no invented issues
+      - Write "Not provided" for anything absent from the input
+      - Use specific line references where possible
+    output_var: "{{parameters.output_var}}"

@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: policy-drafter
+version: 2
+domain: security
+protocol_implements: [Analyzable]
+
+description: >
+  Drafts formal security or compliance policies aligned with best practices.
+  Produces a complete policy document ready for legal/compliance review,
+  with purpose, scope, roles, controls, enforcement, and review cycle.
+
+inputs:
+  policy_type:
+    type: string
+    required: true
+    description: >
+      Type of policy (e.g. Acceptable Use, Data Classification, Access Control,
+      Incident Response, BYOD, Remote Work, Password, Vendor Management).
+  organizational_context:
+    type: string
+    required: false
+    description: Company size, industry, applicable regulations, existing tools.
+  effective_date:
+    type: string
+    required: false
+    description: Target effective date (used in document header).
+
+outputs_schema:
+  type: string
+  description: >
+    Formal policy document with Version, Effective Date, Purpose, Scope,
+    Definitions, Policy Statements, Roles & Responsibilities,
+    Enforcement & Exceptions, Review Cycle, Approval Block.
+
+capability_requirements:
+  critic:
+    needs: [formal_writing, regulatory_alignment]
+    context_window_min: 8k
+
+parameters:
+  policy_type: ""
+  organizational_context: ""
+  effective_date: ""
+  output_var: policy_document
+
+implementation:
+  - name: draft
+    type: llm_per_section
+    model: "{{capability.critic}}"
+    max_sections: "1"
+    section_title: "Policy Document"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "# {{parameters.policy_type}} Policy" — no preamble.
+
+      Policy type: {{ if parameters.policy_type == "" }}MISSING — output "DRAFT FAILURE: No policy type specified." and stop.{{ else }}{{parameters.policy_type}}{{ end }}
+      Organization context: {{parameters.organizational_context ?? "General technology organization"}}
+      Effective date: {{parameters.effective_date ?? "TBD — to be set by policy owner"}}
+
+      ---
+      Draft a formal policy document using this exact structure:
+
+      # {{parameters.policy_type}} Policy
+
+      **Version:** 1.0 | **Status:** Draft | **Effective Date:** {{parameters.effective_date ?? "TBD"}}
+      **Owner:** [Role] | **Classification:** Internal
+
+      ## 1. Purpose
+      Why this policy exists. The risk it addresses. The regulatory or business driver.
+
+      ## 2. Scope
+      Who this policy applies to (employees, contractors, systems, data types).
+      What is explicitly out of scope.
+
+      ## 3. Definitions
+      Key terms used in this policy. 3–6 definitions.
+
+      ## 4. Policy Statements
+      Numbered, unambiguous requirements. Use "must", "must not", "should".
+      Cover: access controls, data handling, acceptable use, technical controls,
+      incident reporting obligations, and third-party requirements where relevant.
+      Minimum 8 policy statements.
+
+      ## 5. Roles & Responsibilities
+      | Role | Responsibility |
+      |---|---|
+      At minimum: Policy Owner, IT/Security Team, All Employees, Management.
+
+      ## 6. Enforcement & Exceptions
+      Consequences for non-compliance. Exception request process and approval authority.
+
+      ## 7. Review Cycle
+      How often reviewed (annual recommended). Who initiates. Version control process.
+
+      ## 8. Approval
+      | Approver | Role | Date | Signature |
+      |---|---|---|---|
+      [CISO / Legal / CEO — to be completed before publishing]
+
+      Rules:
+      - Formal, precise language — avoid ambiguity
+      - Use "must" for mandatory requirements, "should" for recommendations
+      - Align with best practices for the policy type (NIST, ISO 27001, CIS)
+      - Flag with "[REVIEW REQUIRED]" any clause that requires legal input
+    output_var: "{{parameters.output_var}}"

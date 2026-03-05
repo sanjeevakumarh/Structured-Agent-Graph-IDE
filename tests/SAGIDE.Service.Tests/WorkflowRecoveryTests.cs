@@ -118,11 +118,13 @@ public class WorkflowRecoveryTests
     private WorkflowInstance BuildMidExecutionInstance(string workspacePath)
         => new()
         {
-            InstanceId     = "rec001",
-            DefinitionId   = "linear_rec",
-            DefinitionName = "Linear Recovery Test",
-            Status         = WorkflowStatus.Running,
-            WorkspacePath  = workspacePath,
+            InstanceId           = "rec001",
+            DefinitionId         = "linear_rec",
+            DefinitionName       = "Linear Recovery Test",
+            Status               = WorkflowStatus.Running,
+            WorkspacePath        = workspacePath,
+            DefaultModelId       = "test-model",
+            DefaultModelProvider = "Ollama",
             StepExecutions =
             {
                 ["step_a"] = new WorkflowStepExecution
@@ -187,10 +189,12 @@ public class WorkflowRecoveryTests
         // step_a and step_b are both completed; step_c is pending (deps met)
         var inst = new WorkflowInstance
         {
-            InstanceId     = "rec002",
-            DefinitionId   = "linear_rec",
-            DefinitionName = "Linear Recovery Test",
-            Status         = WorkflowStatus.Running,
+            InstanceId           = "rec002",
+            DefinitionId         = "linear_rec",
+            DefinitionName       = "Linear Recovery Test",
+            Status               = WorkflowStatus.Running,
+            DefaultModelId       = "test-model",
+            DefaultModelProvider = "Ollama",
             StepExecutions =
             {
                 ["step_a"] = new WorkflowStepExecution { StepId = "step_a", Status = WorkflowStepStatus.Completed },
@@ -331,9 +335,11 @@ public class WorkflowRecoveryTests
     {
         var inst1 = new WorkflowInstance
         {
-            InstanceId     = "multi-1",
-            DefinitionId   = "linear_rec",
-            Status         = WorkflowStatus.Running,
+            InstanceId           = "multi-1",
+            DefinitionId         = "linear_rec",
+            Status               = WorkflowStatus.Running,
+            DefaultModelId       = "test-model",
+            DefaultModelProvider = "Ollama",
             StepExecutions =
             {
                 ["step_a"] = new WorkflowStepExecution { StepId = "step_a", Status = WorkflowStepStatus.Completed },
@@ -344,9 +350,11 @@ public class WorkflowRecoveryTests
 
         var inst2 = new WorkflowInstance
         {
-            InstanceId     = "multi-2",
-            DefinitionId   = "linear_rec",
-            Status         = WorkflowStatus.Running,
+            InstanceId           = "multi-2",
+            DefinitionId         = "linear_rec",
+            Status               = WorkflowStatus.Running,
+            DefaultModelId       = "test-model",
+            DefaultModelProvider = "Ollama",
             StepExecutions =
             {
                 ["step_a"] = new WorkflowStepExecution { StepId = "step_a", Status = WorkflowStepStatus.Completed },
@@ -378,9 +386,11 @@ public class WorkflowRecoveryTests
         // now definition also has step_c (new step added after crash)
         var inst = new WorkflowInstance
         {
-            InstanceId     = "rec007",
-            DefinitionId   = "linear_rec",
-            Status         = WorkflowStatus.Running,
+            InstanceId           = "rec007",
+            DefinitionId         = "linear_rec",
+            Status               = WorkflowStatus.Running,
+            DefaultModelId       = "test-model",
+            DefaultModelProvider = "Ollama",
             StepExecutions =
             {
                 // Only step_a and step_b in the saved execution record

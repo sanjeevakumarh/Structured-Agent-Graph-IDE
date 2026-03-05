@@ -1,0 +1,277 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: test-plan-generator
+version: 1
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Creates a comprehensive test plan from requirements, user stories, or
+  acceptance criteria. Covers unit, integration, e2e, performance, and
+  security test scenarios with prioritized test cases, edge conditions,
+  and test data requirements. Fails loudly when no requirements are
+  provided — outputs "TEST PLAN FAILURE: No requirements provided." and stops.
+
+inputs:
+  requirements:
+    type: string
+    required: true
+    description: Feature requirements, user stories, or acceptance criteria to derive test cases from.
+  system_context:
+    type: string
+    required: false
+    description: Architecture, tech stack, existing test infrastructure, CI/CD pipeline details.
+  risk_areas:
+    type: string
+    required: false
+    description: Known fragile areas, high-risk components, or modules with a history of regressions.
+  test_types:
+    type: string
+    required: false
+    description: "Test types to include: unit | integration | e2e | performance | security | all (default: all)"
+
+outputs_schema:
+  type: object
+  required: [strategy, test_cases, edge_cases, test_data_requirements, coverage_estimate]
+  properties:
+    strategy:
+      type: string
+      description: Test approach, scope boundaries, entry/exit criteria
+    test_cases:
+      type: array
+      description: Structured test cases with ID, category, scenario, steps, expected result, priority
+    edge_cases:
+      type: array
+      description: Boundary conditions, error paths, concurrency scenarios
+    test_data_requirements:
+      type: string
+      description: Fixtures, mocks, seed data, and environment prerequisites
+    coverage_estimate:
+      type: string
+      description: Estimated coverage by requirement and test type with identified gaps
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, technical_analysis, structured_output]
+    context_window_min: 16k
+
+parameters:
+  requirements: ""
+  system_context: ""
+  risk_areas: ""
+  test_types: "all"
+  output_var: test_plan
+
+implementation:
+  - name: generate_test_plan
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "6"
+    planning_prompt: |
+      You are a senior QA engineer creating a comprehensive test plan.
+
+      Requirements:
+      {{parameters.requirements}}
+
+      {{ if parameters.system_context != "" -}}
+      System context: {{parameters.system_context}}
+      {{ end -}}
+      {{ if parameters.risk_areas != "" -}}
+      Risk areas: {{parameters.risk_areas}}
+      {{ end -}}
+      Test types requested: {{parameters.test_types}}
+
+      Generate exactly these section titles (one per line, no numbering):
+      Test Strategy
+      Test Cases
+      Edge Cases
+      Performance Test Scenarios
+      Security Test Scenarios
+      Test Data Requirements
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a senior QA engineer writing the "{{section_name}}" section of a test plan.
+      {{blocks.no_preamble}}
+
+      ## Input Verification
+      Requirements provided: {{ if parameters.requirements == "" }}NO — output "TEST PLAN FAILURE: No requirements provided." and stop.{{ else }}YES — proceed.{{ end }}
+
+      Requirements:
+      ─────────────────────────────────────────────
+      {{parameters.requirements}}
+      ─────────────────────────────────────────────
+
+      System context: {{parameters.system_context ?? "Not specified — derive from requirements"}}
+      Risk areas: {{parameters.risk_areas ?? "None specified"}}
+      Test types: {{parameters.test_types ?? "all"}}
+
+      ---
+
+      ### {{section_name}}
+
+      {{ if section_name == "Test Strategy" -}}
+      Define the overall test approach:
+
+      **Scope**: What is in scope and out of scope for this test plan.
+      Derive scope boundaries directly from the requirements — do NOT
+      expand scope beyond what is described.
+
+      **Test Levels**:
+      {{ if parameters.test_types == "all" -}}
+      Cover all levels: unit, integration, e2e, performance, security.
+      {{ else -}}
+      Cover ONLY these levels: {{parameters.test_types}}. Mention other
+      levels as "out of scope for this plan" if relevant.
+      {{ end -}}
+
+      **Entry Criteria**: Conditions that MUST be met before testing begins
+      (e.g. build passes, test environment provisioned, test data seeded).
+
+      **Exit Criteria**: Conditions that MUST be met to consider testing complete
+      (e.g. all P0/P1 test cases pass, no open blockers, coverage threshold met).
+
+      **Risk-based prioritization**: If risk_areas were provided, explain how
+      they influence test priority and coverage depth.
+
+      **Assumptions**: State every assumption about the system, environment,
+      or requirements that affects this plan.
+      {{ else if section_name == "Test Cases" -}}
+      Present test cases in a structured table:
+
+      | ID | Category | Scenario | Steps | Expected Result | Priority |
+      |----|----------|----------|-------|-----------------|----------|
+
+      Rules for test cases:
+      - **ID**: TC-001, TC-002, etc.
+      - **Category**: unit | integration | e2e | regression
+      - **Scenario**: One-sentence description of what is being tested
+      - **Steps**: Numbered steps (1. Do X, 2. Verify Y)
+      - **Expected Result**: Observable, verifiable outcome
+      - **Priority**: P0 (blocker) | P1 (critical) | P2 (important) | P3 (nice-to-have)
+
+      Every requirement MUST have at least one test case. If a requirement
+      is ambiguous, create the test case and add "[CLARIFICATION NEEDED]".
+
+      {{ if parameters.risk_areas != "" -}}
+      Risk areas ({{parameters.risk_areas}}) SHOULD have higher test density —
+      aim for 3+ test cases per risk area.
+      {{ end -}}
+
+      Maximum 30 test cases. If more are needed, prioritize P0/P1 and note
+      "Additional P2/P3 cases recommended for: [areas]".
+      {{ else if section_name == "Edge Cases" -}}
+      Identify boundary conditions and error paths:
+
+      **Boundary conditions**:
+      - Input limits (min, max, empty, null, overflow)
+      - Pagination boundaries (first page, last page, empty result set)
+      - Time-based boundaries (midnight, DST, timezone edge cases)
+
+      **Error paths**:
+      - Network failures (timeout, connection refused, partial response)
+      - Invalid input (malformed data, injection attempts, encoding issues)
+      - Resource exhaustion (disk full, memory pressure, connection pool)
+      - Concurrent access (race conditions, deadlocks, stale reads)
+
+      **State transitions**:
+      - Interruption during state changes (crash recovery, partial writes)
+      - Invalid state sequences (out-of-order operations)
+
+      For each edge case, provide:
+      - **Scenario**: what condition is being tested
+      - **Trigger**: how to reproduce
+      - **Expected behavior**: what SHOULD happen (graceful degradation, error message, retry)
+      - **Risk**: what happens if this edge case is NOT handled
+
+      Only include edge cases derivable from the requirements — do NOT
+      invent features not described in the input.
+      {{ else if section_name == "Performance Test Scenarios" -}}
+      {{ if parameters.test_types != "all" -}}
+      {{ if parameters.test_types | string.contains "performance" -}}
+      {{ else -}}
+      Performance testing is out of scope per test_types parameter.
+      Write "SKIPPED — performance testing not requested." and stop.
+      {{ end -}}
+      {{ end -}}
+
+      Define performance test scenarios:
+
+      **Load testing**: Expected normal load scenarios
+      - Concurrent users / requests per second target
+      - Response time SLA (p50, p95, p99)
+      - Throughput requirements
+
+      **Stress testing**: Beyond-normal load
+      - At what multiplier of normal load does the system degrade?
+      - What is the failure mode (graceful degradation vs crash)?
+
+      **Soak testing**: Sustained load over time
+      - Memory leak detection duration (recommended: 4+ hours)
+      - Connection pool exhaustion timeline
+
+      If no performance requirements are stated in the input, write:
+      "No explicit performance requirements provided. Recommended baselines:
+      p95 < 500ms for API calls, p99 < 2s, sustained 100 RPS without error rate increase."
+
+      Include tool recommendations (k6, JMeter, Locust, etc.) if system_context
+      provides enough information to suggest one.
+      {{ else if section_name == "Security Test Scenarios" -}}
+      {{ if parameters.test_types != "all" -}}
+      {{ if parameters.test_types | string.contains "security" -}}
+      {{ else -}}
+      Security testing is out of scope per test_types parameter.
+      Write "SKIPPED — security testing not requested." and stop.
+      {{ end -}}
+      {{ end -}}
+
+      Define security test scenarios based on OWASP Top 10 relevance:
+
+      For each applicable OWASP category:
+      - **Category**: (e.g. A01:2021 Broken Access Control)
+      - **Applicable**: YES / NO / UNKNOWN (based on requirements)
+      - **Test scenario**: What to test
+      - **Method**: Manual / automated / both
+      - **Tool**: Recommended tool if applicable
+
+      Additional security checks:
+      - Authentication bypass attempts
+      - Authorization escalation (horizontal and vertical)
+      - Input validation (SQL injection, XSS, command injection)
+      - Sensitive data exposure (logs, error messages, API responses)
+      - CSRF / SSRF if web-facing
+
+      Only flag categories that are relevant based on the requirements.
+      Do NOT include a generic checklist — every item MUST relate to a
+      specific aspect of the described feature.
+      {{ else if section_name == "Test Data Requirements" -}}
+      Define what test data is needed:
+
+      **Fixtures / seed data**:
+      - What entities MUST exist before tests run
+      - Minimum dataset size for meaningful coverage
+      - Any referential integrity requirements
+
+      **Mocks / stubs**:
+      - External services that MUST be mocked (payment, email, auth providers)
+      - Mock behavior specification (success, failure, timeout scenarios)
+
+      **Environment prerequisites**:
+      - Required services / infrastructure (database, cache, queue)
+      - Configuration (feature flags, environment variables)
+      - Cleanup / teardown requirements between test runs
+
+      **Data generation**:
+      - Tools or scripts needed (factories, fakers, generators)
+      - Volume requirements for performance tests
+      - PII / compliance considerations (no real user data in test environments)
+
+      State "Not determinable from requirements" for anything that cannot be
+      inferred from the provided input.
+      {{ end -}}
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [COMPREHENSIVE | PARTIAL_COVERAGE | INSUFFICIENT_REQUIREMENTS]
+      RATIONALE: [one sentence — e.g. "3 requirements lack testable acceptance criteria"]
+    output_var: "{{parameters.output_var}}"

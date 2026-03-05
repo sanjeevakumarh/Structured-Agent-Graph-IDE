@@ -62,8 +62,9 @@ internal static class PromptEndpoints
             if (prompt is null)
                 return Results.NotFound(new { error = $"Prompt '{domain}/{name}' not found" });
 
-            // Multi-model prompt: hand off to SubtaskCoordinator (runs in background)
-            if (prompt.Subtasks.Count > 0)
+            // Multi-model prompt: hand off to SubtaskCoordinator (runs in background).
+            // Check inline subtasks OR objects/workflow declarations (WorkflowExpander runs inside RunAsync).
+            if (prompt.Subtasks.Count > 0 || prompt.Objects.Count > 0 || prompt.DataCollection?.Steps.Count > 0)
             {
                 _ = Task.Run(() => coordinator.RunAsync(prompt, variables, CancellationToken.None));
 

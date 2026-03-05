@@ -1,0 +1,187 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: changelog-release-notes
+version: 1
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Generates structured changelog and release notes from raw change data
+  (git log, PR descriptions, commit messages). Follows Keep a Changelog
+  format with audience-aware language (developer vs end_user vs internal).
+  Breaking changes are ALWAYS surfaced in a dedicated section regardless
+  of audience. Fails loudly when no change data is provided — outputs
+  "CHANGELOG FAILURE: No change data provided." and stops.
+
+inputs:
+  changes:
+    type: string
+    required: true
+    description: Raw change data — git log output, PR descriptions, commit messages, or JIRA summaries.
+  version:
+    type: string
+    required: false
+    description: Version number for this release (e.g. "2.4.0"). If omitted, "[UNRELEASED]" is used.
+  audience:
+    type: string
+    required: false
+    description: "Target audience: developer | end_user | internal (default: developer)"
+  project_name:
+    type: string
+    required: false
+    description: Project or product name for the release header.
+  previous_version:
+    type: string
+    required: false
+    description: Previous version for comparison context and diff links.
+
+outputs_schema:
+  type: object
+  required: [version, date, sections, breaking_changes, migration_notes]
+  properties:
+    version:
+      type: string
+      description: Version string or "[UNRELEASED]"
+    date:
+      type: string
+      description: Release date in YYYY-MM-DD format
+    sections:
+      type: object
+      description: "Keep a Changelog sections: added, changed, deprecated, removed, fixed, security"
+      properties:
+        added:
+          type: array
+          description: New features
+        changed:
+          type: array
+          description: Changes to existing functionality
+        deprecated:
+          type: array
+          description: Features marked for removal
+        removed:
+          type: array
+          description: Features removed in this release
+        fixed:
+          type: array
+          description: Bug fixes
+        security:
+          type: array
+          description: Security-related changes
+    breaking_changes:
+      type: array
+      description: All breaking changes with migration guidance
+    migration_notes:
+      type: string
+      description: Step-by-step migration instructions for breaking changes
+
+capability_requirements:
+  fast_general:
+    needs: [structured_output, text_classification]
+    context_window_min: 16k
+
+parameters:
+  changes: ""
+  version: ""
+  audience: "developer"
+  project_name: ""
+  previous_version: ""
+  output_var: release_notes
+
+implementation:
+  - name: generate_changelog
+    type: llm_per_section
+    model: "{{capability.fast_general}}"
+    max_sections: "1"
+    section_title: "Release Notes"
+    section_analysis_prompt: |
+      You are a technical writer generating release notes. {{blocks.no_preamble}}
+
+      ## Input Verification
+      Change data provided: {{ if parameters.changes == "" }}NO — output "CHANGELOG FAILURE: No change data provided." and stop.{{ else }}YES — proceed.{{ end }}
+
+      Project: {{parameters.project_name ?? "[Project Name]"}}
+      Version: {{parameters.version ?? "[UNRELEASED]"}}
+      Previous version: {{parameters.previous_version ?? "not specified"}}
+      Audience: {{parameters.audience ?? "developer"}}
+
+      Raw change data:
+      ─────────────────────────────────────────────
+      {{parameters.changes}}
+      ─────────────────────────────────────────────
+
+      ---
+      Generate release notes following the Keep a Changelog format (https://keepachangelog.com).
+      Your response MUST start with the version header — no preamble.
+
+      ## {{parameters.project_name ?? "[Project Name]"}} — {{parameters.version ?? "[UNRELEASED]"}} ({{date ?? "YYYY-MM-DD"}})
+      {{ if parameters.previous_version != "" -}}
+      *Diff from {{parameters.previous_version}}*
+      {{ end -}}
+
+      Use exactly these sections. Omit any section that has zero entries — do NOT
+      include empty sections with "None" or "N/A".
+
+      ### Breaking Changes
+      This section MUST appear FIRST if any breaking changes exist, regardless
+      of audience. For each breaking change:
+      - **What changed**: concise description
+      - **Migration**: exact steps to update (code samples for developer audience)
+      - **Reason**: why this breaking change was necessary
+
+      ### Added
+      New features and capabilities.
+
+      ### Changed
+      Changes to existing functionality.
+
+      ### Deprecated
+      Features that will be removed in a future release. Include the planned
+      removal version if known.
+
+      ### Removed
+      Features removed in this release.
+
+      ### Fixed
+      Bug fixes. For developer audience: include file paths or component names.
+
+      ### Security
+      Security patches and vulnerability fixes. MUST include CVE identifiers
+      if present in the change data.
+
+      {{ if parameters.audience == "end_user" -}}
+      ## AUDIENCE RULES (end_user)
+      - Use plain, non-technical language
+      - Do NOT include file paths, class names, or internal component names
+      - Focus on user-visible behavior changes
+      - Explain breaking changes in terms of what the user needs to do differently
+      {{ else if parameters.audience == "internal" -}}
+      ## AUDIENCE RULES (internal)
+      - Include internal component names and team references
+      - Note deployment dependencies or infrastructure changes
+      - Flag items that require ops or SRE coordination
+      {{ else -}}
+      ## AUDIENCE RULES (developer)
+      - Include file paths, API endpoints, and breaking interface changes
+      - Provide code migration examples for breaking changes
+      - Reference PR numbers or commit SHAs when present in the data
+      {{ end -}}
+
+      ## CLASSIFICATION RULES
+      1. Every change MUST be classified into exactly one section.
+      2. If a change fits multiple sections, use the most impactful one.
+      3. Changes labeled "BREAKING", "breaking change", or that remove/rename
+         public API surfaces MUST appear in Breaking Changes AND their
+         primary section.
+      4. Do NOT invent changes — only classify what appears in the raw data.
+      5. If a change is ambiguous, classify it as Changed and add "[NEEDS REVIEW]".
+
+      {{ if parameters.audience == "developer" -}}
+      ### Migration Notes
+      If breaking changes exist, provide a numbered step-by-step migration guide.
+      Include before/after code snippets where the raw data provides enough detail.
+      If no breaking changes: write "No migration required."
+      {{ end -}}
+
+      ### GATE_SIGNAL
+      SIGNAL: [RELEASE_READY | NEEDS_REVIEW | INCOMPLETE_DATA]
+      RATIONALE: [one sentence — e.g. "3 changes could not be classified from commit messages alone"]
+    output_var: "{{parameters.output_var}}"

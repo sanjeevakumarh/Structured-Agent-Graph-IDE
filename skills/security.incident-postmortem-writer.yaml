@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: incident-postmortem-writer
+version: 2
+domain: security
+protocol_implements: [Analyzable]
+
+description: >
+  Produces a structured blameless post-incident review with timeline,
+  verified root cause, contributing factors, impact quantification,
+  and concrete corrective actions with owners and deadlines.
+
+inputs:
+  incident_details:
+    type: string
+    required: true
+    description: >
+      Timeline of events, symptoms observed, actions taken, resolution steps,
+      and any metrics (duration, users affected, error rate, revenue impact).
+  contributing_context:
+    type: string
+    required: false
+    description: Recent changes, team on-call, known technical debt relevant to the incident.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Incident Summary, ## Timeline, ## Root Cause Analysis (5 Whys),
+    ## Contributing Factors, ## Impact, ## What Went Well,
+    ## Corrective Actions (table with owner + deadline), ## Detection Gap.
+
+capability_requirements:
+  deep_analyst:
+    needs: [causal_reasoning, structured_output]
+    context_window_min: 8k
+
+parameters:
+  incident_details: ""
+  contributing_context: ""
+  output_var: postmortem
+
+implementation:
+  - name: generate
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    section_title: "Post-Incident Review"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Incident Summary" — no preamble.
+
+      Incident data: {{ if parameters.incident_details == "" }}MISSING — output "POSTMORTEM FAILURE: No incident details provided." and stop.{{ else }}provided below.{{ end }}
+
+      Incident details:
+      {{parameters.incident_details}}
+
+      Contributing context: {{parameters.contributing_context ?? "None provided"}}
+
+      ---
+      Produce a blameless post-incident review using exactly these headings:
+
+      ## Incident Summary
+      One paragraph: what happened, when, how long, and how it was resolved.
+      Include: start time, end time, total duration, severity (P1-P4).
+
+      ## Timeline
+      | Time (UTC) | Event | Who |
+      |---|---|---|
+      Extract every timestamped event from the incident details.
+      If timestamps are missing, use relative times (T+0m, T+5m, etc.).
+
+      ## Root Cause Analysis (5 Whys)
+      Apply the 5 Whys method to reach the technical root cause.
+      Why 1 → Why 2 → ... → Root Cause.
+      If data is insufficient to complete 5 Whys, state: "Insufficient data at Why N — team must investigate [specific gap]."
+
+      ## Contributing Factors
+      Non-root systemic factors that made the incident worse or harder to detect.
+      Format: [Factor] — [Why it contributed] — [Systemic category: process/tooling/knowledge/architecture]
+
+      ## Impact
+      - Users affected: [number or "unknown — investigation needed"]
+      - Duration of impact: [exact time or range]
+      - Revenue impact: [estimated or "not quantified"]
+      - Data integrity: [no loss / potential loss / confirmed loss]
+
+      ## What Went Well
+      2–5 things the team did well during the incident. Be specific.
+
+      ## Corrective Actions
+      | Action | Owner | Due Date | Priority |
+      |---|---|---|---|
+      For each action: concrete task (not vague), team/role owner, target date, HIGH/MEDIUM/LOW.
+      Minimum 3 actions. At least one must address the root cause directly.
+
+      ## Detection Gap
+      How long before detection? Could it have been detected sooner?
+      What alert or monitor would have caught it earlier?
+
+      Rules:
+      - Blameless tone — focus on systems and processes, not individuals
+      - Ground every finding in the incident details provided
+      - Write "Not available in incident report" for missing data — do not invent
+    output_var: "{{parameters.output_var}}"

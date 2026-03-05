@@ -23,7 +23,7 @@ public class NamedPipeServer
     private readonly ConcurrentDictionary<string, string> _taskOwners = new();
     // bounded channel — high-volume streaming messages (DropOldest prevents producer blockage)
     private readonly Channel<PipeMessage> _broadcastChannel;
-    // unbounded channel — lifecycle/state events that must never be dropped (R2)
+    // unbounded channel — lifecycle/state events that must never be dropped
     private readonly Channel<PipeMessage> _lifecycleChannel;
     private CancellationTokenSource? _cts;
 
@@ -62,7 +62,7 @@ public class NamedPipeServer
         });
 
         // Unbounded — lifecycle events (TaskUpdate, WorkflowUpdate, ApprovalNeeded, etc.) must never
-        // be dropped. These are low-volume compared to streaming_output tokens. (R2)
+        // be dropped. These are low-volume compared to streaming_output tokens.
         _lifecycleChannel = Channel.CreateUnbounded<PipeMessage>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -223,7 +223,7 @@ public class NamedPipeServer
     /// fans each one out to all connected clients in parallel with per-client timeouts.
     /// The producer (BroadcastAsync) is never blocked by a slow or stalled client.
     /// Only <see cref="MessageTypes.StreamingOutput"/> messages are routed here; all other
-    /// message types go through the unbounded lifecycle channel (R2).
+    /// message types go through the unbounded lifecycle channel.
     /// </summary>
     private async Task DrainBroadcastChannelAsync(CancellationToken ct)
     {
@@ -245,7 +245,7 @@ public class NamedPipeServer
     /// <summary>
     /// Background drain loop for lifecycle/state events (TaskUpdate, WorkflowUpdate,
     /// WorkflowApprovalNeeded, etc.). Uses an unbounded channel so these messages are
-    /// never silently dropped under streaming backpressure (R2).
+    /// never silently dropped under streaming backpressure.
     /// </summary>
     private async Task DrainLifecycleChannelAsync(CancellationToken ct)
     {
@@ -367,7 +367,7 @@ public class NamedPipeServer
     /// <para>
     /// <see cref="MessageTypes.StreamingOutput"/> messages go to the bounded channel (DropOldest);
     /// all other message types (TaskUpdate, WorkflowUpdate, ApprovalNeeded, etc.) go to the
-    /// unbounded lifecycle channel so they are never silently dropped (R2).
+    /// unbounded lifecycle channel so they are never silently dropped.
     /// </para>
     /// </summary>
     public Task BroadcastAsync(PipeMessage message, CancellationToken ct = default)

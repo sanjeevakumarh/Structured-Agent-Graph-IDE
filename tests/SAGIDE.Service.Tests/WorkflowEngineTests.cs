@@ -115,9 +115,11 @@ internal sealed class WorkflowTestHarness : IDisposable
         Dictionary<string, string>? inputs = null)
         => Engine.StartAsync(new StartWorkflowRequest
         {
-            DefinitionId  = definitionId,
-            WorkspacePath = WorkspaceDir,
-            Inputs        = inputs ?? [],
+            DefinitionId         = definitionId,
+            WorkspacePath        = WorkspaceDir,
+            Inputs               = inputs ?? [],
+            DefaultModelId       = "test-model",
+            DefaultModelProvider = "Ollama",
         }, CancellationToken.None);
 
     /// <summary>Simulates a task completing successfully (no issues).</summary>

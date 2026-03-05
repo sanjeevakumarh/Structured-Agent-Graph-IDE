@@ -35,6 +35,24 @@ public class PromptDefinition
 
     public PromptOutput? Output { get; set; }
 
+    /// <summary>
+    /// Optional additional output files. Each entry may specify a <c>source</c> variable
+    /// (e.g. a subtask result) to write independently of the main synthesised output.
+    /// </summary>
+    public List<PromptOutput> Outputs { get; set; } = [];
+
+    /// <summary>
+    /// Phase 5: Named skill instances declared for this workflow.
+    /// Expanded by WorkflowExpander into data_collection steps before execution.
+    /// </summary>
+    public List<PromptObject> Objects { get; set; } = [];
+
+    /// <summary>
+    /// Phase 5: Ordered call sequence that composes skill instances.
+    /// Expanded by WorkflowExpander into data_collection steps + subtasks before execution.
+    /// </summary>
+    public List<PromptWorkflowCall> Workflow { get; set; } = [];
+
     /// <summary>Absolute path of the YAML file this was loaded from. Set by PromptRegistry.</summary>
     public string? FilePath { get; set; }
 }
@@ -101,6 +119,27 @@ public class PromptDataCollectionStep
     public string OutputVar { get; set; } = string.Empty;
 
     /// <summary>
+    /// When true, an empty <see cref="OutputVar"/> does NOT abort the run.
+    /// Use for search tracks where zero results is a legitimate outcome (e.g. niche topics
+    /// with no comparable companies). A <c>missing_data_summary</c> var is injected into
+    /// the run context so downstream prompts can acknowledge what is unavailable.
+    /// </summary>
+    public bool OptionalOutput { get; set; }
+
+    /// <summary>
+    /// Reference to a named skill in the skills/ library (e.g. "research/web-research-track"
+    /// or just "web-research-track" to search all domains). When set, the step's
+    /// <see cref="Type"/> may be omitted — the skill's implementation is expanded at runtime.
+    /// </summary>
+    public string? Skill { get; set; }
+
+    /// <summary>
+    /// Constructor arguments passed to a skill reference. Merged over the skill's default
+    /// <c>parameters</c> at expansion time; values support Scriban template expressions.
+    /// </summary>
+    public Dictionary<string, object> Parameters { get; set; } = [];
+
+    /// <summary>
     /// Prompt template for <c>llm_queries</c> steps.
     /// The LLM receives this rendered text and must return a JSON array of search query strings.
     /// Those queries are then executed via the web search adapter and results are combined.
@@ -134,6 +173,28 @@ public class PromptDataCollectionStep
     /// Maximum number of sections to generate (template or integer string). Default 5.
     /// </summary>
     public string? MaxSections { get; set; }
+
+    /// <summary>
+    /// When set on an <c>llm_per_section</c> step with <c>max_sections: "1"</c>, the
+    /// planning LLM call is skipped entirely and this value is used as the single section
+    /// name. Eliminates a wasted LLM round-trip for skills that always produce one section.
+    /// </summary>
+    public string? SectionTitle { get; set; }
+
+    // ── llm step fields ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Prompt text for a <c>type: llm</c> step. Supports Scriban template expressions.
+    /// The rendered text is submitted as a single LLM task; the result is stored in
+    /// <see cref="OutputVar"/>. Runs synchronously so later steps can reference it.
+    /// </summary>
+    public string? PromptTemplate { get; set; }
+
+    /// <summary>
+    /// Optional list of var names to include in the prompt context for a <c>type: llm</c>
+    /// step. When empty all current vars are available via template expressions.
+    /// </summary>
+    public List<string> InputVars { get; set; } = [];
 }
 
 // ── Subtask ────────────────────────────────────────────────────────────────────
@@ -155,7 +216,28 @@ public class PromptSubtask
     /// </summary>
     public List<string> InputVars { get; set; } = [];
 
+    /// <summary>
+    /// Names of other subtasks that must complete before this one is dispatched.
+    /// Completed subtask results are injected into the template vars as <c>{name}_result</c>.
+    /// When empty (default), the subtask runs in the first parallel wave with no prerequisites.
+    /// </summary>
+    public List<string> DependsOn { get; set; } = [];
+
     public string? PromptTemplate { get; set; }
+
+    /// <summary>
+    /// Variable name under which this subtask's result is stored in the shared vars dict.
+    /// Set from the skill's <c>output_var</c> parameter by WorkflowExpander.
+    /// Falls back to <c>{Name}_result</c> when not set.
+    /// </summary>
+    public string? OutputVar { get; set; }
+
+    /// <summary>
+    /// Skill parameters merged by WorkflowExpander (skill defaults ← object args).
+    /// Injected as <c>parameters</c> into the Scriban rendering context so that
+    /// skill prompt templates can reference <c>{{parameters.required_phases}}</c> etc.
+    /// </summary>
+    public Dictionary<string, object> Parameters { get; set; } = [];
 }
 
 // ── Synthesis + Output ────────────────────────────────────────────────────────
@@ -174,4 +256,10 @@ public class PromptOutput
 
     /// <summary>Whether to emit a notification after writing the output.</summary>
     public bool Notify { get; set; }
+
+    /// <summary>
+    /// For use in <c>outputs:</c> list only. Names a subtask result variable to write
+    /// (e.g. "evaluator_result"). When null, the synthesised output is written instead.
+    /// </summary>
+    public string? Source { get; set; }
 }

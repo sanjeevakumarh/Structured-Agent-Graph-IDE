@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: structured-thinker
+version: 2
+domain: strategy
+protocol_implements: [Analyzable]
+
+description: >
+  Breaks down ambiguous or complex problems into structured components:
+  goals, constraints, assumptions, unknowns, risks, and a recommended
+  first step. Useful before design, planning, or investment decisions.
+
+inputs:
+  problem_statement:
+    type: string
+    required: true
+    description: The problem or situation to analyze.
+  context:
+    type: string
+    required: false
+    description: Stakeholders, constraints, prior attempts, time pressure.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Problem Framing, ## Goals vs Non-Goals,
+    ## Constraints, ## Key Assumptions, ## Unknowns & Information Gaps,
+    ## Risks, ## Recommended First Step.
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, structured_output]
+    context_window_min: 8k
+
+parameters:
+  problem_statement: ""
+  context: ""
+  output_var: structured_analysis
+
+implementation:
+  - name: analyse
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    section_title: "Problem Breakdown"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Problem Framing" — no preamble.
+
+      Problem: {{ if parameters.problem_statement == "" }}MISSING — output "ANALYSIS FAILURE: No problem statement provided." and stop.{{ else }}provided below.{{ end }}
+
+      Problem statement:
+      {{parameters.problem_statement}}
+
+      Context: {{parameters.context ?? "None provided"}}
+
+      ---
+      Produce a structured analysis using exactly these headings:
+
+      ## Problem Framing
+      Restate the problem in precise terms. What is actually being asked?
+      Is this the right problem to solve, or is it a symptom of a deeper issue?
+      Who owns this problem? What is the cost of not solving it?
+
+      ## Goals vs Non-Goals
+      | Goals (must achieve) | Non-Goals (explicitly out of scope) |
+      |---|---|
+      List 3–5 of each. Being explicit about non-goals prevents scope creep.
+
+      ## Constraints
+      Hard constraints (cannot be changed): time, budget, technical, legal.
+      Soft constraints (can be negotiated with justification).
+
+      ## Key Assumptions
+      What are you assuming to be true that has not been confirmed?
+      For each: state the assumption, and what happens if it is wrong.
+
+      ## Unknowns & Information Gaps
+      What information, if available, would most change your approach?
+      Rank the top 3 unknowns by their impact on the outcome.
+
+      ## Risks
+      | Risk | Likelihood | Impact | Mitigation |
+      |---|---|---|---|
+      3–5 risks. Likelihood and Impact: High / Med / Low.
+
+      ## Recommended First Step
+      The single most valuable action to take next.
+      Why this step? What does it unblock or validate?
+      What is the success criterion for this step?
+
+      Rules:
+      - Stay grounded in what was described — do not invent constraints
+      - Prefer clarifying questions over invented assumptions
+      - If the problem statement is underspecified, say so explicitly in Problem Framing
+    output_var: "{{parameters.output_var}}"

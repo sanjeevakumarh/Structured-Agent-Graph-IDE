@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagide/schemas/prompt-schema.json",
+  "title": "SAGIDE Prompt Definition",
+  "description": "Schema for prompt YAML files under prompts/{domain}/{name}.yaml",
+  "type": "object",
+  "required": ["name", "domain"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Prompt identifier — must match the filename without .yaml extension.",
+      "examples": ["code-review", "weekly-digest"]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Increment on breaking changes to prompt_template or output format."
+    },
+    "domain": {
+      "type": "string",
+      "description": "Must match the parent directory name (e.g. vscode, finance, research).",
+      "examples": ["vscode", "finance", "research", "robotics", "shared", "notes"]
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this prompt does."
+    },
+    "schedule": {
+      "type": "string",
+      "description": "Cron expression (Cronos syntax). Omit for manual-only prompts.",
+      "examples": ["0 18 * * 1-5", "0 9 * * 1"]
+    },
+    "source_tag": {
+      "type": "string",
+      "description": "Tag stamped on every AgentTask this prompt generates. Used by frontends to filter results.",
+      "examples": ["vscode", "finance_daily", "research_weekly"]
+    },
+    "model_preference": {
+      "$ref": "#/$defs/ModelPreference"
+    },
+    "variables": {
+      "type": "object",
+      "description": "Default values for template variables. Each key becomes a {{key}} in prompt_template.",
+      "additionalProperties": true
+    },
+    "data_sources": {
+      "type": "array",
+      "description": "Legacy data source descriptors (not executed at runtime; use data_collection instead).",
+      "items": { "$ref": "#/$defs/DataSource" }
+    },
+    "data_collection": {
+      "$ref": "#/$defs/DataCollection",
+      "description": "Pre-processing steps that gather external data before subtasks run. Executed by SubtaskCoordinator."
+    },
+    "prompt_template": {
+      "type": "string",
+      "description": "Scriban template for the main prompt body. Supports {{ variable }} substitution, loops, and conditionals."
+    },
+    "subtasks": {
+      "type": "array",
+      "description": "Parallel subtasks dispatched to specific models/machines. Used with data_collection for multi-model prompts.",
+      "items": { "$ref": "#/$defs/Subtask" }
+    },
+    "synthesis": {
+      "$ref": "#/$defs/Synthesis",
+      "description": "Final synthesis prompt that combines all subtask results."
+    },
+    "output": {
+      "$ref": "#/$defs/Output"
+    },
+    "outputs": {
+      "type": "array",
+      "description": "Additional output files. Each entry may specify a source subtask result variable to write independently of the main synthesised output.",
+      "items": { "$ref": "#/$defs/Output" }
+    },
+    "objects": {
+      "type": "array",
+      "description": "Phase 5: Named skill instances. Expanded into data_collection steps before execution.",
+      "items": { "$ref": "#/$defs/PromptObject" }
+    },
+    "workflow": {
+      "type": "array",
+      "description": "Phase 5: Ordered call sequence composing skill instances. Expanded into data_collection steps + subtasks before execution.",
+      "items": { "$ref": "#/$defs/WorkflowCall" }
+    }
+  },
+
+  "$defs": {
+    "ModelPreference": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Model routing configuration.",
+      "properties": {
+        "primary": {
+          "type": "string",
+          "description": "Legacy single-model field. Prefer orchestrator + subtasks for multi-model prompts.",
+          "examples": ["ollama/deepseek-coder-v2:16b@workstation", "ollama/qwen2.5-coder:7b-instruct-q4_K_M@mini"]
+        },
+        "orchestrator": {
+          "type": "string",
+          "description": "Model or machine alias used for orchestration-level calls (query planning, synthesis).",
+          "examples": ["workstation", "claude-sonnet-4-6", "ollama/qwen2.5:14b@workstation"]
+        },
+        "fallback": {
+          "type": "string",
+          "description": "Model to use when primary is unavailable.",
+          "examples": ["ollama/qwen2.5-coder:7b-instruct-q4_K_M@mini"]
+        },
+        "subtasks": {
+          "type": "object",
+          "description": "Maps subtask label to model spec (e.g. 'analyst' → 'ollama/qwen2.5:14b@workstation'). Referenced in prompts via {{model_preference.subtasks.label}}.",
+          "additionalProperties": {
+            "type": "string",
+            "description": "Model spec: [provider/]model-id[@machine-alias]"
+          }
+        }
+      }
+    },
+
+    "DataSource": {
+      "type": "object",
+      "description": "Legacy data source descriptor.",
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["web_api", "web_search", "local_file", "rss"],
+          "description": "Source type."
+        },
+        "name": { "type": "string" },
+        "url": { "type": "string" },
+        "url_template": { "type": "string" },
+        "path": { "type": "string" },
+        "description": { "type": "string" },
+        "query_template": { "type": "string" },
+        "queries": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+
+    "DataCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/DataCollectionStep" },
+          "minItems": 1
+        }
+      }
+    },
+
+    "DataCollectionStep": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique step name within this data_collection block."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["read_file", "web_api", "web_api_batch", "filter", "web_search_batch", "llm_queries", "llm_per_section", "skill", "llm"],
+          "description": "Step type determines which collector runs. 'skill' expands a named skill. 'llm' submits a single free-form LLM call and stores the result."
+        },
+        "skill": {
+          "type": "string",
+          "description": "Reference to a named skill in the skills/ library. Format: 'domain/name' or just 'name'. When set, type may be omitted.",
+          "examples": ["research/web-research-track", "section-analyst"]
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Constructor arguments passed to the skill. Merged over the skill's default parameters. Supports {{ template }} expressions.",
+          "additionalProperties": true
+        },
+        "output_var": {
+          "type": "string",
+          "description": "Variable name to store this step's output. Referenced by subtask input_vars and synthesis templates."
+        },
+        "optional_output": {
+          "type": "boolean",
+          "description": "When true, an empty output_var does not abort the run. Use for search tracks where zero results is a legitimate outcome. A missing_data_summary var is injected into context so downstream prompts can acknowledge unavailable data."
+        },
+        "source": {
+          "type": "string",
+          "description": "URL or file path. Supports {{ template }} expressions. Used by read_file, web_api, web_api_batch."
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query template. Used by web_search_batch."
+        },
+        "iterate_over": {
+          "type": "string",
+          "description": "Template expression that resolves to a collection to iterate over (e.g. '{{watchlist.symbols}}'). Used by web_api_batch."
+        },
+        "input": {
+          "type": "string",
+          "description": "Input variable reference. Used by filter steps."
+        },
+        "condition": {
+          "type": "string",
+          "description": "Filter condition expression (e.g. 'pct_change <= -5'). Used by filter steps."
+        },
+        "limit": {
+          "type": "string",
+          "description": "Maximum number of items to include (integer or template string)."
+        },
+        "planning_prompt": {
+          "type": "string",
+          "description": "Scriban prompt sent to the LLM for llm_queries steps. The LLM must return a JSON string array of search queries."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model spec for the LLM call in llm_queries / llm_per_section steps. Supports {{ template }} expressions."
+        },
+        "section_analysis_prompt": {
+          "type": "string",
+          "description": "Per-section analysis prompt for llm_per_section steps. Available vars: {{section_name}}, {{search_results}}."
+        },
+        "search_results_var": {
+          "type": "string",
+          "description": "Name of the var holding search results for llm_per_section. Defaults to 'all_search_results'."
+        },
+        "max_sections": {
+          "type": "string",
+          "description": "Maximum sections to generate for llm_per_section (integer or template string). Default 5."
+        },
+        "section_title": {
+          "type": "string",
+          "description": "When set with max_sections: '1', the planning LLM call is skipped and this value is used as the single section name. Saves a full LLM round-trip for single-section skills."
+        },
+        "prompt_template": {
+          "type": "string",
+          "description": "Scriban prompt for type: llm steps. The rendered text is submitted as a single LLM task; the result is stored in output_var."
+        },
+        "input_vars": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional list of var names to include in context for type: llm steps. When empty, all current vars are available."
+        }
+      }
+    },
+
+    "Subtask": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique subtask identifier within this prompt. Also determines the synthesis variable name: {name}_result."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model spec. Supports {{ template }} expressions (e.g. '{{model_preference.subtasks.analyst}}')."
+        },
+        "input_vars": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of data_collection output_vars to include in this subtask's context. If empty, all collected vars are passed."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of other subtasks that must complete before this one is dispatched. Their results are available as {{name_result}} in the prompt template."
+        },
+        "prompt_template": {
+          "type": "string",
+          "description": "Scriban template for this subtask's prompt body."
+        }
+      }
+    },
+
+    "Synthesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prompt_template": {
+          "type": "string",
+          "description": "Scriban template for the final synthesis prompt. Subtask outputs are available as {{subtask_name_result}}."
+        }
+      }
+    },
+
+    "Output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "description": "Output format hint (e.g. markdown, json, json+markdown).",
+          "default": "markdown",
+          "examples": ["markdown", "json", "json+markdown"]
+        },
+        "destination": {
+          "type": "string",
+          "description": "File path to write the final output. Supports {{date}} template."
+        },
+        "notify": {
+          "type": "boolean",
+          "description": "Whether to emit a notification after writing output.",
+          "default": false
+        },
+        "source": {
+          "type": "string",
+          "description": "For use in the outputs list only. Names a subtask result variable to write (e.g. evaluator_result). When omitted, the synthesised output is written."
+        },
+        "integrate": {
+          "type": "string",
+          "description": "VSCode integration point (e.g. 'problems_panel').",
+          "examples": ["problems_panel"]
+        }
+      }
+    },
+
+    "PromptObject": {
+      "type": "object",
+      "required": ["name", "skill"],
+      "additionalProperties": false,
+      "description": "Phase 5: A named skill instance in a workflow's objects: section.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local instance name used in the workflow sequence (e.g. 'market', 'analyst')."
+        },
+        "skill": {
+          "type": "string",
+          "description": "Skill reference — 'domain/name' or just 'name'.",
+          "examples": ["research/web-research-track", "section-analyst"]
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "When true, an empty output from this object's collect/search step does not abort the run. Use for search tracks where zero results is a legitimate outcome (e.g. novel product ideas with no comparable companies). A missing_data_summary var is injected into context."
+        },
+        "args": {
+          "type": "object",
+          "description": "Constructor arguments overriding the skill's default parameters.",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "WorkflowCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Phase 5: A single step in the workflow: call sequence.",
+      "properties": {
+        "call": {
+          "type": "string",
+          "description": "Single method call in 'object.method' notation (e.g. 'market.collect', 'analyst.analyze').",
+          "examples": ["market.collect", "analyst.analyze", "assembler.compile"]
+        },
+        "parallel": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of method calls to execute in parallel.",
+          "examples": [["market.collect", "tech.collect", "finance.collect"]]
+        },
+        "args": {
+          "type": "object",
+          "description": "Runtime arguments merged over the object's args for this call.",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

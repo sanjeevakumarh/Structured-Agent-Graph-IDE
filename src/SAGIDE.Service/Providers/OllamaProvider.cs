@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Resilience;
+using SAGIDE.Service.Routing;
 
 namespace SAGIDE.Service.Providers;
 
@@ -18,8 +19,9 @@ public class OllamaProvider : IAgentProvider
     private readonly string _defaultBaseUrl;
     private readonly Dictionary<string, string> _modelEndpoints; // modelId -> baseUrl (static routing)
     private readonly OllamaHostHealthMonitor? _healthMonitor;   // dynamic routing (optional)
+    private volatile ModelRoutingHints? _routingHints;          // advisory hint scorer (set post-build)
     // One HttpClient per base URL; uses SocketsHttpHandler with PooledConnectionLifetime to
-    // recycle connections every 2 min, preventing socket exhaustion and DNS staleness (A4).
+    // recycle connections every 2 min, preventing socket exhaustion and DNS staleness.
     // This is the recommended pattern when IHttpClientFactory is not available.
     private readonly ConcurrentDictionary<string, HttpClient> _clientsByUrl = new();
     private readonly RetryPolicy _retryPolicy;
@@ -29,6 +31,12 @@ public class OllamaProvider : IAgentProvider
     public ModelProvider Provider => ModelProvider.Ollama;
     public int LastInputTokens { get; private set; }
     public int LastOutputTokens { get; private set; }
+
+    /// <summary>
+    /// Wires in the routing hint scorer after construction (provider is created before the
+    /// DI container is fully built; this is called from Program.cs after builder.Build()).
+    /// </summary>
+    public void SetRoutingHints(ModelRoutingHints? hints) => _routingHints = hints;
 
     private readonly int _maxTokens;
 
@@ -55,7 +63,7 @@ public class OllamaProvider : IAgentProvider
             new SocketsHttpHandler
             {
                 // Recycle the connection pool every 2 minutes so DNS changes are picked up
-                // and long-running services don't exhaust ephemeral ports (A4).
+                // and long-running services don't exhaust ephemeral ports.
                 PooledConnectionLifetime = TimeSpan.FromMinutes(2),
             })
         {
@@ -116,10 +124,12 @@ public class OllamaProvider : IAgentProvider
 
         if (_healthMonitor is not null)
         {
-            // Preferred URL from static config, all known URLs as failover candidates
+            // Preferred URL from static config, all known URLs as failover candidates.
+            // Routing hints reorder candidates by perf score (advisory only).
             var staticPreferred = _modelEndpoints.TryGetValue(model.ModelId, out var m) ? m : _defaultBaseUrl;
             var allCandidates   = _modelEndpoints.Values.Prepend(_defaultBaseUrl).Distinct();
-            var best = _healthMonitor.TryGetBestHost(model.ModelId, staticPreferred, allCandidates);
+            var ranked          = _routingHints?.RankCandidates(allCandidates, model.ModelId) ?? allCandidates;
+            var best = _healthMonitor.TryGetBestHost(model.ModelId, staticPreferred, ranked);
             if (best is not null) return best;
         }
 

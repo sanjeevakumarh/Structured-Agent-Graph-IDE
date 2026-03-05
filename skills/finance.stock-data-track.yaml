@@ -1,0 +1,97 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: stock-data-track
+version: 1
+domain: finance
+protocol_implements: [Collectible]
+
+description: >
+  Generates 8 targeted stock research queries across 4 tracks (technical, fundamental,
+  competitive, catalysts) via an LLM planner, then executes them via web search.
+  The primary data-gathering primitive for financial analysis workflows.
+
+inputs:
+  ticker:
+    type: string
+    required: true
+    description: Stock ticker symbol (e.g. KO, AAPL, MSFT)
+  exchange:
+    type: string
+    required: false
+    description: "Exchange prefix for unambiguous search (e.g. NASDAQ, NYSE). Used to form 'NASDAQ: COIN' style queries that avoid crypto/keyword confusion."
+  asset_type:
+    type: string
+    required: false
+    description: "stock | etf — prompts adapt accordingly (default: stock)"
+  context:
+    type: string
+    required: false
+    description: Analyst lens — drives query framing and thesis tailoring
+  max_results:
+    type: integer
+    required: false
+    description: Max search results per query (default 5)
+
+outputs_schema:
+  type: string
+  description: >
+    Concatenated search results across all 8 queries grouped by track.
+    Each section headed "## Search: <query>".
+
+capability_requirements:
+  fast_general:
+    needs: [instruction_following, structured_output]
+    context_window_min: 8k
+
+parameters:
+  ticker: "{{ticker}}"
+  exchange: ""
+  asset_type: "stock"
+  context: "General investor"
+  max_results: "8"
+  output_var: all_search_results
+
+implementation:
+  - name: search
+    type: llm_queries
+    model: "{{capability.fast_general}}"
+    planning_prompt: |
+      You are planning web research for a deep-dive {{parameters.asset_type}} analysis.
+      Ticker: {{parameters.ticker | string.upcase}}
+      {{ if parameters.exchange != "" -}}
+      Exchange: {{parameters.exchange}}
+      Qualified identifier: {{parameters.exchange}}: {{parameters.ticker | string.upcase}}
+      {{- end }}
+      Analyst context: {{parameters.context}}
+      Date: {{date}}
+
+      Generate exactly 8 targeted search queries, 2 per track below:
+
+      Track 1 — Technical Analysis
+        · Current price, 52-week range, RSI, MACD, moving averages (50-day, 200-day)
+        · Key support/resistance levels, chart patterns, volume trends
+
+      Track 2 — Fundamental Analysis
+        · Latest earnings: revenue, EPS, guidance, analyst consensus
+        · Valuation ratios (P/E, P/B, EV/EBITDA vs sector), balance sheet (debt, FCF, dividend/buyback)
+
+      Track 3 — Competitive Landscape
+        · Market share, top 3 competitors, recent competitive moves
+        · Industry trends, disruption risks, new entrants, moat sustainability
+
+      Track 4 — News & Catalysts
+        · Analyst upgrades/downgrades and price target changes ({{date}})
+        · Upcoming events, insider activity, institutional positioning, short interest
+
+      Rules:
+      {{ if parameters.exchange != "" -}}
+      - EVERY query must use the qualified form "{{parameters.exchange}}: {{parameters.ticker | string.upcase}} {{parameters.asset_type}}" (e.g. "NASDAQ: COIN stock price") — never the bare ticker alone, which is ambiguous
+      {{- else -}}
+      - EVERY query must include "{{parameters.ticker | string.upcase}} stock" for stocks or "{{parameters.ticker | string.upcase}} ETF" for ETFs — never the bare ticker alone
+      {{- end }}
+      - Include {{date}} or the current year in at least 5 queries for recency
+      - Let the analyst's context shape query angles
+
+      Return ONLY a valid JSON array of exactly 8 strings. No explanation, no markdown:
+      ["query1", "query2", "query3", "query4", "query5", "query6", "query7", "query8"]
+    limit: "{{parameters.max_results}}"
+    output_var: "{{parameters.output_var}}"

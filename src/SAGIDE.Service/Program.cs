@@ -7,7 +7,9 @@ using Serilog;
 using SAGIDE.Service.Api;
 using SAGIDE.Service.Infrastructure;
 using SAGIDE.Service.Orchestrator;
+using SAGIDE.Service.Providers;
 using SAGIDE.Service.Resilience;
+using SAGIDE.Service.Routing;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -83,6 +85,11 @@ try
 
     var app = builder.Build();
 
+    // Wire routing hints into OllamaProvider — provider is eagerly created before the
+    // DI container is built; hints are resolved here and pushed in via SetRoutingHints.
+    app.Services.GetRequiredService<ProviderFactory>()
+        .SetRoutingHints(app.Services.GetService<ModelRoutingHints>());
+
     // Serve static dashboard — UseStaticFiles short-circuits before endpoint routing,
     // so these responses bypass the rate limiter and bearer-token guard below.
     app.UseDefaultFiles();
@@ -123,6 +130,8 @@ try
     app.MapPromptEndpoints();
     app.MapReportsEndpoints(app.Configuration);
     app.MapMetricsEndpoints();
+    app.MapModelMetricsEndpoints();
+    app.MapSkillsEndpoints();
 
     // Redirect /dashboard → / for discoverability
     app.MapGet("/dashboard", () => Results.Redirect("/"));

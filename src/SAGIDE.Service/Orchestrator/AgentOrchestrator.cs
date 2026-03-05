@@ -7,9 +7,11 @@ using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Agents;
+using SAGIDE.Service.Events;
 using SAGIDE.Service.Observability;
 using SAGIDE.Service.Resilience;
 using SAGIDE.Service.ActivityLogging;
+using SAGIDE.Service.Routing;
 
 namespace SAGIDE.Service.Orchestrator;
 
@@ -32,7 +34,27 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly int _broadcastThrottleMs;
     private readonly Infrastructure.LoggingConfig _loggingConfig;
     private readonly SagideMetrics? _metrics;
+    private readonly CircuitBreakerRegistry? _circuitBreakerRegistry;
+    private readonly IEventBus _eventBus;
+    private readonly Providers.PromptBuilder _promptBuilder;
+    private readonly Providers.OllamaHostHealthMonitor? _ollamaMonitor;
+    private readonly IModelPerfRepository? _perfRepo;
+    private readonly EndpointAliasResolver? _aliasResolver;
+    private readonly Routing.QualitySampler? _qualitySampler;
     private CancellationTokenSource? _processingCts;
+
+    // ── Ollama failover constants ──────────────────────────────────────────────
+    /// <summary>
+    /// Maximum number of host-failover attempts before a task is sent to the DLQ.
+    /// Each attempt tries a different healthy Ollama server; backoff applies when
+    /// no alternative is reachable.
+    /// </summary>
+    private const int MaxFailoverAttempts = 5;
+    /// <summary>
+    /// Maximum number of back-pressure retries (HTTP 429/503) before escalating
+    /// to a host failover.
+    /// </summary>
+    private const int MaxBusyRetries = 10;
 
     /// <summary>
     /// Resolves when StartProcessingAsync has finished loading persisted tasks from the database.
@@ -41,9 +63,6 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly TaskCompletionSource _initCompleted =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task InitializationCompleted => _initCompleted.Task;
-
-    public event Action<TaskStatusResponse>? OnTaskUpdate;
-    public event Action<StreamingOutputMessage>? OnStreamingOutput;
 
     public int MaxConcurrentTasks { get; }
 
@@ -64,7 +83,14 @@ public class AgentOrchestrator : ITaskSubmissionService
         int maxFileSizeChars = 32_000,
         Providers.ProviderFactory? providerFactory = null,
         Infrastructure.LoggingConfig? loggingConfig = null,
-        SagideMetrics? metrics = null)
+        SagideMetrics? metrics = null,
+        CircuitBreakerRegistry? circuitBreakerRegistry = null,
+        IEventBus? eventBus = null,
+        Providers.PromptBuilder? promptBuilder = null,
+        Providers.OllamaHostHealthMonitor? ollamaMonitor = null,
+        IModelPerfRepository? perfRepo = null,
+        EndpointAliasResolver? aliasResolver = null,
+        Routing.QualitySampler? qualitySampler = null)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
@@ -85,12 +111,18 @@ public class AgentOrchestrator : ITaskSubmissionService
         MaxConcurrentTasks = maxConcurrentTasks;
         _concurrencyLimiter = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
         _broadcastThrottleMs = broadcastThrottleMs;
-        _maxFileSizeChars = maxFileSizeChars;
-        _loggingConfig = loggingConfig ?? new Infrastructure.LoggingConfig();
-        _metrics = metrics;
+        _promptBuilder       = promptBuilder ?? new Providers.PromptBuilder(maxFileSizeChars);
+        _ollamaMonitor       = ollamaMonitor;
+        _perfRepo            = perfRepo;
+        _aliasResolver       = aliasResolver;
+        _qualitySampler      = qualitySampler;
+        _loggingConfig           = loggingConfig ?? new Infrastructure.LoggingConfig();
+        _metrics                 = metrics;
+        _circuitBreakerRegistry  = circuitBreakerRegistry;
+        _eventBus                = eventBus ?? new NullEventBus();
     }
 
-    // R001: Idempotent — duplicate task ID returns existing, no re-execution
+    // Idempotent — duplicate task ID returns existing, no re-execution
     public async Task<string> SubmitTaskAsync(AgentTask task, CancellationToken ct)
     {
         var existing = _taskQueue.GetTask(task.Id);
@@ -195,6 +227,8 @@ public class AgentOrchestrator : ITaskSubmissionService
     private async Task ExecuteTaskAsync(AgentTask task, CancellationToken ct)
     {
         int retryCount = 0;
+        bool providerCallAttempted = false;
+        ProviderCircuitBreaker? circuitBreaker = null;
 
         using var _scope = _logger.BeginScope(new { TaskId = task.Id, Provider = task.ModelProvider.ToString(), SourceTag = task.SourceTag });
 
@@ -205,7 +239,7 @@ public class AgentOrchestrator : ITaskSubmissionService
             BroadcastUpdate(task);
             await PersistTaskAsync(task);
 
-            // R003: Task-level execution timeout
+            // Task-level execution timeout
             using var taskTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             taskTimeoutCts.CancelAfter(_timeoutConfig.TaskExecutionTimeout);
             var taskCt = taskTimeoutCts.Token;
@@ -219,11 +253,30 @@ public class AgentOrchestrator : ITaskSubmissionService
                 return;
             }
 
-            // R004: Max iteration support — each iteration feeds the previous result back into the
+            if (string.IsNullOrWhiteSpace(task.ModelId))
+            {
+                await FailTask(task, $"Task has empty ModelId for provider {task.ModelProvider}; cannot execute", "EMPTY_MODEL_ID", 0);
+                return;
+            }
+
+            // Circuit breaker — reject immediately if the provider is known-bad.
+            circuitBreaker = _circuitBreakerRegistry?.GetBreaker(task.ModelProvider);
+            if (circuitBreaker is not null && !circuitBreaker.IsCallPermitted())
+            {
+                var resetIn = circuitBreaker.SecondsUntilReset;
+                var msg = resetIn > 0
+                    ? $"Circuit breaker open for {task.ModelProvider} — provider unavailable, resets in {resetIn:F0}s"
+                    : $"Circuit breaker open for {task.ModelProvider} — provider unavailable";
+                _logger.LogWarning("Task {TaskId}: {Message}", task.Id, msg);
+                await FailTask(task, msg, "CIRCUIT_OPEN", 0);
+                return;
+            }
+
+            // Max iteration support — each iteration feeds the previous result back into the
             // prompt so the agent can self-refine.  The default limit is 1 for most agent types,
             // making the loop effectively single-shot.  Refactoring agents default to 5.
             var maxIterations = _agentLimitsConfig.GetMaxIterations(task.AgentType);
-            var basePrompt = await BuildPrompt(task);
+            var basePrompt = await _promptBuilder.BuildAsync(task);
             var prompt = basePrompt;
             task.Metadata.TryGetValue("modelEndpoint", out var modelEndpointOverride);
 
@@ -275,6 +328,10 @@ public class AgentOrchestrator : ITaskSubmissionService
                 }
             }
 
+            // Circuit breaker — mark that we are about to call the provider.
+            // RecordSuccess / RecordFailure only fire when a real provider call was made.
+            providerCallAttempted = true;
+
             AgentResult? lastResult = null;
             for (int iteration = 1; iteration <= maxIterations; iteration++)
             {
@@ -299,6 +356,24 @@ public class AgentOrchestrator : ITaskSubmissionService
                 lastResponse = await StreamToStringAsync(provider, prompt, modelConfig, task, taskCt);
                 sw.Stop();
                 _metrics?.RecordLlmCall(sw.ElapsedMilliseconds, provider.LastInputTokens, provider.LastOutputTokens);
+
+                // Persist per-call performance sample (fire-and-forget — never blocks task execution)
+                if (_perfRepo is not null)
+                {
+                    var endpoint = modelConfig.Endpoint
+                        ?? task.Metadata.GetValueOrDefault("modelEndpoint", "");
+                    _ = _perfRepo.InsertSampleAsync(new ModelPerfSample(
+                        Id:           Guid.NewGuid().ToString("N")[..16],
+                        Provider:     task.ModelProvider.ToString(),
+                        ModelId:      task.ModelId,
+                        ServerAlias:  _aliasResolver?.GetAlias(endpoint) ?? "unknown",
+                        StartedAt:    task.StartedAt ?? DateTime.UtcNow,
+                        LatencyMs:    sw.ElapsedMilliseconds,
+                        TokensInput:  provider.LastInputTokens,
+                        TokensOutput: provider.LastOutputTokens,
+                        Status:       "success",
+                        ErrorCode:    null));
+                }
 
                 // After streaming completes, show a brief "Parsing" state before the final 100%.
                 task.Progress = (int)((double)iteration / maxIterations * 80);
@@ -333,6 +408,9 @@ public class AgentOrchestrator : ITaskSubmissionService
                     break;
             }
 
+            // Provider call succeeded — close the circuit (or confirm HalfOpen probe).
+            circuitBreaker?.RecordSuccess();
+
             task.Progress = 100;
             task.Status = AgentTaskStatus.Completed;
             task.StatusMessage = "Done";
@@ -341,6 +419,10 @@ public class AgentOrchestrator : ITaskSubmissionService
             BroadcastUpdate(task);
             // Atomic: task Completed status + final result in one transaction
             await PersistCompletedAsync(task, lastResult!);
+
+            // Quality sampling — score model output via Claude (fire-and-forget, non-fatal)
+            // All safety guards (feature flag, allowlist, token budget) are checked inside.
+            _qualitySampler?.Trigger(task, prompt, lastResponse ?? "");
 
             // Determinism — store final output in cache (fire-and-forget, non-fatal)
             if (_repository is not null && !string.IsNullOrEmpty(lastResponse))
@@ -395,7 +477,8 @@ public class AgentOrchestrator : ITaskSubmissionService
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            // R003: Task execution timeout hit (not user cancellation)
+            // Task execution timeout — counts as a provider failure for the circuit breaker.
+            if (providerCallAttempted) circuitBreaker?.RecordFailure();
             _logger.LogWarning("Task {TaskId} timed out after {TimeoutMs}ms",
                 task.Id, _timeoutConfig.TaskExecutionMs);
             await FailTask(task, $"Task execution timed out after {_timeoutConfig.TaskExecutionMs}ms",
@@ -403,7 +486,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         }
         catch (OperationCanceledException)
         {
-            // R002: User-initiated cancellation
+            // User-initiated cancellation — NOT a provider failure; don't penalise the circuit.
             task.Status = AgentTaskStatus.Cancelled;
             task.CompletedAt = DateTime.UtcNow;
             task.StatusMessage = "Cancelled by user";
@@ -413,6 +496,26 @@ public class AgentOrchestrator : ITaskSubmissionService
         }
         catch (Exception ex)
         {
+            // Ollama-specific recovery: attempt managed failover before penalising
+            // the circuit breaker or sending to the DLQ.
+            if (task.ModelProvider == ModelProvider.Ollama)
+            {
+                bool requeued = false;
+
+                // Server back-pressure (429 / 503): retry on the same host with exponential backoff.
+                if (IsOllamaBusyError(ex))
+                    requeued = await TryRequeueForBusyAsync(task);
+
+                // Host unreachable (DNS failure, connection refused) or busy-wait exhausted:
+                // route to a different healthy server.
+                if (!requeued && (IsOllamaConnectivityError(ex) || IsOllamaBusyError(ex)))
+                    requeued = await TryRequeueWithFailoverAsync(task);
+
+                if (requeued) return; // don't penalise circuit breaker for retriable errors
+            }
+
+            // Genuine, non-retriable provider failure: open the circuit and send to DLQ.
+            if (providerCallAttempted) circuitBreaker?.RecordFailure();
             _logger.LogError(ex, "Task {TaskId} failed", task.Id);
             await FailTask(task, ex.Message, ex.GetType().Name, retryCount);
         }
@@ -460,13 +563,13 @@ public class AgentOrchestrator : ITaskSubmissionService
                 // Emit accumulated text since the previous broadcast (delta slice).
                 var currentLength = output.Length;
                 var delta = output.ToString(lastBroadcastLength, currentLength - lastBroadcastLength);
-                OnStreamingOutput?.Invoke(new StreamingOutputMessage
+                _eventBus.Publish(new StreamingOutputEvent(new StreamingOutputMessage
                 {
                     TaskId = task.Id,
                     TextChunk = delta,
                     TokensGeneratedSoFar = tokenCount,
                     IsLastChunk = false,
-                });
+                }));
 
                 // Update task progress based on token count (soft-caps near 78% asymptotically).
                 // ~2 000 tokens ≈ 50 %, ~4 000 tokens ≈ 75 %, approaching but never reaching 78 %.
@@ -482,18 +585,210 @@ public class AgentOrchestrator : ITaskSubmissionService
 
         // Emit any content buffered after the last throttled broadcast, then signal done.
         var remaining = output.ToString(lastBroadcastLength, output.Length - lastBroadcastLength);
-        OnStreamingOutput?.Invoke(new StreamingOutputMessage
+        _eventBus.Publish(new StreamingOutputEvent(new StreamingOutputMessage
         {
             TaskId = task.Id,
             TextChunk = remaining,
             TokensGeneratedSoFar = tokenCount,
             IsLastChunk = true,
-        });
+        }));
 
         return output.ToString();
     }
 
-    // R006: Failed tasks go to DLQ with full context
+    // ── Ollama failover helpers ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true when the exception is a network-level connectivity failure
+    /// (host not found, connection refused, network unreachable).
+    /// These are retriable by routing to a different Ollama server.
+    /// Model errors, auth failures, and timeouts are NOT connectivity errors.
+    /// </summary>
+    private static bool IsOllamaConnectivityError(Exception ex)
+    {
+        if (ex is HttpRequestException hre)
+        {
+            if (hre.HttpRequestError is System.Net.Http.HttpRequestError.NameResolutionError
+                                     or System.Net.Http.HttpRequestError.ConnectionError)
+                return true;
+
+            if (hre.InnerException is System.Net.Sockets.SocketException se)
+                return se.SocketErrorCode is System.Net.Sockets.SocketError.HostNotFound
+                                          or System.Net.Sockets.SocketError.ConnectionRefused
+                                          or System.Net.Sockets.SocketError.NetworkUnreachable
+                                          or System.Net.Sockets.SocketError.HostUnreachable;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Returns true when the Ollama server accepted the TCP connection but signalled
+    /// back-pressure via HTTP 429 (Too Many Requests) or 503 (Service Unavailable).
+    /// These are retriable on the same host after a back-off delay.
+    /// </summary>
+    private static bool IsOllamaBusyError(Exception ex)
+        => ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests
+                                                 or System.Net.HttpStatusCode.ServiceUnavailable };
+
+    /// <summary>
+    /// Returns a set of Ollama base URLs that are currently targeted by running or
+    /// queued tasks from the same workflow instance.  Used to prefer failover hosts
+    /// that are NOT already busy with sibling steps, avoiding resource contention and
+    /// any risk of circular waiting between dependent steps.
+    /// </summary>
+    private HashSet<string> GetSameWorkflowHosts(AgentTask task)
+    {
+        if (!task.Metadata.TryGetValue("workflowInstanceId", out var wfId))
+            return [];
+
+        return _taskQueue.GetAllTasks()
+            .Where(t =>
+                t.Id != task.Id &&
+                (t.Status == AgentTaskStatus.Running || t.Status == AgentTaskStatus.Queued) &&
+                t.Metadata.TryGetValue("workflowInstanceId", out var id) && id == wfId &&
+                t.Metadata.ContainsKey("modelEndpoint"))
+            .Select(t => t.Metadata["modelEndpoint"].TrimEnd('/'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Attempts to route the task to a different healthy Ollama server after a
+    /// connectivity failure.  Tracks tried hosts in task metadata so the same broken
+    /// server is never selected again within the same failover chain.
+    ///
+    /// When a healthy alternative is found the task is re-enqueued immediately.
+    /// When no alternative is available the task is re-enqueued with exponential
+    /// back-off on the original endpoint so it will be retried when the server
+    /// recovers.
+    ///
+    /// Returns <see langword="false"/> once <see cref="MaxFailoverAttempts"/> is
+    /// reached, at which point the caller should send the task to the DLQ.
+    /// </summary>
+    private async Task<bool> TryRequeueWithFailoverAsync(AgentTask task)
+    {
+        int attempts = task.Metadata.TryGetValue("_sagFailoverAttempts", out var attStr)
+            && int.TryParse(attStr, out var att) ? att : 0;
+
+        if (attempts >= MaxFailoverAttempts)
+        {
+            _logger.LogError(
+                "Task {TaskId}: exhausted {Max} Ollama failover attempts — sending to DLQ",
+                task.Id, MaxFailoverAttempts);
+            return false;
+        }
+
+        // Build the set of already-tried endpoints
+        var triedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (task.Metadata.TryGetValue("_sagTriedEndpoints", out var triedJson))
+        {
+            var tried = System.Text.Json.JsonSerializer.Deserialize<List<string>>(triedJson);
+            if (tried is not null) triedSet.UnionWith(tried);
+        }
+
+        var currentEndpoint = task.Metadata.TryGetValue("modelEndpoint", out var ep)
+            ? ep.TrimEnd('/') : null;
+        if (!string.IsNullOrEmpty(currentEndpoint))
+            triedSet.Add(currentEndpoint);
+
+        // Select the next healthy host, preferring servers not already busy with
+        // sibling workflow steps to avoid resource contention / circular waiting.
+        string? nextEndpoint = null;
+        if (_ollamaMonitor is not null)
+        {
+            var sameWorkflowHosts = GetSameWorkflowHosts(task);
+            var candidates = _ollamaMonitor.GetAllReachableHosts()
+                .Select(u => u.TrimEnd('/'))
+                .Where(u => !triedSet.Contains(u))
+                .ToList();
+
+            // Prefer hosts without same-workflow tasks; fall back to any available candidate.
+            nextEndpoint = candidates.FirstOrDefault(c => !sameWorkflowHosts.Contains(c))
+                        ?? candidates.FirstOrDefault();
+        }
+
+        if (nextEndpoint is not null)
+        {
+            _logger.LogWarning(
+                "Task {TaskId}: Ollama host {Old} unreachable — failing over to {New} " +
+                "(attempt {N}/{Max})",
+                task.Id, _aliasResolver?.GetAlias(currentEndpoint) ?? "unknown",
+                _aliasResolver?.GetAlias(nextEndpoint) ?? "unknown",
+                attempts + 1, MaxFailoverAttempts);
+
+            triedSet.Add(nextEndpoint);
+            task.Metadata["modelEndpoint"]        = nextEndpoint;
+            task.Metadata["_sagFailoverAttempts"] = (attempts + 1).ToString();
+            task.Metadata["_sagTriedEndpoints"]   =
+                System.Text.Json.JsonSerializer.Serialize(triedSet.ToList());
+            task.ScheduledFor  = null; // run immediately
+            task.StatusMessage =
+                $"Failing over to {_aliasResolver?.GetAlias(nextEndpoint) ?? "unknown"} (attempt {attempts + 1}/{MaxFailoverAttempts})";
+        }
+        else
+        {
+            // No healthy alternative — exponential back-off on same endpoint so the
+            // task is retried when the server recovers.
+            var backoffSec = (int)Math.Pow(2, Math.Min(attempts, 5)) * 30; // 30s → 960s
+            var retryAt    = DateTime.UtcNow.AddSeconds(backoffSec);
+
+            _logger.LogWarning(
+                "Task {TaskId}: no healthy Ollama alternative found (attempt {N}/{Max}); " +
+                "backoff {Sec}s, retry at {At:HH:mm:ss}",
+                task.Id, attempts + 1, MaxFailoverAttempts, backoffSec, retryAt);
+
+            task.Metadata["_sagFailoverAttempts"] = (attempts + 1).ToString();
+            task.Metadata["_sagTriedEndpoints"]   =
+                System.Text.Json.JsonSerializer.Serialize(triedSet.ToList());
+            task.ScheduledFor  = retryAt;
+            task.StatusMessage =
+                $"Host unreachable — backoff {backoffSec}s " +
+                $"(attempt {attempts + 1}/{MaxFailoverAttempts}, retry at {retryAt:HH:mm:ss})";
+        }
+
+        task.Status    = AgentTaskStatus.Queued;
+        task.StartedAt = null;
+        BroadcastUpdate(task);
+        await PersistTaskAsync(task); // keep DB in sync with re-queued status
+        _taskQueue.Enqueue(task);
+        return true;
+    }
+
+    /// <summary>
+    /// Handles Ollama server back-pressure (HTTP 429 / 503) by re-queuing the task
+    /// on the SAME server with exponential back-off instead of failing immediately.
+    ///
+    /// Returns <see langword="false"/> once <see cref="MaxBusyRetries"/> is reached,
+    /// after which the caller should escalate to <see cref="TryRequeueWithFailoverAsync"/>.
+    /// </summary>
+    private async Task<bool> TryRequeueForBusyAsync(AgentTask task)
+    {
+        int busyRetries = task.Metadata.TryGetValue("_sagBusyRetries", out var busyStr)
+            && int.TryParse(busyStr, out var n) ? n : 0;
+
+        if (busyRetries >= MaxBusyRetries)
+            return false; // too many busy-waits → escalate to host failover
+
+        var backoffSec = (int)Math.Pow(2, Math.Min(busyRetries, 4)) * 15; // 15s → 240s
+        var retryAt    = DateTime.UtcNow.AddSeconds(backoffSec);
+
+        _logger.LogWarning(
+            "Task {TaskId}: Ollama server busy (retry {N}/{Max}) — re-queuing at {At:HH:mm:ss}",
+            task.Id, busyRetries + 1, MaxBusyRetries, retryAt);
+
+        task.Metadata["_sagBusyRetries"] = (busyRetries + 1).ToString();
+        task.Status        = AgentTaskStatus.Queued;
+        task.StartedAt     = null;
+        task.ScheduledFor  = retryAt;
+        task.StatusMessage =
+            $"Server busy — retry {busyRetries + 1}/{MaxBusyRetries} at {retryAt:HH:mm:ss}";
+
+        BroadcastUpdate(task);
+        await PersistTaskAsync(task);
+        _taskQueue.Enqueue(task);
+        return true;
+    }
+
+    // Failed tasks go to DLQ with full context
     private async Task FailTask(AgentTask task, string errorMessage, string? errorCode, int retryCount)
     {
         task.Status = AgentTaskStatus.Failed;
@@ -501,6 +796,27 @@ public class AgentOrchestrator : ITaskSubmissionService
         task.CompletedAt = DateTime.UtcNow;
         _metrics?.RecordTaskFailed();
         BroadcastUpdate(task);
+
+        // Persist failed perf sample when there was a real provider call (StartedAt is set)
+        if (_perfRepo is not null && task.StartedAt.HasValue)
+        {
+            var latencyMs = (long)(DateTime.UtcNow - task.StartedAt.Value).TotalMilliseconds;
+            var endpoint  = task.Metadata.GetValueOrDefault("modelEndpoint", "");
+            var status    = errorCode == "EXECUTION_TIMEOUT" ? "timeout"
+                          : errorCode == "CIRCUIT_OPEN"      ? "circuit_open"
+                          : "error";
+            _ = _perfRepo.InsertSampleAsync(new ModelPerfSample(
+                Id:           Guid.NewGuid().ToString("N")[..16],
+                Provider:     task.ModelProvider.ToString(),
+                ModelId:      task.ModelId,
+                ServerAlias:  _aliasResolver?.GetAlias(endpoint) ?? "unknown",
+                StartedAt:    task.StartedAt.Value,
+                LatencyMs:    latencyMs,
+                TokensInput:  0,
+                TokensOutput: 0,
+                Status:       status,
+                ErrorCode:    errorCode));
+        }
         await PersistTaskAsync(task);
 
         // Notify workflow engine so downstream steps can be skipped
@@ -537,7 +853,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         }
     }
 
-    // R002: Status-aware cancellation
+    // Status-aware cancellation
     public async Task CancelTaskAsync(string taskId, CancellationToken ct)
     {
         var task = _taskQueue.GetTask(taskId);
@@ -617,7 +933,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         }
     }
 
-    // R006: Retry from DLQ — creates a new task with same parameters
+    // Retry from DLQ — creates a new task with same parameters
     public async Task<string?> RetryFromDlqAsync(string dlqId, CancellationToken ct)
     {
         var entry = _deadLetterQueue.DequeueForRetry(dlqId);
@@ -667,7 +983,7 @@ public class AgentOrchestrator : ITaskSubmissionService
 
     private void BroadcastUpdate(AgentTask task)
     {
-        OnTaskUpdate?.Invoke(ToResponse(task));
+        _eventBus.Publish(new TaskUpdatedEvent(ToResponse(task)));
         // Register terminal tasks for bounded in-memory history eviction
         if (task.Status is AgentTaskStatus.Completed or AgentTaskStatus.Failed or AgentTaskStatus.Cancelled)
             _taskQueue.MarkTerminal(task.Id);
@@ -768,55 +1084,6 @@ public class AgentOrchestrator : ITaskSubmissionService
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    // Per-file character cap: keeps individual files from inflating the prompt beyond
-    // model context limits and prevents runaway memory use on large source files.
-    // Configurable via SAGIDE:Orchestration:MaxFileSizeChars.
-    private readonly int _maxFileSizeChars;
-
-    private async Task<string> BuildPrompt(AgentTask task)
-    {
-        // Read actual file contents for the prompt.
-        // Cache by absolute path so duplicate entries in FilePaths are read only once.
-        var fileContents = new List<string>();
-        var fileCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var filePath in task.FilePaths)
-        {
-            if (!File.Exists(filePath)) continue;
-
-            if (!fileCache.TryGetValue(filePath, out var content))
-            {
-                content = await File.ReadAllTextAsync(filePath);
-                if (content.Length > _maxFileSizeChars)
-                    content = string.Concat(content.AsSpan(0, _maxFileSizeChars),
-                        $"\n... [file truncated to {_maxFileSizeChars:N0} chars]");
-                fileCache[filePath] = content;
-            }
-            fileContents.Add($"### {Path.GetFileName(filePath)}\n```\n{content}\n```");
-        }
-
-        var fileContext = fileContents.Count > 0
-            ? $"\n\n## Files\n{string.Join("\n\n", fileContents)}"
-            : "";
-
-        var jsonInstructions = "\n\nReturn your findings in a ```json block with an \"issues\" array (each with filePath, line, severity, message, suggestedFix) and optionally a \"changes\" array (each with filePath, original, newContent, description).";
-
-        return task.AgentType switch
-        {
-            AgentType.CodeReview =>
-                $"You are a code review agent. Review the following code for security vulnerabilities, performance issues, and best practices violations. Provide specific line numbers and actionable suggestions.{jsonInstructions}\n\n{task.Description}{fileContext}",
-            AgentType.TestGeneration =>
-                $"You are a test generation agent. Generate comprehensive unit tests for the given code. Cover edge cases and error conditions. Return the test code in a ```csharp block.{jsonInstructions}\n\n{task.Description}{fileContext}",
-            AgentType.Refactoring =>
-                $"You are a refactoring agent. Improve code quality by reducing complexity, improving readability, and applying design patterns where appropriate.{jsonInstructions}\n\n{task.Description}{fileContext}",
-            AgentType.Debug =>
-                $"You are a debugging agent. Analyze the error and identify the root cause. Provide a fix with explanation.{jsonInstructions}\n\n{task.Description}{fileContext}",
-            AgentType.Documentation =>
-                $"You are a documentation agent. Generate or update code documentation including XML docs, JSDoc, or docstrings as appropriate.{jsonInstructions}\n\n{task.Description}{fileContext}",
-            AgentType.SecurityReview =>
-                $"You are a security review agent. Analyze the code for OWASP Top 10 vulnerabilities, injection flaws, authentication weaknesses, insecure deserialization, and sensitive data exposure. Reference relevant CVEs where applicable.{jsonInstructions}\n\n{task.Description}{fileContext}",
-            _ => task.Description
-        };
-    }
 }
 
 public static class ServiceProviderExtensions

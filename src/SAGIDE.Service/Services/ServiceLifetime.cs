@@ -3,77 +3,83 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Service.Communication;
 using SAGIDE.Service.Communication.Messages;
+using SAGIDE.Service.Events;
 using SAGIDE.Service.Orchestrator;
 
 namespace SAGIDE.Service.Services;
 
 public class ServiceLifetime : BackgroundService
 {
-    private readonly NamedPipeServer _pipeServer;
-    private readonly AgentOrchestrator _orchestrator;
-    private readonly WorkflowEngine _workflowEngine;
+    private readonly NamedPipeServer    _pipeServer;
+    private readonly AgentOrchestrator  _orchestrator;
+    private readonly WorkflowEngine     _workflowEngine;
     private readonly ILogger<ServiceLifetime> _logger;
 
     public ServiceLifetime(
-        NamedPipeServer pipeServer,
-        AgentOrchestrator orchestrator,
-        WorkflowEngine workflowEngine,
+        NamedPipeServer    pipeServer,
+        AgentOrchestrator  orchestrator,
+        WorkflowEngine     workflowEngine,
+        IEventBus          eventBus,
         ILogger<ServiceLifetime> logger)
     {
-        _pipeServer    = pipeServer;
-        _orchestrator  = orchestrator;
+        _pipeServer     = pipeServer;
+        _orchestrator   = orchestrator;
         _workflowEngine = workflowEngine;
-        _logger        = logger;
+        _logger         = logger;
+
+        // A6: Subscribe via the event bus — each handler runs independently;
+        // an exception in one handler will not prevent others from executing.
 
         // Broadcast every task-status change to all connected VSCode clients.
-        _orchestrator.OnTaskUpdate += status =>
+        eventBus.Subscribe<TaskUpdatedEvent>(e =>
         {
             var msg = new PipeMessage
             {
-                Type = MessageTypes.TaskUpdate,
-                Payload = JsonSerializer.SerializeToUtf8Bytes(status, NamedPipeServer.JsonOptions),
+                Type    = MessageTypes.TaskUpdate,
+                Payload = JsonSerializer.SerializeToUtf8Bytes(e.Status, NamedPipeServer.JsonOptions),
             };
             _ = _pipeServer.BroadcastAsync(msg);
-        };
+        });
 
         // Route streaming output only to the VS Code window that submitted the task.
         // Other windows should not receive (and auto-open panels for) unrelated tasks.
-        _orchestrator.OnStreamingOutput += streamMsg =>
+        eventBus.Subscribe<StreamingOutputEvent>(e =>
         {
             var msg = new PipeMessage
             {
-                Type = MessageTypes.StreamingOutput,
-                Payload = JsonSerializer.SerializeToUtf8Bytes(streamMsg, NamedPipeServer.JsonOptions),
+                Type    = MessageTypes.StreamingOutput,
+                Payload = JsonSerializer.SerializeToUtf8Bytes(e.Message, NamedPipeServer.JsonOptions),
             };
-            var clientId = _pipeServer.GetTaskOwner(streamMsg.TaskId);
+            var clientId = _pipeServer.GetTaskOwner(e.Message.TaskId);
             if (clientId is not null)
                 _ = _pipeServer.SendToClientAsync(clientId, msg);
             else
                 _ = _pipeServer.BroadcastAsync(msg);  // fallback for workflow-submitted tasks
-        };
+        });
 
         // Broadcast workflow instance updates (step completions, status changes).
-        _workflowEngine.OnWorkflowUpdate += instance =>
+        eventBus.Subscribe<WorkflowUpdatedEvent>(e =>
         {
             var msg = new PipeMessage
             {
-                Type = MessageTypes.WorkflowUpdate,
-                Payload = JsonSerializer.SerializeToUtf8Bytes(instance, NamedPipeServer.JsonOptions),
+                Type    = MessageTypes.WorkflowUpdate,
+                Payload = JsonSerializer.SerializeToUtf8Bytes(e.Instance, NamedPipeServer.JsonOptions),
             };
             _ = _pipeServer.BroadcastAsync(msg);
-        };
+        });
 
         // Broadcast human approval requests to the VS Code client.
-        _workflowEngine.OnApprovalNeeded += (instanceId, stepId, prompt) =>
+        eventBus.Subscribe<WorkflowApprovalNeededEvent>(e =>
         {
             var msg = new PipeMessage
             {
-                Type = MessageTypes.WorkflowApprovalNeeded,
+                Type    = MessageTypes.WorkflowApprovalNeeded,
                 Payload = JsonSerializer.SerializeToUtf8Bytes(
-                    new { instanceId, stepId, prompt }, NamedPipeServer.JsonOptions),
+                    new { instanceId = e.InstanceId, stepId = e.StepId, prompt = e.Prompt },
+                    NamedPipeServer.JsonOptions),
             };
             _ = _pipeServer.BroadcastAsync(msg);
-        };
+        });
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -81,7 +87,7 @@ public class ServiceLifetime : BackgroundService
         _logger.LogInformation("Agentic IDE Service starting...");
 
         // Start pipe server and orchestrator in parallel
-        var pipeTask        = _pipeServer.StartAsync(stoppingToken);
+        var pipeTask         = _pipeServer.StartAsync(stoppingToken);
         var orchestratorTask = _orchestrator.StartProcessingAsync(stoppingToken);
 
         // Wait for the orchestrator to finish loading persisted tasks before recovering

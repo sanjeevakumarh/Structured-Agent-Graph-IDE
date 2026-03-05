@@ -100,7 +100,7 @@ public class WorkflowStepExecution
     /// <summary>
     /// UTC deadline for a human_approval gate. Set when the gate becomes active and SlaHours > 0.
     /// Persisted in the workflow instance JSON so the SLA timer can be re-scheduled after a
-    /// service restart (C2 — SLA timeouts survive restarts).
+    /// service restart.
     /// Null for non-approval steps or approval steps with no configured SLA.
     /// </summary>
     public DateTime? SlaDeadline { get; set; }

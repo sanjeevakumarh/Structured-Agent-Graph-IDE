@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+# ─────────────────────────────────────────────────────────────────────
+# Shared prompt text blocks for skill templates.
+# Reference in section_analysis_prompt via {{blocks.block_name}}.
+# These are plain text — no Scriban expressions inside blocks.
+# ─────────────────────────────────────────────────────────────────────
+name: prompt-blocks
+version: 1
+domain: shared
+description: >
+  Reusable text blocks injected into skill templates via {{blocks.X}}.
+  Not a real skill — loaded as a block library by SkillRegistry.
+
+blocks:
+  data_integrity_rules: |
+    ─────────────────────────────────────────────
+    ## DATA INTEGRITY RULES
+    1. Copy numbers verbatim from the source material above.
+    2. For any metric not found in sources, write "Data unavailable".
+    3. Do NOT use training knowledge to fill data gaps.
+    ─────────────────────────────────────────────
+
+  data_integrity_rules_strict: |
+    ─────────────────────────────────────────────
+    ## HARD FINANCIAL DATA RULES — VIOLATIONS INVALIDATE THE MODEL
+    1. NEVER write a specific number (revenue, margin, growth rate) unless it
+       appears verbatim in the evidence/context above.
+    2. For any projection without a stated basis, write "[DATA UNAVAILABLE]".
+    3. Do NOT use training knowledge about this company/sector to fill gaps.
+    4. Ranges are acceptable (e.g. "15-25% margin") only when evidence supports the range.
+    5. If evidence is insufficient to build any scenario, write:
+       "SCENARIO FAILURE - insufficient financial data to model [scenario name]."
+    ─────────────────────────────────────────────
+
+  no_preamble: "Start immediately — no preamble."
+
+  output_rule: |
+    ⚠ OUTPUT RULE: Your FIRST line MUST be the section heading — no preamble,
+    no meta-commentary, no acknowledgement of instructions, no introductory sentences.
+
+  data_integrity_rules_extraction: |
+    ─────────────────────────────────────────────
+    ## DATA INTEGRITY RULES
+    1. Extract ONLY information explicitly present in the source material above.
+    2. Do NOT invent dates, percentages, numbers, or names not stated in the data.
+    3. For any metric or fact not found in the data, write "[Data unavailable]".
+    4. Do NOT use training knowledge to fill gaps.
+    5. Dates and numbers MUST be quoted verbatim from the source material.
+    ─────────────────────────────────────────────
+
+  content_integrity_rules: |
+    ─────────────────────────────────────────────
+    ## CONTENT INTEGRITY RULES
+    1. Reference ONLY facts, dates, numbers, and names present in the context above.
+    2. Do NOT fabricate meeting dates, deadlines, project names, or statistics.
+    3. If a specific detail is needed but not in context, write "[NEEDS CLARIFICATION: specific detail]".
+    4. Do NOT make commitments or promises not explicitly stated in the source intent.
+    5. Placeholder fields MUST use square brackets: [Company Name], [Date], [Number].
+    ─────────────────────────────────────────────
+
+  citation_rules: |
+    ─────────────────────────────────────────────
+    ## CITATION RULES
+    1. Every claim MUST cite the specific section, paragraph, or data point from the source.
+    2. If a fact is NOT in the source material, write "[NOT FOUND]" — do NOT estimate.
+    3. MUST NOT use training knowledge to supplement beyond what the source states.
+    4. Single-source claims → mark [SINGLE SOURCE].
+    5. Conflicting claims → mark [CONTRADICTED] and note both positions.
+    ─────────────────────────────────────────────
+
+  rfc_2119_keywords: |
+    RFC 2119 keyword usage:
+    - **MUST**: Non-negotiable. Implementation is incomplete without it.
+    - **SHOULD**: Expected unless there is a documented, justified reason to omit.
+    - **MAY**: Optional. Adds value but is not required.
+    - **MUST NOT**: Explicitly prohibited behavior.
+
+  gate_signal: |
+    ### GATE_SIGNAL
+    SIGNAL: [signal value]
+    RATIONALE: [one sentence]

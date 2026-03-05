@@ -1,0 +1,108 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: product-requirements-writer
+version: 2
+domain: strategy
+protocol_implements: [Analyzable]
+
+description: >
+  Converts an ambiguous product idea into a structured PRD: goals, non-goals,
+  user personas, functional and non-functional requirements, and measurable
+  success criteria. Flags requirements that need engineering input.
+
+inputs:
+  problem_statement:
+    type: string
+    required: true
+    description: The problem to solve or feature to build.
+  context:
+    type: string
+    required: false
+    description: Target users, business model, existing product, constraints, timeline.
+  personas:
+    type: string
+    required: false
+    description: Named user segments with their primary goal and pain point.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown PRD with ## Overview, ## Goals & Non-Goals, ## User Personas,
+    ## Functional Requirements, ## Non-Functional Requirements,
+    ## Success Metrics, ## Open Questions, ## Out of Scope.
+
+capability_requirements:
+  deep_analyst:
+    needs: [structured_reasoning, structured_output]
+    context_window_min: 8k
+
+parameters:
+  problem_statement: ""
+  context: ""
+  personas: ""
+  output_var: prd_result
+
+implementation:
+  - name: generate
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    section_title: "Product Requirements"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Overview" — no preamble.
+
+      Problem statement: {{ if parameters.problem_statement == "" }}MISSING — output "PRD FAILURE: No problem statement provided." and stop.{{ else }}provided below.{{ end }}
+
+      Problem:
+      {{parameters.problem_statement}}
+
+      Context: {{parameters.context ?? "None provided"}}
+      Personas: {{parameters.personas ?? "None specified — infer from problem statement"}}
+
+      ---
+      Produce a product requirements document using exactly these headings:
+
+      ## Overview
+      2–3 sentence summary: what is being built, for whom, and why now.
+
+      ## Goals & Non-Goals
+      | Goals | Non-Goals |
+      |---|---|
+      Goals: 3–5 measurable outcomes this feature must achieve.
+      Non-Goals: explicit exclusions to prevent scope creep.
+
+      ## User Personas
+      For each persona (minimum 2):
+      **[Persona Name]** — [role/description]
+      - Primary goal: [what they want to accomplish]
+      - Pain point: [current frustration this solves]
+      - Success looks like: [specific outcome for this user]
+
+      ## Functional Requirements
+      Numbered list. Each requirement: one testable behavior.
+      Format: FR-N: [The system] must [action] when [condition].
+      Mark with [MUST] / [SHOULD] / [NICE-TO-HAVE].
+      Minimum 8 requirements.
+
+      ## Non-Functional Requirements
+      Performance: response time, throughput, availability SLA.
+      Security: auth model, data classification, PII handling.
+      Scalability: expected growth in users/data.
+      Accessibility: WCAG level, internationalization.
+
+      ## Success Metrics
+      | Metric | Baseline | Target | Measurement Method |
+      |---|---|---|---|
+      3–5 quantifiable metrics. Avoid vanity metrics.
+
+      ## Open Questions
+      Requirements that need engineering, design, or business input before spec is final.
+      Format: Q: [question] → Owner: [role] → Blocking: [YES/NO]
+
+      ## Out of Scope
+      Explicitly list features or use cases that are NOT in this release.
+
+      Rules:
+      - Requirements must be testable — avoid "should be fast" without a threshold
+      - Flag with [ENGINEERING INPUT NEEDED] any requirement that needs technical feasibility review
+      - Ground everything in the problem statement — do not add features not implied by the input
+    output_var: "{{parameters.output_var}}"

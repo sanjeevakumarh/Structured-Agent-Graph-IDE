@@ -135,12 +135,13 @@ public sealed class SchedulerService : BackgroundService
     {
         try
         {
-            if (prompt.Subtasks.Count > 0)
+            // Check inline subtasks OR objects/workflow declarations (WorkflowExpander runs inside RunAsync).
+            if (prompt.Subtasks.Count > 0 || prompt.Objects.Count > 0 || prompt.DataCollection?.Steps.Count > 0)
             {
                 // Multi-model prompt: use SubtaskCoordinator
                 _logger.LogInformation(
-                    "Scheduler delegating {Domain}/{Name} to SubtaskCoordinator ({N} subtasks)",
-                    prompt.Domain, prompt.Name, prompt.Subtasks.Count);
+                    "Scheduler delegating {Domain}/{Name} to SubtaskCoordinator ({N} subtasks / {O} objects)",
+                    prompt.Domain, prompt.Name, prompt.Subtasks.Count, prompt.Objects.Count);
                 await _coordinator.RunAsync(prompt, variableOverrides: null, ct);
             }
             else

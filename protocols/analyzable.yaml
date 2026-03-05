@@ -1,0 +1,27 @@
+# Protocol: Analyzable
+# A skill that can perform structured analysis on collected evidence.
+# Requires one or more Collectible outputs as input; produces a structured analysis.
+
+name: Analyzable
+version: 1
+
+description: >
+  Defines the interface for analysis skills. An Analyzable skill accepts collected
+  evidence and produces a structured analysis with a machine-parseable signal.
+
+methods:
+  analyze:
+    description: Perform structured analysis on collected evidence.
+    inputs:
+      results:
+        type: string
+        required: true
+        description: Collected evidence from one or more Collectible skills
+      sections:
+        type: array
+        required: false
+        description: Specific analysis sections to produce (if applicable)
+    outputs:
+      section_analyses:
+        type: string
+        description: Structured analysis in markdown, ending with a signal block

@@ -1,0 +1,142 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: roadmap-prioritizer
+version: 2
+domain: strategy
+protocol_implements: [Analyzable]
+
+description: >
+  Prioritizes a product or engineering roadmap by scoring each item against
+  customer impact, strategic alignment, effort, and risk. Produces a ranked
+  backlog, phased delivery plan, and explicit defer/cut recommendations.
+  Fail-loudly: outputs "[SCORE UNKNOWN]" rather than guessing missing data.
+
+inputs:
+  items:
+    type: string
+    required: true
+    description: List of roadmap items (features, epics, initiatives) — one per line or as structured text
+  context:
+    type: string
+    required: false
+    description: Strategic goals, OKRs, capacity constraints, tech debt budget
+  scoring_weights:
+    type: string
+    required: false
+    description: "Override default weights: customer_impact, strategic_fit, effort, risk (default 30/30/20/20)"
+  horizon:
+    type: string
+    required: false
+    description: "Planning horizon: 'quarter', 'half', 'year' (default: quarter)"
+
+outputs_schema:
+  type: object
+  required: [scored_backlog, phased_plan, defer_cut_list, rationale]
+  properties:
+    scored_backlog:
+      type: array
+      description: Each item with score breakdown and priority rank
+    phased_plan:
+      type: object
+      description: Items grouped into Now/Next/Later with rationale
+    defer_cut_list:
+      type: array
+      description: Items recommended to defer or cut with explicit reasoning
+    rationale:
+      type: string
+      description: Overall prioritization philosophy and key trade-offs
+
+capability_requirements:
+  deep_analyst:
+    needs: [long_context_reasoning, structured_output]
+    context_window_min: 16k
+
+parameters:
+  items: "{{items}}"
+  context: ""
+  scoring_weights: "customer_impact=30, strategic_fit=30, effort=20, risk=20"
+  horizon: "quarter"
+
+implementation:
+  - name: prioritize
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    planning_prompt: |
+      You are a product strategy expert prioritizing a roadmap.
+
+      Planning horizon: {{parameters.horizon}}
+      Scoring weights: {{parameters.scoring_weights}}
+      {{ if parameters.context != "" -}}
+      Strategic context: {{parameters.context}}
+      {{ end -}}
+
+      Items to prioritize:
+      ─────────────────────────────────────────────
+      {{parameters.items}}
+      ─────────────────────────────────────────────
+
+      Generate exactly these section titles (one per line, no numbering):
+      Scored Backlog
+      Now (Current Horizon)
+      Next (Following Horizon)
+      Later & Defer
+      Cut Recommendations
+      Prioritization Rationale
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a product strategy expert writing the "{{section_name}}" section.
+
+      Planning horizon: {{parameters.horizon}}
+      Scoring weights: {{parameters.scoring_weights}}
+      {{ if parameters.context != "" -}}
+      Strategic context: {{parameters.context}}
+      {{ end -}}
+
+      Items to prioritize:
+      ─────────────────────────────────────────────
+      {{parameters.items}}
+      ─────────────────────────────────────────────
+
+      ─────────────────────────────────────────────
+      ## SCORING RULES
+      Score each dimension 1–10 based on stated context only.
+      Write [SCORE UNKNOWN] if the item lacks sufficient information to score a dimension.
+      Do NOT infer scores from item names alone — insufficient data = [SCORE UNKNOWN].
+      Weighted total = (customer_impact × w1 + strategic_fit × w2 + effort_inverted × w3 + risk_inverted × w4)
+        where effort and risk are inverted (lower effort / lower risk = higher score).
+      ─────────────────────────────────────────────
+
+      ### {{section_name}}
+
+      **Scored Backlog** — table format:
+      | Rank | Item | Customer Impact | Strategic Fit | Effort (inv) | Risk (inv) | Weighted Score | Phase |
+      Sort descending by weighted score. Flag [SCORE UNKNOWN] items at the bottom.
+
+      **Now (Current Horizon)** — items to deliver in the current {{parameters.horizon}}:
+      - Must have score ≥ 60 OR be a hard dependency for another Now item.
+      - For each item: **[Name]** — [one-sentence rationale citing score or dependency]
+      - Capacity note: flag if items appear to exceed realistic team capacity.
+
+      **Next (Following Horizon)** — items for the next {{parameters.horizon}}:
+      - Score 40–59 OR gated by a Now item.
+      - For each: **[Name]** — [rationale + what must complete first]
+
+      **Later & Defer** — items that should wait:
+      - Score < 40 OR insufficient information OR blocked by unresolved strategy.
+      - For each: **[Name]** — [reason to defer] + [condition that would re-prioritize it]
+
+      **Cut Recommendations** — items to remove from the roadmap:
+      - Duplicate of another item, no owner, or contradicts stated strategy.
+      - For each: **[Name]** → CUT — [specific reason]
+      - If no items should be cut, write "[No cuts recommended]".
+
+      **Prioritization Rationale** — 3–5 sentences:
+      - Key trade-offs made (e.g. customer impact prioritized over speed)
+      - Biggest uncertainty affecting this ranking
+      - What single new data point would most change the plan
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [APPROVED | APPROVED_WITH_CONDITIONS | NEEDS_REVISION]
+      RATIONALE: [one sentence on the biggest prioritization risk]

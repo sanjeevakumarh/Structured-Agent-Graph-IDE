@@ -1,0 +1,139 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: risk-and-dependency-analyzer
+version: 2
+domain: strategy
+protocol_implements: [Analyzable]
+
+description: >
+  Analyzes risks and dependency chains for projects, plans, or systems.
+  Produces a structured risk register with likelihood × impact scoring,
+  dependency maps, critical-path identification, and mitigation actions.
+  Fail-loudly: outputs explicit "DATA MISSING" markers rather than estimates.
+
+inputs:
+  subject:
+    type: string
+    required: true
+    description: Project, system, plan, or decision to analyze (short description)
+  context:
+    type: string
+    required: false
+    description: Background, constraints, team size, tech stack, timeline
+  risk_categories:
+    type: string
+    required: false
+    description: "Comma-separated categories to focus on (e.g. technical, schedule, resource, external)"
+  evidence:
+    type: string
+    required: false
+    description: Prior research, dependency list, architecture docs, or incident history
+
+outputs_schema:
+  type: object
+  required: [risk_register, dependency_map, critical_path, verdict]
+  properties:
+    risk_register:
+      type: array
+      description: Each risk with ID, category, likelihood (H/M/L), impact (H/M/L), score, owner, mitigation
+    dependency_map:
+      type: object
+      description: Named dependencies with type (hard/soft), owner, and current status
+    critical_path:
+      type: array
+      description: Ordered list of blockers that, if delayed, delay the whole project
+    verdict:
+      type: string
+      enum: [PROCEED, PROCEED_WITH_GUARDS, DEFER, ABORT]
+      description: Overall readiness signal
+
+capability_requirements:
+  deep_analyst:
+    needs: [long_context_reasoning, structured_output]
+    context_window_min: 16k
+
+parameters:
+  subject: "{{subject}}"
+  context: ""
+  risk_categories: "technical, schedule, resource, external, security"
+  evidence: ""
+
+implementation:
+  - name: analyze
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    planning_prompt: |
+      You are a risk and dependency analyst. Produce a structured analysis for:
+
+      Subject: {{parameters.subject}}
+      {{ if parameters.context != "" -}}
+      Context: {{parameters.context}}
+      {{ end -}}
+      {{ if parameters.evidence != "" -}}
+      Evidence / background:
+      {{parameters.evidence}}
+      {{ end -}}
+
+      Risk categories in scope: {{parameters.risk_categories}}
+
+      Generate exactly these section titles (one per line, no numbering):
+      Risk Register
+      Dependency Map
+      Critical Path
+      Mitigation Playbook
+      Verdict & Readiness
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a risk and dependency analyst writing the "{{section_name}}" section.
+
+      Subject: {{parameters.subject}}
+      {{ if parameters.context != "" -}}
+      Context: {{parameters.context}}
+      {{ end -}}
+      {{ if parameters.evidence != "" -}}
+      Evidence:
+      {{parameters.evidence}}
+      {{ end -}}
+
+      ─────────────────────────────────────────────
+      ## HARD DATA RULES — READ BEFORE WRITING
+      1. Use only facts from the evidence/context provided.
+      2. If a specific fact is absent, write **[DATA MISSING]** — never estimate.
+      3. Do not fabricate names, dates, team sizes, or technical details.
+      4. Likelihood and impact scores MUST be H/M/L based on stated evidence.
+         If evidence is insufficient, write **[SCORE UNKNOWN]**.
+      ─────────────────────────────────────────────
+
+      ### {{section_name}}
+
+      ---
+
+      **Risk Register** — write a markdown table:
+      | ID | Category | Risk Description | Likelihood | Impact | Score | Owner | Mitigation |
+      Score = H/H → Critical, H/M or M/H → High, M/M → Medium, L/* or */L → Low.
+      Every Critical or High risk MUST have a named owner. If no owner is evident from context, write "[OWNER REQUIRED]".
+      If no evidence supports a risk, omit it rather than inventing.
+
+      **Dependency Map** — for each dependency:
+      - **[Dep name]** | Type: Hard/Soft | Owner: [team/system] | Status: [known/unknown/at-risk]
+      - Write "[DATA MISSING]" for unknown owners or statuses.
+
+      **Critical Path** — ordered list of hard blockers (dependencies whose delay cascades):
+      1. [Blocker] → blocks [downstream step]
+      Flag any blocker without a clear owner as **⚠ UNOWNED BLOCKER**.
+
+      **Mitigation Playbook** — for each Critical or High risk:
+      - **Risk [ID]**: [Mitigation action] | Owner: [role] | Trigger: [when to execute]
+      - If no mitigation is known, write "[MITIGATION NEEDED — assign owner]".
+
+      **Verdict & Readiness** — choose exactly one:
+      - **PROCEED** — risks are known, owned, and mitigated
+      - **PROCEED_WITH_GUARDS** — risks present but manageable with named controls
+      - **DEFER** — critical blockers unresolved; proceed only after [specific condition]
+      - **ABORT** — risk level is unacceptable; recommend cancellation
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [PROCEED | PROCEED_WITH_GUARDS | DEFER | ABORT]
+      RATIONALE: [one sentence citing the single highest-impact risk]

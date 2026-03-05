@@ -1,0 +1,199 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: architecture-decision-record
+version: 1
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Generates a structured Architecture Decision Record (ADR) from a problem
+  statement and candidate options. Evaluates each option against constraints,
+  selects the best fit with explicit rationale, and documents consequences.
+  Fails loudly when required inputs (problem, options) are absent — outputs
+  "ADR FAILURE: [field] not provided." and stops.
+
+inputs:
+  problem:
+    type: string
+    required: true
+    description: The architectural problem or decision to be made.
+  options:
+    type: string
+    required: true
+    description: Candidate solutions (comma-separated or described in prose).
+  context:
+    type: string
+    required: false
+    description: System constraints, tech stack, team size, existing architecture.
+  stakeholders:
+    type: string
+    required: false
+    description: Who is affected by this decision — teams, services, customers.
+  evidence:
+    type: string
+    required: false
+    description: Benchmark data, prior experience, research, or production metrics.
+
+outputs_schema:
+  type: object
+  required: [title, status, context, options_matrix, decision, consequences]
+  properties:
+    title:
+      type: string
+      description: "ADR-NNN: [decision title]"
+    status:
+      type: string
+      description: "One of: PROPOSED | ACCEPTED | DEPRECATED | SUPERSEDED"
+    context:
+      type: string
+      description: Problem statement, constraints, and forces at play
+    options_matrix:
+      type: string
+      description: Structured comparison table of all candidate options
+    decision:
+      type: string
+      description: Chosen option with explicit rationale
+    consequences:
+      type: string
+      description: Positive, negative, and neutral impacts of the decision
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, technical_analysis, structured_output]
+    context_window_min: 16k
+
+parameters:
+  problem: ""
+  options: ""
+  context: ""
+  stakeholders: ""
+  evidence: ""
+  output_var: adr_output
+
+implementation:
+  - name: generate_adr
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "6"
+    planning_prompt: |
+      You are a senior software architect generating an Architecture Decision Record.
+
+      Problem: {{parameters.problem}}
+      Options: {{parameters.options}}
+      {{ if parameters.context != "" -}}
+      Context: {{parameters.context}}
+      {{ end -}}
+      {{ if parameters.stakeholders != "" -}}
+      Stakeholders: {{parameters.stakeholders}}
+      {{ end -}}
+
+      Generate exactly these section titles (one per line, no numbering):
+      Title & Status
+      Context
+      Options Considered
+      Decision
+      Consequences
+      Compliance
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a senior software architect writing the "{{section_name}}" section of an ADR.
+      {{blocks.no_preamble}}
+
+      ## Input Verification
+      Problem provided: {{ if parameters.problem == "" }}NO — output "ADR FAILURE: problem not provided." and stop.{{ else }}YES.{{ end }}
+      Options provided: {{ if parameters.options == "" }}NO — output "ADR FAILURE: options not provided." and stop.{{ else }}YES.{{ end }}
+
+      Problem: {{parameters.problem}}
+      Options: {{parameters.options}}
+      Context: {{parameters.context ?? "Not specified"}}
+      Stakeholders: {{parameters.stakeholders ?? "Not specified"}}
+      {{ if parameters.evidence != "" -}}
+      Evidence:
+      ─────────────────────────────────────────────
+      {{parameters.evidence}}
+      ─────────────────────────────────────────────
+      {{ end -}}
+
+      {{blocks.data_integrity_rules}}
+
+      ### {{section_name}}
+
+      {{ if section_name == "Title & Status" -}}
+      Generate an ADR header in this exact format:
+      **ADR-NNN: [Concise decision title derived from the problem]**
+      **Status: PROPOSED**
+      **Date: [today's date or "TBD"]**
+      **Deciders: {{parameters.stakeholders ?? "[to be determined]"}}**
+
+      The title MUST capture the decision, not the problem. For example:
+      "Use PostgreSQL for the event store" not "Choose a database".
+      {{ else if section_name == "Context" -}}
+      Describe the problem statement, the forces at play, and the constraints
+      that make this decision necessary. Structure as:
+
+      **Problem**: Restate the architectural problem in 2–3 sentences.
+      **Forces**: List the competing concerns (performance vs. simplicity,
+      cost vs. reliability, time-to-market vs. tech debt, etc.).
+      **Constraints**: Technical limitations, team expertise, compliance
+      requirements, or timeline pressures. If none specified, write
+      "No explicit constraints provided — assuming greenfield."
+      {{ else if section_name == "Options Considered" -}}
+      Present ALL candidate options in a comparison table:
+
+      | Option | Pros | Cons | Effort (Low/Med/High) | Risk (Low/Med/High) |
+      |--------|------|------|-----------------------|---------------------|
+
+      Below the table, provide 2–3 sentences per option expanding on the
+      most significant pro and con. Every claim MUST be grounded in the
+      provided evidence or context — do not invent advantages or
+      disadvantages. If evidence is insufficient for a claim, write
+      "[NEEDS VALIDATION]".
+      {{ else if section_name == "Decision" -}}
+      State the chosen option clearly:
+
+      **Decision: We will use [Option Name].**
+
+      Provide the rationale structured as:
+      1. **Primary reason**: The single strongest argument for this option.
+      2. **Supporting factors**: 2–3 additional reasons ranked by importance.
+      3. **Why not [other options]**: For each rejected option, one sentence
+         on the deciding factor against it.
+
+      The rationale MUST reference specific constraints or evidence — never
+      "it seemed best" or "it is industry standard" without elaboration.
+      {{ else if section_name == "Consequences" -}}
+      Document impacts in three categories:
+
+      **Positive consequences:**
+      - [What improves, what becomes possible, what risk is eliminated]
+
+      **Negative consequences:**
+      - [What gets harder, what debt is introduced, what trade-off is accepted]
+
+      **Neutral / side-effects:**
+      - [Changes that are neither good nor bad but SHOULD be noted]
+
+      Each consequence MUST be actionable — if a negative consequence
+      requires mitigation, state the mitigation. If a positive consequence
+      depends on an assumption, state the assumption.
+      {{ else if section_name == "Compliance" -}}
+      Evaluate compliance considerations:
+
+      **Standards**: Does this decision align with or violate any architectural
+      standards, coding guidelines, or organizational policies?
+      **Security**: Are there security implications (data at rest, in transit,
+      access control, audit logging)?
+      **Regulatory**: Any GDPR, SOC2, HIPAA, PCI-DSS, or other regulatory
+      impacts? If none apply, write "No regulatory constraints identified."
+      **Operational**: SLA implications, monitoring requirements, runbook changes.
+
+      If no compliance context was provided, write "No compliance constraints
+      specified — review with security and legal before accepting this ADR."
+      {{ end -}}
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [DECIDED | NEEDS_INPUT | DEFER]
+      RATIONALE: [one sentence — why this signal for this section]
+    output_var: "{{parameters.output_var}}"

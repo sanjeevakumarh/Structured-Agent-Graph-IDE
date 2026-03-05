@@ -1,0 +1,124 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: section-analyst
+version: 2
+domain: research
+protocol_implements: [Analyzable]
+
+description: >
+  Runs one LLM call per section in parallel via llm_per_section. Enforces entity extraction
+  minimums (≥3 competitors, ≥3 technologies), citation discipline ([Source: Name Year] /
+  [Model Estimate]), and a standardised GATE_SIGNAL block at the end of every section.
+  Encapsulates all prompt scaffolding so workflow YAMLs need not repeat it.
+
+inputs:
+  sections:
+    type: array
+    required: true
+    description: Ordered list of section names to analyse
+  results_vars:
+    type: array
+    required: true
+    description: Names of data-collection output vars to pass as evidence
+  idea:
+    type: string
+    required: false
+  domain:
+    type: string
+    required: false
+  market:
+    type: string
+    required: false
+  constraints:
+    type: string
+    required: false
+  personas:
+    type: string
+    required: false
+  entity_inventory:
+    type: string
+    required: false
+    description: Pre-extracted named-entity inventory from entity_inventory llm step.
+  evidence_cards:
+    type: string
+    required: false
+    description: Pre-normalised evidence cards from normalize_evidence llm step.
+
+outputs_schema:
+  type: string
+  description: >
+    Concatenated markdown from all section analysts. Each section ends with a GATE_SIGNAL block:
+      ### GATE_SIGNAL
+      SIGNAL: [GO / CONDITIONAL / NO-GO]
+      RATIONALE: [one high-impact sentence]
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, long_context_understanding]
+    context_window_min: 32k
+
+parameters:
+  max_sections: "8"
+  output_var: section_analyses
+  planning_prompt: ""           # if set, overrides the built-in section list prompt
+  section_analysis_prompt: ""  # if set, overrides the built-in analysis prompt
+
+implementation:
+  - name: analyse
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "{{parameters.max_sections}}"
+    output_var: "{{parameters.output_var}}"
+    planning_prompt: |
+      {{- if parameters.planning_prompt != "" -}}
+      {{parameters.planning_prompt}}
+      {{- else -}}
+      Return exactly this JSON array — no changes to the titles, no explanation:
+      ["Thesis & Market Fit", "Technology Strategy", "Financial Viability & Exit", "Risk & Compliance", "Product Scope & Roadmap", "Architecture & Implementation", "Support & Compatibility", "Implementation Plan & Release Cycles"]
+      {{- end -}}
+    section_analysis_prompt: |
+      {{- if parameters.section_analysis_prompt != "" -}}
+      {{parameters.section_analysis_prompt}}
+      {{- else -}}
+      Idea: {{idea}} | Domain: {{domain}} | Market: {{market}} | Date: {{date}}
+      Constraints: {{constraints}}
+      Personas: {{personas}}
+      Personal context: {{human_context}}
+
+      Source material:
+      ---
+      {{market_results}}
+      {{tech_results}}
+      {{finance_results}}
+      {{risk_results}}
+      ---
+
+      {{ if entity_inventory != "" -}}
+      Entity inventory (pre-extracted — use ONLY these names, do not fabricate new ones):
+      {{entity_inventory}}
+
+      Evidence cards (cite as [E#] — all numeric claims must reference a card):
+      {{evidence_cards}}
+
+      {{ end -}}
+      ⚠ OUTPUT RULE: Your FIRST output character must begin the section content.
+      Do NOT write any of the following: introductory sentences, meta-commentary about the request,
+      references to "your previous instructions", acknowledgements, or any other preamble.
+      Begin IMMEDIATELY with "## {{section_name}}" then the first sub-heading.
+      Ground every finding in the source material. Write "Data unavailable" for facts not in source material.
+
+      ## ENTITY EXTRACTION RULES
+      - You MUST name at least 3 specific competitors or companies found in the source material.
+      - You MUST name at least 3 specific technologies, platforms, or frameworks found in the source material.
+      - Do not use generic terms (e.g. "cloud providers", "industry leaders") when specific names are available.
+      - If insufficient named entities exist in source material → write "Data unavailable" for that item.
+
+      ## DATA INTEGRITY RULES
+      - Every numeric claim (market size, cost, growth rate, performance) MUST end with [Source: Name Year].
+      - Analytical projections without a source MUST be flagged [Model Estimate].
+      - Uncited numbers will be treated as hallucinations by the evaluator — omit them entirely.
+
+      At the end of your analysis provide exactly:
+      ### GATE_SIGNAL
+      SIGNAL: [GO / CONDITIONAL / NO-GO]
+      RATIONALE: [One clear, high-impact sentence explaining the signal based on evidence above]
+      {{- end -}}

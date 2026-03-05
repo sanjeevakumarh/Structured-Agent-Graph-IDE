@@ -1,0 +1,24 @@
+# Protocol: Collectible
+# A skill that can gather evidence about a topic from some data source.
+# Any implementation — web search, local documents, database query, API fetch —
+# may implement this protocol as long as it satisfies the interface below.
+
+name: Collectible
+version: 1
+
+description: >
+  Defines the interface for evidence-gathering skills. A Collectible skill accepts a
+  topic and returns raw results suitable for passing to an Analyzable skill.
+
+methods:
+  collect:
+    description: Gather evidence about a topic from the skill's data source.
+    inputs:
+      topic:
+        type: string
+        required: true
+        description: The subject to gather evidence about
+    outputs:
+      raw_results:
+        type: string
+        description: Gathered evidence as concatenated text

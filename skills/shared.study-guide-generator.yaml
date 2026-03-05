@@ -1,0 +1,182 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: study-guide-generator
+version: 2
+domain: shared
+protocol_implements: [Analyzable]
+
+description: >
+  Builds a structured study guide to master any subject from 101 to 301, mixing
+  textbooks, seminal papers, hands-on practice, and assessments tailored to the
+  learner's background and time budget. Five parallel sections: Orientation,
+  Core Concepts, Advanced Topics, Practice & Projects, Assessment & Timeline.
+  Each section ends with a GATE_SIGNAL indicating readiness or gaps.
+
+inputs:
+  subject:
+    type: string
+    required: true
+    description: The subject to master (e.g., "distributed systems").
+  learner_background:
+    type: string
+    required: false
+    description: Starting experience, strengths, and gaps.
+  goals:
+    type: string
+    required: false
+    description: Target outcomes (exam prep, research readiness, job role, etc.).
+  timeframe:
+    type: string
+    required: false
+    description: Duration for the plan (e.g., "12 weeks").
+  hours_per_week:
+    type: string
+    required: false
+    description: Weekly time budget for study and practice.
+  preferred_resources:
+    type: string
+    required: false
+    description: Named books, courses, or formats to prioritize.
+  assessment_style:
+    type: string
+    required: false
+    description: Preferred assessments (quizzes, essays, labs, peer review).
+  model_override:
+    type: string
+    required: false
+    description: Optional model name to override the default deep_analyst capability.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown study guide covering 101, 201, and 301 depth with readings, exercises,
+    and timelines. Each section ends with a GATE_SIGNAL block.
+
+capability_requirements:
+  deep_analyst:
+    needs: [instruction_following, long_context_understanding, structured_reasoning]
+    context_window_min: 8k
+
+parameters:
+  subject: ""
+  learner_background: "assume novice"
+  goals: "reach working proficiency"
+  timeframe: "12 weeks"
+  hours_per_week: "6"
+  preferred_resources: "none specified"
+  assessment_style: "weekly checkpoints + capstone project"
+  output_var: study_guide
+  model_override: ""
+
+implementation:
+  - name: generate
+    type: llm_per_section
+    model: '{{ if parameters.model_override != "" }}{{parameters.model_override}}{{ else }}{{capability.deep_analyst}}{{ end }}'
+    max_sections: "5"
+    output_var: "{{parameters.output_var}}"
+    planning_prompt: |
+      Return exactly this JSON array — no changes, no explanation:
+      ["Orientation (101)", "Core Concepts (201)", "Advanced Topics (301)", "Practice & Projects", "Assessment & Timeline"]
+    section_analysis_prompt: |
+      Subject: {{parameters.subject}}
+      Learner profile: {{parameters.learner_background ?? "assume novice"}}
+      Goals: {{parameters.goals ?? "reach working proficiency"}}
+      Timeframe: {{parameters.timeframe ?? "12 weeks"}}
+      Weekly time: {{parameters.hours_per_week ?? "6"}} hours
+      Preferred resources: {{parameters.preferred_resources ?? "none specified"}}
+      Assessment style: {{parameters.assessment_style ?? "weekly checkpoints + capstone project"}}
+
+      Guardrails:
+      - Enforce weekly load to fit within stated hours; mark any overage as STRETCH and keep it optional.
+      - If preferred_resources mention open-source or FOSS, prioritize free/open resources and avoid paywalled content.
+      - "incremental product" means every week should yield a small, testable artifact and a rubric to judge it.
+      - Robotics overlay (if subject contains "robot", "robotics", or "mechatronics"):
+        * Baseline stack: ROS 2, Gazebo/Ignition or Isaac Sim, and at least one flight/ground control stack (PX4 or ArduPilot).
+        * Controls: start with PID, then model-based or MPC basics; include actuator/sensor integration and safety interlocks.
+        * Perception: camera + lidar pipeline basics, dataset suggestions, and sim-to-real caveats.
+        * Hardware path: Arduino-class to STM32 or SBC; include wiring/safety checklists and bill of materials that are open-source friendly.
+        * Field constraints: power budget, weather sealing, and latency considerations for small/medium-scale farm use.
+
+      {{ if section_name == "Orientation (101)" }}
+      ⚠ OUTPUT RULE: Your FIRST line MUST be "### 101 Orientation" — no preamble, no
+      meta-commentary, no acknowledgement. Begin immediately with that heading.
+
+      Produce: key learning goals, prerequisite checklist, and a short bridge plan to close gaps.
+      - Prerequisites to fill: list 5-8 items with one recommended primer each (chapter or video).
+      - Canonical intros: 2-3 textbooks or courses with exact chapters or lectures to cover first; bias to open-source or freely accessible.
+      - Vocabulary: 10-15 essential terms with one-line definitions.
+      - Quickstart: 3 starter exercises (timeboxed ≤ 60 minutes each) with expected artifacts.
+      - If robotics: include initial ROS 2 + sim install steps and a single safety checklist before hardware work.
+
+      Cite resources with title, author, and year. Prefer authoritative sources
+      (textbooks, standards docs, official documentation) over blog posts.
+
+      ### GATE_SIGNAL
+      SIGNAL: [READY | NEEDS_BACKGROUND | MISSING_PREREQS]
+      RATIONALE: [one sentence — can the learner start now, or must gaps be filled first?]
+
+      {{ else if section_name == "Core Concepts (201)" }}
+      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Core Concepts (201)" — no preamble.
+
+      Produce: the spine of the subject with readings and practice.
+      - Core modules: 5-8 themes. For each, list learning objectives and 2-3 targeted readings
+        (textbook chapters, high-quality lectures, or standards docs). Prefer open-source or freely available resources when possible.
+      - Problem sets: 5-10 mid-level exercises; each with expected outputs or test conditions.
+      - Reference stack: tools, libraries, or environments to install, with links. For robotics, include ROS 2, Gazebo/Ignition, PX4/ArduPilot, and a basic perception stack.
+      - Misconceptions: 3-5 common traps with explanations of how to avoid them.
+
+      Cite resources with title, author, and year. Prefer authoritative sources over blogs.
+      Assume the reader completed Orientation (101); do not repeat that content.
+
+      ### GATE_SIGNAL
+      SIGNAL: [COMPREHENSIVE | PARTIALLY_COVERED | DATA_LIMITED]
+      RATIONALE: [one sentence — is core coverage complete, or are critical areas thin?]
+
+      {{ else if section_name == "Advanced Topics (301)" }}
+      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Advanced Topics (301)" — no preamble.
+
+      Produce: frontier topics and expert-level material.
+      - Specializations: 4-6 sub-areas; for each, cite 1-2 seminal papers (with year) or
+        authoritative chapters. Include at least one robotics-relevant seminal paper when the subject is robotics.
+      - Depth builders: graduate-level courses or monographs; specify exact units; prefer open syllabi.
+      - Research habits: conferences, journals, mailing lists, and benchmark suites to track (e.g., ICRA/IROS/CoRL for robotics).
+      - Open problems: 3-5 active questions to explore; include a reading or dataset to start; mark whether they are stretch within the timeframe.
+
+      Include at least one seminal paper. Cite resources with title, author, and year.
+      Assume the reader completed Core Concepts (201); do not repeat that content.
+
+      ### GATE_SIGNAL
+      SIGNAL: [REACHABLE | STRETCH_GOAL | EXPERT_LEVEL]
+      RATIONALE: [one sentence — is 301 achievable within the stated timeframe and background?]
+
+      {{ else if section_name == "Practice & Projects" }}
+      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Practice & Projects" — no preamble.
+
+      Produce: a ladder of practice from drills to capstone.
+      - Drills: 5-8 repeatable tasks with measurable completion criteria.
+      - Projects: three tiers (starter, core, capstone). For each: requirements, datasets or
+        environments needed, and a rubric (what a passing result looks like). Favor open-source tools and produce incremental, testable artifacts each week.
+      - Review loop: how to self-evaluate work; include test harness ideas or peer review prompts.
+      - Portfolio: guidance on packaging outputs (repos, writeups, demos).
+
+      Prefer open-source tools and freely available datasets.
+      Include at least one project that integrates 201-level material.
+
+      ### GATE_SIGNAL
+      SIGNAL: [EXECUTABLE | NEEDS_SETUP | RESOURCE_LIMITED]
+      RATIONALE: [one sentence — can the capstone be started with the learner's current setup?]
+
+      {{ else if section_name == "Assessment & Timeline" }}
+      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Assessment & Timeline" — no preamble.
+
+      Produce: a week-by-week schedule respecting the timeframe and weekly hours.
+      - Timeline: break down all weeks with what to read, watch, and build; align 101→201→301 progression. Keep total time within the stated hours; flag any stretch work.
+      - Checkpoints: weekly quizzes or reflections aligned to {{parameters.assessment_style ?? "weekly checkpoints + capstone project"}}.
+        Include a brief scoring rubric per checkpoint and tie to the weekly artifact (incremental product).
+      - Spaced review: when to revisit concepts and how to validate retention.
+      - Risk controls: what to cut or compress if behind schedule; what to deepen if ahead. If robotics, include a hardware/safety buffer week.
+
+      ### GATE_SIGNAL
+      SIGNAL: [REALISTIC | COMPRESSED | INSUFFICIENT_HOURS]
+      RATIONALE: [one sentence — is the schedule achievable at the stated hours/week, or overloaded?]
+
+      {{ end }}

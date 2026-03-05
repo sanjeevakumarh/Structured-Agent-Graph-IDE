@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: system-design-architect
+version: 2
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Designs scalable system architecture from requirements: components,
+  data flows, API contracts, scaling strategy, failure modes, and
+  observability plan. Distinguishes between what is known from requirements
+  vs what must be decided by the team.
+
+inputs:
+  requirements:
+    type: string
+    required: true
+    description: Functional and non-functional requirements.
+  constraints:
+    type: string
+    required: false
+    description: Budget, team size, existing stack, timeline, compliance.
+  scale_target:
+    type: string
+    required: false
+    description: Expected load — DAU, RPS, data volume. Drives scaling decisions.
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Architecture Overview, ## Component Breakdown,
+    ## Data Flow, ## API Design, ## Scaling Strategy,
+    ## Failure Modes & Mitigations, ## Observability Plan,
+    ## Open Decisions (team must resolve before build).
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, technical_analysis, structured_output]
+    context_window_min: 16k
+
+parameters:
+  requirements: ""
+  constraints: ""
+  scale_target: ""
+  output_var: architecture_output
+
+implementation:
+  - name: design
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    section_title: "System Architecture"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Architecture Overview" — no preamble.
+
+      ## Input Verification
+      Requirements provided: {{ if parameters.requirements == "" }}NO — output "DESIGN FAILURE: No requirements provided." and stop.{{ else }}YES.{{ end }}
+
+      Requirements:
+      {{parameters.requirements}}
+
+      Constraints: {{parameters.constraints ?? "None specified"}}
+      Scale target: {{parameters.scale_target ?? "Not specified — state assumptions"}}
+
+      {{ if parameters.scale_target == "" }}NOTE: No scale target specified. State your assumptions about expected load/scale.{{ end }}
+
+      ## Non-Functional Requirements
+      Address latency/SLOs, data residency/compliance, and availability targets in the design.
+
+      ---
+      Produce a system design document using exactly these headings:
+
+      ## Architecture Overview
+      Pattern: monolith / microservices / event-driven / serverless / hybrid.
+      Justify the choice against the requirements and constraints.
+      Include a component diagram in ASCII or mermaid notation.
+
+      ## Component Breakdown
+      For each major component: responsibility, technology choice with rationale,
+      interface contract (REST / gRPC / message queue / event), owner team.
+
+      ## Data Flow
+      Describe the primary read and write paths step-by-step.
+      Identify synchronous vs asynchronous boundaries.
+
+      ## API Design
+      List the 3–5 most critical endpoints/contracts with method, path, request
+      and response shape. Flag any breaking-change risks.
+
+      ## Scaling Strategy
+      Horizontal vs vertical. Which components are the bottleneck?
+      At what load does each component break? Caching layer? CDN? Read replicas?
+      State "Not specified — team must decide" for anything not inferable from inputs.
+
+      ## Failure Modes & Mitigations
+      For each critical component: most likely failure mode, impact severity,
+      detection method (alert / health check), mitigation (retry / fallback / circuit breaker).
+
+      ## Observability Plan
+      Key metrics to track per component. Log format (structured JSON recommended).
+      Distributed trace spans. Alert thresholds. Dashboard layout.
+
+      ## Open Decisions
+      List every architectural decision that cannot be made from the requirements
+      alone. Each item: decision needed, options, recommended default, who owns it.
+
+      Rules:
+      - Base every choice on the provided requirements and constraints
+      - Write "Not specified — assume [X]" where inputs are absent
+      - Never invent requirements not stated in the input
+    output_var: "{{parameters.output_var}}"

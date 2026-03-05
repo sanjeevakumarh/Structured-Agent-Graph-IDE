@@ -11,7 +11,8 @@ namespace SAGIDE.Service.Tests;
 public class SqliteRepositoryTests : IAsyncLifetime
 {
     private readonly string _dbPath;
-    private SqliteTaskRepository _repo = null!;
+    private SqliteTaskRepository      _repo          = null!;
+    private SqliteSchedulerRepository _schedulerRepo = null!;
 
     public SqliteRepositoryTests()
     {
@@ -20,7 +21,8 @@ public class SqliteRepositoryTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _repo = new SqliteTaskRepository(_dbPath, NullLogger<SqliteTaskRepository>.Instance);
+        _repo          = new SqliteTaskRepository(_dbPath, NullLogger<SqliteTaskRepository>.Instance);
+        _schedulerRepo = new SqliteSchedulerRepository(_dbPath);
         await _repo.InitializeAsync();
     }
 
@@ -233,10 +235,10 @@ public class SqliteRepositoryTests : IAsyncLifetime
     public async Task SetLastFiredAt_LoadAllLastFired_RoundTrip()
     {
         var fired = DateTimeOffset.UtcNow;
-        await _repo.SetLastFiredAtAsync("finance/daily", fired);
+        await _schedulerRepo.SetLastFiredAtAsync("finance/daily", fired);
 
         var dict = new Dictionary<string, DateTimeOffset>();
-        await _repo.LoadAllLastFiredAsync(dict);
+        await _schedulerRepo.LoadAllLastFiredAsync(dict);
 
         Assert.True(dict.ContainsKey("finance/daily"));
         // SQLite stores TEXT; allow up to 1-second rounding
@@ -249,11 +251,11 @@ public class SqliteRepositoryTests : IAsyncLifetime
         var first  = DateTimeOffset.UtcNow.AddMinutes(-10);
         var second = DateTimeOffset.UtcNow;
 
-        await _repo.SetLastFiredAtAsync("notes/weekly", first);
-        await _repo.SetLastFiredAtAsync("notes/weekly", second);
+        await _schedulerRepo.SetLastFiredAtAsync("notes/weekly", first);
+        await _schedulerRepo.SetLastFiredAtAsync("notes/weekly", second);
 
         var dict = new Dictionary<string, DateTimeOffset>();
-        await _repo.LoadAllLastFiredAsync(dict);
+        await _schedulerRepo.LoadAllLastFiredAsync(dict);
 
         Assert.True((dict["notes/weekly"] - second).TotalSeconds < 1);
     }
@@ -262,7 +264,7 @@ public class SqliteRepositoryTests : IAsyncLifetime
     public async Task LoadAllLastFired_EmptyTable_NoEntries()
     {
         var dict = new Dictionary<string, DateTimeOffset>();
-        await _repo.LoadAllLastFiredAsync(dict);
+        await _schedulerRepo.LoadAllLastFiredAsync(dict);
         Assert.Empty(dict);
     }
 

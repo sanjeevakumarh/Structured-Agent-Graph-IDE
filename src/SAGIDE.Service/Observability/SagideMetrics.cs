@@ -3,7 +3,7 @@ using System.Diagnostics.Metrics;
 namespace SAGIDE.Service.Observability;
 
 /// <summary>
-/// Central metrics hub for the SAGIDE service (O2).
+/// Central metrics hub for the SAGIDE service.
 ///
 /// Uses <see cref="System.Diagnostics.Metrics.Meter"/> so values are automatically
 /// available to any registered <see cref="MeterListener"/> (e.g. an OpenTelemetry SDK,

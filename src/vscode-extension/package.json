@@ -166,6 +166,16 @@
         "command": "sagIDE.refreshPromptLibrary",
         "title": "SAG: Refresh Prompt Library",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "sagIDE.openSkillComposer",
+        "title": "SAG: Open Skill Composer",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "sagIDE.refreshSkillLibrary",
+        "title": "SAG: Refresh Skill Library",
+        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -198,6 +208,10 @@
         {
           "id": "sagIDE.promptLibrary",
           "name": "Prompt Library"
+        },
+        {
+          "id": "sagIDE.skillLibrary",
+          "name": "Skill Library"
         }
       ]
     },
@@ -236,6 +250,16 @@
         {
           "command": "sagIDE.refreshPromptLibrary",
           "when": "view == sagIDE.promptLibrary",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sagIDE.openSkillComposer",
+          "when": "view == sagIDE.skillLibrary",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sagIDE.refreshSkillLibrary",
+          "when": "view == sagIDE.skillLibrary",
           "group": "navigation@2"
         }
       ],
@@ -311,6 +335,11 @@
           "command": "sagIDE.editPrompt",
           "when": "view == sagIDE.promptLibrary && viewItem == promptItem",
           "group": "inline@2"
+        },
+        {
+          "command": "sagIDE.openSkillComposer",
+          "when": "view == sagIDE.skillLibrary && viewItem == skillItem",
+          "group": "inline"
         }
       ]
     },

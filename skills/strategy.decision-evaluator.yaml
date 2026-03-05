@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: decision-evaluator
+version: 2
+domain: strategy
+protocol_implements: [Analyzable]
+
+description: >
+  Evaluates multiple options using trade-offs, expected value,
+  downside risk, and reversibility. Produces a structured comparison
+  matrix and a clear recommendation with explicit assumptions stated.
+
+inputs:
+  options:
+    type: string
+    required: true
+    description: >
+      The options under consideration, with any known data about each
+      (cost, risk, timeline, dependencies).
+  decision_context:
+    type: string
+    required: false
+    description: Goal, constraints, stakeholders, urgency, and what "good" looks like.
+  evaluation_criteria:
+    type: string
+    required: false
+    description: Specific dimensions to weight (e.g. cost 40%, speed 30%, risk 30%).
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Decision Context, ## Options Matrix,
+    ## Trade-off Analysis, ## Reversibility & Downside Risk,
+    ## Expected Value, ## Recommendation, ## Assumptions.
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, structured_output]
+    context_window_min: 16k
+
+parameters:
+  options: ""
+  decision_context: ""
+  evaluation_criteria: ""
+  output_var: decision_result
+
+implementation:
+  - name: evaluate
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    section_title: "Decision Evaluation"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Decision Context" — no preamble.
+
+      Options provided: {{ if parameters.options == "" }}MISSING — output "EVALUATION FAILURE: No options provided." and stop.{{ else }}provided below.{{ end }}
+
+      Options:
+      {{parameters.options}}
+
+      Decision context: {{parameters.decision_context ?? "Not specified — state assumptions"}}
+      Evaluation criteria: {{parameters.evaluation_criteria ?? "Not specified — use: impact, cost, risk, speed, reversibility"}}
+
+      ---
+      Produce a decision evaluation using exactly these headings:
+
+      ## Decision Context
+      Restate: what decision is being made, why it matters, and what success looks like.
+      State any assumptions made due to missing context.
+
+      ## Options Matrix
+      | Option | Cost | Speed | Risk | Reversibility | Strategic Fit |
+      |---|---|---|---|---|---|
+      Rate each dimension: High/Med/Low or a relative score.
+      Add a "Weight × Score" column if evaluation_criteria provided weights.
+
+      ## Trade-off Analysis
+      For each option: the single strongest argument FOR and AGAINST.
+      Where options conflict on a key dimension, explain the tension.
+
+      ## Reversibility & Downside Risk
+      For each option:
+      - Reversibility: Fully reversible / Partially reversible / Irreversible
+      - Worst-case outcome if this option fails
+      - Probability of worst case: High / Med / Low (state basis)
+
+      ## Expected Value
+      If quantitative data was provided, compute weighted expected value.
+      If not: rank options qualitatively with a brief rationale.
+      Be explicit: "Based on [X] I rank [A] > [B] > [C] because..."
+
+      ## Recommendation
+      **Recommended option: [Name]**
+      2–3 sentences explaining why this option best fits the context.
+      State the single biggest assumption this recommendation depends on.
+
+      ## Assumptions
+      List every assumption made where input data was absent.
+      If any assumption is wrong, state which option would change and why.
+
+      Rules:
+      - Base analysis only on the provided options and context
+      - Never invent options not described in the input
+      - Prefer reversible options under uncertainty — state when this applies
+    output_var: "{{parameters.output_var}}"

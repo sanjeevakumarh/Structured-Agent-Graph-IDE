@@ -1,0 +1,103 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: compliance-control-mapper
+version: 2
+domain: security
+protocol_implements: [Analyzable]
+
+description: >
+  Maps system practices and controls to a named regulatory framework
+  (SOC2, ISO 27001, HIPAA, GDPR, PCI-DSS, NIST CSF). Identifies gaps,
+  scores control maturity, and generates an evidence requirements checklist.
+
+inputs:
+  system_controls:
+    type: string
+    required: true
+    description: >
+      Description of existing controls, policies, technical safeguards,
+      and operational practices (free-form or structured).
+  framework:
+    type: string
+    required: true
+    description: "Target framework: SOC2 / ISO27001 / HIPAA / GDPR / PCI-DSS / NIST-CSF"
+  scope:
+    type: string
+    required: false
+    description: System or business process in scope (e.g. payment processing, HR data).
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown with ## Scope & Framework, ## Control Mapping Table,
+    ## Gaps Identified, ## Risk Exposure, ## Remediation Plan,
+    ## Evidence Requirements Checklist.
+
+capability_requirements:
+  critic:
+    needs: [regulatory_reasoning, structured_analysis]
+    context_window_min: 16k
+
+parameters:
+  system_controls: ""
+  framework: ""
+  scope: ""
+  output_var: compliance_mapping
+
+implementation:
+  - name: map
+    type: llm_per_section
+    model: "{{capability.critic}}"
+    max_sections: "1"
+    section_title: "Compliance Mapping"
+    section_analysis_prompt: |
+      ⚠ OUTPUT RULE: your response MUST start with "## Scope & Framework" — no preamble.
+
+      Inputs check:
+      {{ if parameters.system_controls == "" }}MISSING system_controls — output "MAPPING FAILURE: No system controls provided." and stop.{{ end }}
+      {{ if parameters.framework == "" }}MISSING framework — output "MAPPING FAILURE: No compliance framework specified." and stop.{{ end }}
+
+      Framework: {{parameters.framework}}
+      Scope: {{parameters.scope ?? "Not specified — apply to all described controls"}}
+
+      Existing controls:
+      {{parameters.system_controls}}
+
+      ---
+      Produce a compliance mapping using exactly these headings:
+
+      ## Scope & Framework
+      State: which framework, which version (e.g. SOC2 Type II, ISO 27001:2022),
+      and what system/process is in scope.
+
+      ## Control Mapping Table
+      | Framework Control | Control ID | Status | Evidence of Compliance | Gaps |
+      |---|---|---|---|---|
+      Status: COMPLIANT / PARTIAL / NON-COMPLIANT / NOT-APPLICABLE.
+      Map every control mentioned in the system_controls to the relevant framework domain.
+      If a framework control has no matching evidence, mark NON-COMPLIANT.
+
+      ## Gaps Identified
+      For each NON-COMPLIANT or PARTIAL control:
+      - Control: [framework control ID and name]
+      - Gap: [specific missing practice or evidence]
+      - Risk: High / Medium / Low
+      - Regulatory consequence: [fine exposure / audit finding / breach liability]
+
+      ## Risk Exposure
+      Aggregate risk by domain (Access Control, Data Protection, Incident Response, etc.).
+      Overall compliance posture: READY / NEEDS_WORK / NOT_READY.
+
+      ## Remediation Plan
+      | Action | Priority | Owner Role | Estimated Effort |
+      |---|---|---|---|
+      Order by risk. Effort: Hours / Days / Weeks / Months.
+
+      ## Evidence Requirements Checklist
+      For each COMPLIANT or PARTIAL control: list the specific artifacts needed for audit.
+      Format: [ ] Policy document / [ ] Access log sample / [ ] Training record / etc.
+
+      Rules:
+      - Map ONLY to the specified framework — do not introduce other frameworks
+      - Ground every compliance assertion in the provided system_controls
+      - Write "No evidence provided" for controls with no matching input
+    output_var: "{{parameters.output_var}}"

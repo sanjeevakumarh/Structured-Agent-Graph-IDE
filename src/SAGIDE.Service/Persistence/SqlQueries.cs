@@ -150,6 +150,71 @@ internal static class SqlQueries
         CREATE INDEX IF NOT EXISTS idx_wf_status ON workflow_instances(status);
         """;
 
+    // ── model_perf_samples ────────────────────────────────────────────────────
+
+    public const string CreateModelPerfTable = """
+        CREATE TABLE IF NOT EXISTS model_perf_samples (
+            id            TEXT PRIMARY KEY,
+            provider      TEXT NOT NULL,
+            model_id      TEXT NOT NULL,
+            server_alias  TEXT NOT NULL,
+            started_at    TEXT NOT NULL,
+            latency_ms    INTEGER NOT NULL,
+            tokens_input  INTEGER NOT NULL DEFAULT 0,
+            tokens_output INTEGER NOT NULL DEFAULT 0,
+            status        TEXT NOT NULL,
+            error_code    TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_perf_model_alias_started
+            ON model_perf_samples(model_id, server_alias, started_at);
+        """;
+
+    public const string InsertModelPerfSample = """
+        INSERT INTO model_perf_samples
+            (id, provider, model_id, server_alias, started_at, latency_ms,
+             tokens_input, tokens_output, status, error_code)
+        VALUES
+            (@id, @provider, @modelId, @serverAlias, @startedAt, @latencyMs,
+             @tokensInput, @tokensOutput, @status, @errorCode)
+        ON CONFLICT(id) DO NOTHING
+        """;
+
+    // ── model_quality_samples (Phase C) ───────────────────────────────────────
+
+    public const string CreateModelQualityTable = """
+        CREATE TABLE IF NOT EXISTS model_quality_samples (
+            id                TEXT PRIMARY KEY,
+            provider          TEXT NOT NULL,
+            model_id          TEXT NOT NULL,
+            server_alias      TEXT NOT NULL,
+            scored_at         TEXT NOT NULL,
+            score             REAL NOT NULL,
+            reference_task_id TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_quality_model_alias_scored
+            ON model_quality_samples(model_id, server_alias, scored_at);
+        """;
+
+    public const string InsertModelQualitySample = """
+        INSERT INTO model_quality_samples
+            (id, provider, model_id, server_alias, scored_at, score, reference_task_id)
+        VALUES
+            (@id, @provider, @modelId, @serverAlias, @scoredAt, @score, @referenceTaskId)
+        ON CONFLICT(id) DO NOTHING
+        """;
+
+    public const string SelectRecentQualitySamples = """
+        SELECT id, provider, model_id, server_alias, scored_at, score, reference_task_id
+        FROM model_quality_samples
+        WHERE (@modelId IS NULL OR model_id = @modelId)
+          AND (@serverAlias IS NULL OR server_alias = @serverAlias)
+        ORDER BY scored_at DESC
+        LIMIT @limit
+        """;
+
+    public const string PruneOldQualitySamples =
+        "DELETE FROM model_quality_samples WHERE scored_at < @cutoff";
+
     // ── Schema migrations (idempotent ALTER TABLE) ────────────────────────────
 
     public static readonly string[] Migrations =

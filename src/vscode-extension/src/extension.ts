@@ -15,6 +15,8 @@ import { DiffApprovalPanel } from './views/DiffApprovalPanel';
 import { WorkflowExplorerProvider } from './views/WorkflowExplorerProvider';
 import { WorkflowGraphPanel } from './views/WorkflowGraphPanel';
 import { PromptLibraryProvider } from './views/PromptLibraryProvider';
+import { SkillLibraryProvider } from './views/SkillLibraryProvider';
+import { SkillComposerPanel } from './views/SkillComposerPanel';
 
 let connection: ServiceConnection;
 
@@ -31,6 +33,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const workflowExplorer  = new WorkflowExplorerProvider();
     const restBaseUrl       = Configuration.serviceUrl;
     const promptLibrary     = new PromptLibraryProvider(restBaseUrl);
+    const skillLibrary      = new SkillLibraryProvider(restBaseUrl);
 
     // Register tree views in sidebar
     context.subscriptions.push(
@@ -39,7 +42,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.registerTreeDataProvider('sagIDE.dlq', dlqTreeProvider),
         vscode.window.registerTreeDataProvider('sagIDE.workflowExplorer', workflowExplorer),
         vscode.window.registerTreeDataProvider('sagIDE.promptLibrary', promptLibrary),
+        vscode.window.registerTreeDataProvider('sagIDE.skillLibrary', skillLibrary),
         diagnosticsManager
+    );
+
+    // Skill composer: open the authoring-time skill DAG for a prompt
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.openSkillComposer',
+            (domain: string, name: string) => {
+                SkillComposerPanel.show(context, domain, name, restBaseUrl);
+            }
+        ),
+        vscode.commands.registerCommand('sagIDE.refreshSkillLibrary', () => {
+            skillLibrary.refresh();
+        })
     );
 
     // Create service connection (assigned to module-level var for deactivate())
@@ -200,6 +216,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         // Initial prompt library load (REST API — best-effort)
         promptLibrary.refresh().catch(() => { /* service may not be ready yet */ });
+
+        // Initial skill library load (REST API — best-effort)
+        skillLibrary.refresh().catch(() => { /* service may not be ready yet */ });
     } catch {
         log('Service not running — will reconnect when available');
     }

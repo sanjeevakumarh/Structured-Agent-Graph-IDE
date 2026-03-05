@@ -2,6 +2,8 @@ using System.Net;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using SAGIDE.Core.DTOs;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Rag;
@@ -348,5 +350,92 @@ public class SubtaskCoordinatorDataCollectionTests
             Assert.Contains("project context", result.SynthesizedOutput);
         }
         finally { File.Delete(path); }
+    }
+
+    // ── type: llm step ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Minimal fake that returns a deterministic task ID and immediately marks every
+    /// task Completed with a configurable Output string.
+    /// </summary>
+    private sealed class InstantTaskSubmitter(string output) : ITaskSubmissionService
+    {
+        private int _counter;
+        private readonly Dictionary<string, string> _results = new();
+
+        public Task<string> SubmitTaskAsync(AgentTask task, CancellationToken ct)
+        {
+            var id = $"llm-{Interlocked.Increment(ref _counter):D3}";
+            _results[id] = output;
+            return Task.FromResult(id);
+        }
+
+        public Task CancelTaskAsync(string taskId, CancellationToken ct) => Task.CompletedTask;
+
+        public TaskStatusResponse? GetTaskStatus(string taskId)
+        {
+            if (!_results.TryGetValue(taskId, out var text)) return null;
+            return new TaskStatusResponse
+            {
+                TaskId  = taskId,
+                Status  = AgentTaskStatus.Completed,
+                Result  = new AgentResult { TaskId = taskId, Success = true, Output = text },
+            };
+        }
+    }
+
+    private static SubtaskCoordinator MakeCoordinatorWithSubmitter(ITaskSubmissionService submitter)
+    {
+        var http    = new HttpClient(new FakeHandler());
+        var fetcher = new WebFetcher(http, NullLogger<WebFetcher>.Instance,
+                          rateLimitDelay: TimeSpan.Zero, cacheTtl: TimeSpan.FromHours(1));
+        var config  = new ConfigurationBuilder().Build();
+        var search  = new WebSearchAdapter(http, config, NullLogger<WebSearchAdapter>.Instance);
+
+        return new SubtaskCoordinator(submitter, fetcher, search, config,
+                   NullLogger<SubtaskCoordinator>.Instance);
+    }
+
+    [Fact]
+    public async Task LlmStep_NoPromptTemplate_ReturnsEmpty()
+    {
+        var step = new PromptDataCollectionStep
+        {
+            Name = "summarise", Type = "llm",
+            PromptTemplate = null, OutputVar = "summary"
+        };
+
+        // null! submitter is safe — SubmitTaskAsync is never called when template is missing
+        var result = await MakeCoordinator(new FakeHandler()).RunAsync(Prompt(step, "summary"));
+
+        Assert.Equal(string.Empty, result.SynthesizedOutput.Trim());
+    }
+
+    [Fact]
+    public async Task LlmStep_RendersTemplateAndReturnsTaskOutput()
+    {
+        const string LlmOutput = "entity inventory JSON here";
+        var submitter = new InstantTaskSubmitter(LlmOutput);
+
+        var step = new PromptDataCollectionStep
+        {
+            Name           = "entity_inventory",
+            Type           = "llm",
+            PromptTemplate = "Extract entities from: {{market_data}}",
+            OutputVar      = "entities",
+        };
+        var prompt = new PromptDefinition
+        {
+            Name           = "test",
+            Domain         = "research",
+            Variables      = new() { ["market_data"] = "ACME Corp revenue $5M [Source: FT 2024]" },
+            DataCollection = new PromptDataCollection { Steps = [step] },
+            Synthesis      = new PromptSynthesis { PromptTemplate = "{{ entities }}" },
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var result = await MakeCoordinatorWithSubmitter(submitter).RunAsync(prompt, ct: cts.Token);
+
+        Assert.Contains(LlmOutput, result.SynthesizedOutput);
     }
 }

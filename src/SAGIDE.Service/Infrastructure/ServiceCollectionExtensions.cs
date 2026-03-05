@@ -3,9 +3,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
 using SAGIDE.Core.Interfaces;
+using SAGIDE.Core.Models;
 using SAGIDE.Service.Agents;
 using SAGIDE.Service.ActivityLogging;
 using SAGIDE.Service.Communication;
+using SAGIDE.Service.Events;
 using SAGIDE.Service.Observability;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Persistence;
@@ -13,6 +15,7 @@ using SAGIDE.Service.Providers;
 using SAGIDE.Service.Prompts;
 using SAGIDE.Service.Rag;
 using SAGIDE.Service.Resilience;
+using SAGIDE.Service.Routing;
 
 namespace SAGIDE.Service.Infrastructure;
 
@@ -50,8 +53,8 @@ public static class ServiceCollectionExtensions
     {
         var dlqRetentionDays = cfg.GetValue("SAGIDE:Database:DlqRetentionDays", 7);
 
-        // SqliteTaskRepository implements all four persistence interfaces — register the concrete
-        // type first, then alias each interface to the same singleton instance.
+        // SqliteTaskRepository bootstraps the schema (InitializeAsync creates all tables).
+        // The three sibling repositories each cover one persistence concern and share the same DB file.
         services.AddSingleton<ITaskRepository>(sp =>
         {
             var repo = new SqliteTaskRepository(dbPath, sp.GetRequiredService<ILogger<SqliteTaskRepository>>());
@@ -59,11 +62,11 @@ public static class ServiceCollectionExtensions
             return repo;
         });
         services.AddSingleton<IActivityRepository>(sp =>
-            (IActivityRepository)sp.GetRequiredService<ITaskRepository>());
-        services.AddSingleton<IWorkflowRepository>(sp =>
-            (IWorkflowRepository)sp.GetRequiredService<ITaskRepository>());
-        services.AddSingleton<ISchedulerRepository>(sp =>
-            (ISchedulerRepository)sp.GetRequiredService<ITaskRepository>());
+            new SqliteActivityRepository(dbPath, sp.GetRequiredService<ILogger<SqliteActivityRepository>>()));
+        services.AddSingleton<IWorkflowRepository>(_ =>
+            new SqliteWorkflowRepository(dbPath));
+        services.AddSingleton<ISchedulerRepository>(_ =>
+            new SqliteSchedulerRepository(dbPath));
 
         // Activity logging
         services.AddSingleton<MarkdownGenerator>();
@@ -81,6 +84,24 @@ public static class ServiceCollectionExtensions
             dlqRetentionDays));
 
         services.AddSingleton<ResultParser>();
+
+        // Model performance tracking — prune old samples on startup
+        services.AddSingleton<IModelPerfRepository>(sp =>
+        {
+            var repo = new SqliteModelPerfRepository(dbPath);
+            var retentionDays = cfg.GetValue("SAGIDE:Routing:PerfRetentionDays", 3);
+            repo.PruneOldSamplesAsync(retentionDays).GetAwaiter().GetResult();
+            return repo;
+        });
+
+        // Model quality tracking — prune old samples on startup
+        services.AddSingleton<IModelQualityRepository>(sp =>
+        {
+            var repo = new SqliteModelQualityRepository(dbPath);
+            var retentionDays = cfg.GetValue("SAGIDE:Routing:QualityRetentionDays", 7);
+            repo.PruneOldSamplesAsync(retentionDays).GetAwaiter().GetResult();
+            return repo;
+        });
 
         return services;
     }
@@ -101,9 +122,13 @@ public static class ServiceCollectionExtensions
         // Pre-build logger factory so OllamaHostHealthMonitor can log before the container is ready.
         var loggerFactory = LoggerFactory.Create(b => b.AddSerilog());
 
+        // EndpointAliasResolver needs only IConfiguration — safe to create before the container.
+        var aliasResolver = new EndpointAliasResolver(cfg);
+        services.AddSingleton(aliasResolver);
+
         var ollamaUrls    = CollectOllamaBaseUrls(cfg);
         var ollamaMonitor = new OllamaHostHealthMonitor(
-            ollamaUrls, loggerFactory.CreateLogger<OllamaHostHealthMonitor>());
+            ollamaUrls, loggerFactory.CreateLogger<OllamaHostHealthMonitor>(), aliasResolver);
         services.AddSingleton(ollamaMonitor);
         services.AddHostedService(_ => ollamaMonitor);
 
@@ -136,11 +161,27 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton(new TaskQueue(maxTaskHistory));
 
+        // In-process event bus with per-handler exception isolation
+        services.AddSingleton<IEventBus, InProcessEventBus>();
+
+        // Per-provider circuit breaker (Closed → Open → HalfOpen)
+        var cbConfig = new Resilience.CircuitBreakerConfig();
+        cfg.GetSection("SAGIDE:Resilience:CircuitBreaker").Bind(cbConfig);
+        services.AddSingleton(cbConfig);
+        services.AddSingleton(sp => new Resilience.CircuitBreakerRegistry(
+            sp.GetRequiredService<Resilience.CircuitBreakerConfig>(),
+            sp.GetRequiredService<ILoggerFactory>()));
+
         // Metrics singleton — observable gauge callbacks resolved lazily via sp to avoid circular deps
         services.AddSingleton(sp => new SagideMetrics(
             queueDepth     : () => sp.GetRequiredService<TaskQueue>().PendingCount,
             dlqDepth       : () => sp.GetRequiredService<DeadLetterQueue>().Count,
             activeWorkflows: () => sp.GetService<WorkflowEngine>()?.ActiveInstanceCount ?? 0));
+
+        // PromptBuilder: extracted from AgentOrchestrator.BuildPrompt
+        services.AddSingleton(sp => new Providers.PromptBuilder(
+            maxFileSizeChars,
+            sp.GetRequiredService<ILogger<Providers.PromptBuilder>>()));
 
         // Register AgentOrchestrator as both its concrete type and the ITaskSubmissionService alias.
         // WorkflowEngine depends on ITaskSubmissionService — this breaks the circular dependency.
@@ -161,7 +202,14 @@ public static class ServiceCollectionExtensions
             maxFileSizeChars,
             sp.GetRequiredService<ProviderFactory>(),
             sp.GetRequiredService<LoggingConfig>(),
-            sp.GetRequiredService<SagideMetrics>()));
+            sp.GetRequiredService<SagideMetrics>(),
+            sp.GetRequiredService<Resilience.CircuitBreakerRegistry>(),
+            sp.GetRequiredService<IEventBus>(),
+            sp.GetRequiredService<Providers.PromptBuilder>(),
+            sp.GetService<Providers.OllamaHostHealthMonitor>(),
+            sp.GetService<IModelPerfRepository>(),
+            sp.GetService<EndpointAliasResolver>(),
+            sp.GetService<QualitySampler>()));
         services.AddSingleton<ITaskSubmissionService>(sp => sp.GetRequiredService<AgentOrchestrator>());
 
         services.AddSingleton<WorkflowDefinitionLoader>();
@@ -173,10 +221,33 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<WorkflowPolicyEngine>(),
             sp.GetRequiredService<GitService>(),
             sp.GetRequiredService<ILogger<WorkflowEngine>>(),
-            sp.GetService<IWorkflowRepository>()));
+            sp.GetService<IWorkflowRepository>(),
+            sp.GetRequiredService<IEventBus>(),
+            sp.GetRequiredService<ILoggerFactory>()));
+
+        // RoutingConfig + ModelRoutingHints (hints scored from cached perf data)
+        var routingConfig = new RoutingConfig();
+        cfg.GetSection("SAGIDE:Routing").Bind(routingConfig);
+        services.AddSingleton(routingConfig);
+        services.AddSingleton<ModelRoutingHints>(sp => new ModelRoutingHints(
+            sp.GetService<IModelPerfRepository>(),
+            sp.GetRequiredService<EndpointAliasResolver>(),
+            sp.GetRequiredService<RoutingConfig>(),
+            sp.GetRequiredService<ILogger<ModelRoutingHints>>()));
+
+        // QualitySampler — idle-capacity LLM output quality scoring via Claude Sonnet
+        services.AddSingleton<QualitySampler>(sp => new QualitySampler(
+            sp.GetRequiredService<RoutingConfig>(),
+            sp.GetRequiredService<IModelQualityRepository>(),
+            sp.GetRequiredService<ProviderFactory>(),
+            sp.GetRequiredService<EndpointAliasResolver>(),
+            sp.GetRequiredService<TaskQueue>(),
+            sp.GetRequiredService<PromptRegistry>(),
+            sp.GetRequiredService<ILogger<QualitySampler>>()));
 
         services.AddSingleton<SubtaskCoordinator>();
         services.AddSingleton<PromptRegistry>();
+        services.AddSingleton<SkillRegistry>();
         services.AddHostedService<Scheduling.SchedulerService>();
 
         return services;

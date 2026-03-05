@@ -152,6 +152,64 @@ public class PromptTemplateEngineTests
         Assert.Equal(string.Empty, Resolve(string.Empty));
     }
 
+    // ── Nested Dictionary access (model_preference) ────────────────────────
+
+    [Fact]
+    public void RenderRaw_NestedDictionary_ResolvesDeepKeys()
+    {
+        var vars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        var mp = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["orchestrator"] = "ollama/qwen2.5:14b@workstation",
+            ["subtasks"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["analyst"] = "ollama/llama3.1:8b@mini",
+            },
+        };
+        vars["model_preference"] = mp;
+
+        var result = PromptTemplate.RenderRaw("{{model_preference.subtasks.analyst}}", vars);
+        Assert.Equal("ollama/llama3.1:8b@mini", result);
+    }
+
+    [Fact]
+    public void RenderRaw_NestedDictionary_IfElseFallsThrough()
+    {
+        var vars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["analyst_model_override"] = "",
+            ["model_preference"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["subtasks"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["analyst"] = "ollama/llama3.1:8b@mini",
+                },
+            },
+        };
+
+        // Call Scriban directly (bypass RenderRaw's silent catch) to see the raw exception
+        var templateText = "{{ if analyst_model_override }}{{analyst_model_override}}{{ else }}LITERAL{{ end }}";
+        var template = Scriban.Template.Parse(templateText);
+        Assert.False(template.HasErrors, $"Parse errors: {string.Join("; ", template.Messages)}");
+
+        var ctx = new Scriban.TemplateContext { MemberRenamer = m => m.Name };
+        var globals = new Scriban.Runtime.ScriptObject();
+        foreach (var kv in vars)
+            globals[kv.Key] = kv.Value;
+        ctx.PushGlobal(globals);
+
+        var result = template.Render(ctx);
+
+        // Scriban treats "" as TRUTHY — empty string passes {{ if var }}
+        // Correct idiom: {{ if var != "" }}
+        var fixedTemplate = Scriban.Template.Parse(
+            "{{ if analyst_model_override != \"\" }}{{analyst_model_override}}{{ else }}LITERAL{{ end }}");
+        var fixedResult = fixedTemplate.Render(ctx).Trim();
+
+        Assert.Equal("", result.Trim());        // Confirms bug: "" is truthy → if-branch outputs ""
+        Assert.Equal("LITERAL", fixedResult);   // Fix: explicit != "" check
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static string Resolve(

@@ -16,12 +16,16 @@ public class EnvironmentLeakTests
     // Logical aliases defined in appsettings.json — the ONLY names permitted in @machine notation
     private static readonly HashSet<string> ApprovedAliases =
     [
+        "localhost",
+        "workstation",
+        "mini",
+        "edge",
+        "orin",
     ];
 
     // Real hostnames / usernames that must never appear in shared files
     private static readonly string[] ForbiddenPatterns =
     [
-
     ];
 
     // Directories that are shared (scanned for leaks)

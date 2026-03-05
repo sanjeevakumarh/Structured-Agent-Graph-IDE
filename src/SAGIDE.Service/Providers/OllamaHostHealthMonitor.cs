@@ -2,6 +2,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using SAGIDE.Service.Routing;
 
 namespace SAGIDE.Service.Providers;
 
@@ -21,6 +22,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     private readonly ILogger<OllamaHostHealthMonitor> _logger;
     private readonly ConcurrentDictionary<string, HostState> _state = new();
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
+    private readonly EndpointAliasResolver? _aliasResolver;
 
     private sealed record HostState(
         bool IsReachable,
@@ -29,10 +31,12 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
 
     public OllamaHostHealthMonitor(
         IEnumerable<string> knownUrls,
-        ILogger<OllamaHostHealthMonitor> logger)
+        ILogger<OllamaHostHealthMonitor> logger,
+        EndpointAliasResolver? aliasResolver = null)
     {
-        _logger  = logger;
-        _allUrls = knownUrls.Select(u => u.TrimEnd('/')).Distinct().ToList();
+        _logger        = logger;
+        _aliasResolver = aliasResolver;
+        _allUrls       = knownUrls.Select(u => u.TrimEnd('/')).Distinct().ToList();
 
         // Initialize all hosts as unknown until the first poll
         foreach (var url in _allUrls)
@@ -45,9 +49,12 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     {
         if (_allUrls.Count == 0) return;
 
+        var displayUrls = _aliasResolver is not null
+            ? string.Join(", ", _allUrls.Select(u => _aliasResolver.GetAlias(u)))
+            : string.Join(", ", _allUrls);
         _logger.LogInformation(
-            "OllamaHostHealthMonitor started — tracking {Count} server(s): {Urls}",
-            _allUrls.Count, string.Join(", ", _allUrls));
+            "OllamaHostHealthMonitor started — tracking {Count} server(s): {Servers}",
+            _allUrls.Count, displayUrls);
 
         // Poll immediately so routing is available before the first workflow step
         await PollAllAsync(ct);
@@ -82,8 +89,10 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
         if (warmHost is not null)
         {
             _logger.LogInformation(
-                "OllamaHealthMonitor: routing {Model} to warm host {Url} (preferred {Pref} unreachable)",
-                modelId, warmHost, preferredUrl);
+                "OllamaHealthMonitor: routing {Model} to warm host {Server} (preferred {Pref} unreachable)",
+                modelId,
+                _aliasResolver?.GetAlias(warmHost) ?? warmHost,
+                _aliasResolver?.GetAlias(preferredUrl) ?? preferredUrl);
             return warmHost;
         }
 
@@ -93,11 +102,17 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
         if (anyReachable is not null)
         {
             _logger.LogInformation(
-                "OllamaHealthMonitor: routing {Model} to fallback host {Url} (preferred {Pref} unreachable, no warm host)",
-                modelId, anyReachable, preferredUrl);
+                "OllamaHealthMonitor: routing {Model} to fallback host {Server} (preferred {Pref} unreachable, no warm host)",
+                modelId,
+                _aliasResolver?.GetAlias(anyReachable) ?? anyReachable,
+                _aliasResolver?.GetAlias(preferredUrl) ?? preferredUrl);
         }
         return anyReachable;
     }
+
+    /// <summary>Returns all Ollama base URLs that were reachable on the last poll.</summary>
+    public IReadOnlyList<string> GetAllReachableHosts()
+        => _allUrls.Where(u => _state.TryGetValue(u, out var s) && s.IsReachable).ToList();
 
     /// <summary>Returns true if the given server was reachable on the last poll.</summary>
     public bool IsReachable(string baseUrl)
@@ -149,23 +164,25 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
             var wasReachable = _state.TryGetValue(baseUrl, out var prev) && prev.IsReachable;
             _state[baseUrl] = new HostState(true, models, DateTime.UtcNow);
 
+            var serverLabel = _aliasResolver?.GetAlias(baseUrl) ?? baseUrl;
             if (!wasReachable)
                 _logger.LogInformation(
-                    "Ollama {Url} is now reachable ({Count} model(s) loaded: {Models})",
-                    baseUrl, models.Count, string.Join(", ", models));
+                    "Ollama {Server} is now reachable ({Count} model(s) loaded: {Models})",
+                    serverLabel, models.Count, string.Join(", ", models));
             else
                 _logger.LogDebug(
-                    "Ollama {Url}: {Count} model(s) in VRAM: {Models}",
-                    baseUrl, models.Count, string.Join(", ", models));
+                    "Ollama {Server}: {Count} model(s) in VRAM: {Models}",
+                    serverLabel, models.Count, string.Join(", ", models));
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             var wasReachable = _state.TryGetValue(baseUrl, out var prev) && prev.IsReachable;
             _state[baseUrl] = new HostState(false, [], DateTime.UtcNow);
+            var serverLabel = _aliasResolver?.GetAlias(baseUrl) ?? baseUrl;
             if (wasReachable)
-                _logger.LogWarning("Ollama {Url} became unreachable: {Msg}", baseUrl, ex.Message);
+                _logger.LogWarning("Ollama {Server} became unreachable: {Msg}", serverLabel, ex.Message);
             else
-                _logger.LogDebug("Ollama {Url}: unreachable ({Msg})", baseUrl, ex.Message);
+                _logger.LogDebug("Ollama {Server}: unreachable ({Msg})", serverLabel, ex.Message);
         }
     }
 }

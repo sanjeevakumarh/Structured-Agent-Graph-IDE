@@ -1,0 +1,264 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: rfc-spec-writer
+version: 1
+domain: engineering
+protocol_implements: [Analyzable]
+
+description: >
+  Generates a technical RFC or specification document from a problem statement.
+  Structures requirements using RFC 2119 keywords (MUST/SHOULD/MAY), documents
+  the proposed solution with sufficient detail for implementation, evaluates
+  alternatives, and surfaces open questions requiring stakeholder input.
+  Fails loudly when the problem statement is absent — outputs
+  "RFC FAILURE: No problem statement provided." and stops.
+
+inputs:
+  problem:
+    type: string
+    required: true
+    description: What needs to be solved — the core problem or opportunity.
+  scope:
+    type: string
+    required: false
+    description: Boundaries of the solution — what is in and out of scope.
+  constraints:
+    type: string
+    required: false
+    description: Technical, timeline, budget, compatibility, or organizational constraints.
+  audience:
+    type: string
+    required: false
+    description: Who will implement and review this RFC — affects technical depth.
+  prior_art:
+    type: string
+    required: false
+    description: Existing solutions, related RFCs, research, or competitor approaches.
+
+outputs_schema:
+  type: object
+  required: [abstract, requirements, proposed_solution, alternatives, open_questions]
+  properties:
+    abstract:
+      type: string
+      description: One-paragraph summary of the problem and proposed solution
+    requirements:
+      type: string
+      description: Structured requirements using RFC 2119 keywords (MUST/SHOULD/MAY)
+    proposed_solution:
+      type: string
+      description: Detailed technical approach with enough depth for implementation
+    alternatives:
+      type: string
+      description: Other approaches considered and why they were rejected
+    open_questions:
+      type: string
+      description: Unresolved design decisions needing stakeholder input
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, technical_analysis, structured_output]
+    context_window_min: 16k
+
+parameters:
+  problem: ""
+  scope: ""
+  constraints: ""
+  audience: ""
+  prior_art: ""
+  output_var: rfc_output
+
+implementation:
+  - name: generate_rfc
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "7"
+    planning_prompt: |
+      You are a senior engineer writing a technical RFC.
+
+      Problem: {{parameters.problem}}
+      {{ if parameters.scope != "" -}}
+      Scope: {{parameters.scope}}
+      {{ end -}}
+      {{ if parameters.constraints != "" -}}
+      Constraints: {{parameters.constraints}}
+      {{ end -}}
+      {{ if parameters.prior_art != "" -}}
+      Prior art: {{parameters.prior_art}}
+      {{ end -}}
+
+      Generate exactly these section titles (one per line, no numbering):
+      Abstract
+      Problem Statement
+      Requirements
+      Proposed Solution
+      Alternatives Considered
+      Migration & Rollout
+      Open Questions
+
+      Return ONLY the section titles, one per line.
+    section_analysis_prompt: |
+      You are a senior engineer writing the "{{section_name}}" section of a technical RFC.
+      {{blocks.no_preamble}}
+
+      ## Input Verification
+      Problem provided: {{ if parameters.problem == "" }}NO — output "RFC FAILURE: No problem statement provided." and stop.{{ else }}YES — proceed.{{ end }}
+
+      Problem: {{parameters.problem}}
+      Scope: {{parameters.scope ?? "Not specified — derive reasonable boundaries from the problem"}}
+      Constraints: {{parameters.constraints ?? "None specified"}}
+      Audience: {{parameters.audience ?? "Engineering team"}}
+      {{ if parameters.prior_art != "" -}}
+      Prior art:
+      ─────────────────────────────────────────────
+      {{parameters.prior_art}}
+      ─────────────────────────────────────────────
+      {{ end -}}
+
+      ---
+
+      ### {{section_name}}
+
+      {{ if section_name == "Abstract" -}}
+      Write exactly ONE paragraph (4–6 sentences) that covers:
+      1. The problem being solved and why it matters now.
+      2. The proposed approach at a high level.
+      3. The key trade-off or design choice this RFC makes.
+      4. The expected outcome if this RFC is implemented.
+
+      This paragraph MUST be understandable by someone who reads only the
+      abstract. Avoid implementation details — those belong in Proposed Solution.
+      {{ else if section_name == "Problem Statement" -}}
+      Provide a detailed problem description:
+
+      **Current state**: How things work today and why that is insufficient.
+      **Impact**: Who is affected and how (users, developers, operations).
+      Quantify impact where possible: latency, error rates, development velocity,
+      customer churn, cost. If no quantitative data is available, write
+      "[IMPACT NOT QUANTIFIED — recommend gathering metrics before implementation]".
+
+      **Root cause**: The underlying technical or process issue, not just symptoms.
+      **Trigger**: Why this problem needs to be solved now (incident, scale limit,
+      compliance deadline, strategic priority).
+
+      Every claim in this section MUST be grounded in the provided problem
+      statement or constraints. Do NOT invent impact metrics.
+      {{ else if section_name == "Requirements" -}}
+      List requirements using RFC 2119 keywords. Group by category:
+
+      **Functional Requirements**:
+      - FR-1: The system MUST [requirement]. *Rationale: [why]*
+      - FR-2: The system SHOULD [requirement]. *Rationale: [why]*
+      - FR-3: The system MAY [requirement]. *Rationale: [why]*
+
+      **Non-Functional Requirements**:
+      - NFR-1: The system MUST [performance/reliability/security requirement].
+      - NFR-2: The system SHOULD [operational requirement].
+
+      **Constraints**:
+      - C-1: The implementation MUST NOT [constraint]. *Source: [origin]*
+      {{ if parameters.constraints != "" -}}
+      Incorporate all constraints from: {{parameters.constraints}}
+      {{ end -}}
+
+      {{blocks.rfc_2119_keywords}}
+
+      Number every requirement (FR-N, NFR-N, C-N) so they can be referenced
+      in the Proposed Solution and in code reviews.
+      {{ else if section_name == "Proposed Solution" -}}
+      Describe the technical approach in sufficient detail for implementation:
+
+      **Architecture**: High-level component diagram (ASCII or mermaid).
+      Which components change? Which are new? Which are untouched?
+
+      **Detailed design**: For each changed or new component:
+      - Responsibility and interface contract
+      - Data model changes (schema additions, migrations)
+      - API surface changes (new endpoints, modified signatures)
+      - Key algorithms or logic (pseudocode for non-trivial parts)
+
+      **Requirement traceability**: Reference which requirements (FR-N, NFR-N)
+      each component satisfies. Every MUST requirement MUST appear at least once.
+
+      **Error handling**: How does the system behave when this feature fails?
+      Partial failure modes, retry strategies, circuit breakers, fallbacks.
+
+      **Observability**: What metrics, logs, and traces are added?
+      What alerts fire and at what thresholds?
+
+      If scope was not specified, state assumptions about boundaries.
+      {{ else if section_name == "Alternatives Considered" -}}
+      For each alternative approach:
+
+      **Alternative N: [Name]**
+      - **Description**: 2–3 sentences on how this approach works.
+      - **Advantages**: What this approach does better than the proposed solution.
+      - **Disadvantages**: What makes this approach inferior for our context.
+      - **Rejection reason**: The single most important reason this was not chosen.
+
+      {{ if parameters.prior_art != "" -}}
+      Prior art provided. For each referenced system or approach, explicitly
+      state what was borrowed, what was adapted, and what was rejected.
+      {{ end -}}
+
+      Include at minimum:
+      1. "Do nothing" — what happens if we do not solve this problem.
+      2. At least one genuinely different technical approach (not a minor variant).
+
+      Do NOT create straw-man alternatives that are obviously inferior —
+      every alternative SHOULD have at least one genuine advantage over
+      the proposed solution.
+      {{ else if section_name == "Migration & Rollout" -}}
+      Define how this change gets to production safely:
+
+      **Rollout phases**:
+      - Phase 1: [scope, timeline, success criteria]
+      - Phase 2: [scope, timeline, success criteria]
+      - (add phases as needed)
+
+      **Backwards compatibility**:
+      - Does this break existing clients or APIs? If yes, detail the
+        deprecation timeline (MUST follow semver if applicable).
+      - Database migrations: are they reversible? Online or offline?
+
+      **Feature flags**: What flags control the rollout? Default state?
+      Kill-switch behavior?
+
+      **Rollback strategy**: If this change causes issues in production:
+      - Can it be rolled back with a deploy revert? (preferred)
+      - Does rollback require a database migration?
+      - What is the maximum acceptable rollback time?
+
+      **Monitoring during rollout**: What dashboards and alerts SHOULD
+      be watched during each phase? Define "rollback trigger" thresholds.
+
+      If the change is purely additive and non-breaking, state:
+      "Single-phase deploy. No migration required. Rollback via deploy revert."
+      {{ else if section_name == "Open Questions" -}}
+      List every unresolved design decision that requires stakeholder input:
+
+      For each open question:
+      - **OQ-N**: [The question]
+        - **Context**: Why this question matters and what depends on the answer.
+        - **Options**: The viable answers (2–3 options, briefly described).
+        - **Recommended default**: What to proceed with if no input is received.
+        - **Owner**: Who SHOULD make this decision (role, not person name).
+        - **Deadline**: When this decision is needed to avoid blocking implementation.
+
+      Also include:
+      - **Unknowns**: Things we know we do not know.
+      - **Risks**: Identified risks that the reviewers SHOULD consider.
+
+      If no open questions exist (all decisions are deterministic from the
+      requirements), write: "No open questions — all design decisions are
+      derivable from the stated requirements and constraints."
+
+      Do NOT manufacture artificial questions — only surface genuine ambiguity
+      or missing information from the input.
+      {{ end -}}
+
+      Output only the section content for "{{section_name}}". No preamble.
+
+      ### GATE_SIGNAL
+      SIGNAL: [READY_FOR_REVIEW | NEEDS_INPUT | DRAFT]
+      RATIONALE: [one sentence — e.g. "3 open questions require stakeholder decisions before implementation"]
+    output_var: "{{parameters.output_var}}"

@@ -75,7 +75,7 @@ export class PromptLibraryProvider
 
     constructor(private readonly _restBaseUrl: string) {
         // Hot-reload: rebuild tree whenever a prompt YAML changes on disk
-        this._watcher = vscode.workspace.createFileSystemWatcher('**/prompts/**/*.yaml');
+        this._watcher = vscode.workspace.createFileSystemWatcher('**/prompts/*.yaml');
         const scheduleRefresh = () => {
             clearTimeout(this._refreshTimeout);
             // Debounce 500ms to avoid rapid consecutive refreshes on save

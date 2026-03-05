@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Resilience;
+using SAGIDE.Service.Routing;
 
 namespace SAGIDE.Service.Providers;
 
@@ -142,6 +143,17 @@ public class ProviderFactory
             }
         }
         return table;
+    }
+
+    /// <summary>
+    /// Wires routing hints into the Ollama provider after the DI container is built.
+    /// Called from Program.cs after builder.Build() — provider is eagerly created,
+    /// hints are DI-resolved singletons.
+    /// </summary>
+    public void SetRoutingHints(ModelRoutingHints? hints)
+    {
+        if (_providers.TryGetValue(ModelProvider.Ollama, out var p) && p is OllamaProvider ollama)
+            ollama.SetRoutingHints(hints);
     }
 
     public IAgentProvider? GetProvider(ModelProvider provider)

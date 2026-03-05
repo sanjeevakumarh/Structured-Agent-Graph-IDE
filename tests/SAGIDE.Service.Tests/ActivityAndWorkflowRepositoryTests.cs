@@ -6,22 +6,29 @@ using SAGIDE.Service.Persistence;
 namespace SAGIDE.Service.Tests;
 
 /// <summary>
-/// Integration tests for <see cref="SqliteTaskRepository"/> focusing on the
-/// <c>IActivityRepository</c> and <c>IWorkflowRepository</c> contracts.
-/// Uses a fresh temp-file SQLite database per test class.
+/// Integration tests for <see cref="SqliteActivityRepository"/> and
+/// <see cref="SqliteWorkflowRepository"/> (the IActivityRepository and
+/// IWorkflowRepository contracts).
+/// Uses a fresh temp-file SQLite database per test class; <see cref="SqliteTaskRepository"/>
+/// bootstraps the schema and handles the task-history FK needed by activity entries.
 /// </summary>
 public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
 {
     private string _dbPath = string.Empty;
-    private SqliteTaskRepository _repo = null!;
+    private SqliteTaskRepository      _repo         = null!; // schema init + task FK
+    private SqliteActivityRepository  _activityRepo = null!;
+    private SqliteWorkflowRepository  _wfRepo       = null!;
 
     // ── Setup / Teardown ──────────────────────────────────────────────────────
 
     public async Task InitializeAsync()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"sagide-repo-test-{Guid.NewGuid():N}.db");
-        _repo   = new SqliteTaskRepository(_dbPath, NullLogger<SqliteTaskRepository>.Instance);
-        await _repo.InitializeAsync();
+        _dbPath       = Path.Combine(Path.GetTempPath(), $"sagide-repo-test-{Guid.NewGuid():N}.db");
+        _repo         = new SqliteTaskRepository(_dbPath, NullLogger<SqliteTaskRepository>.Instance);
+        await _repo.InitializeAsync(); // creates all tables (including activity_log and workflow_instances)
+
+        _activityRepo = new SqliteActivityRepository(_dbPath, NullLogger<SqliteActivityRepository>.Instance);
+        _wfRepo       = new SqliteWorkflowRepository(_dbPath);
     }
 
     public Task DisposeAsync()
@@ -38,9 +45,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
     {
         var entry = MakeActivity("2026-02-24-10", ActivityType.AgentTask, "Ran code review");
 
-        await _repo.SaveActivityAsync(entry);
+        await _activityRepo.SaveActivityAsync(entry);
 
-        var results = await _repo.GetActivitiesByHourAsync(entry.WorkspacePath, "2026-02-24-10");
+        var results = await _activityRepo.GetActivitiesByHourAsync(entry.WorkspacePath, "2026-02-24-10");
 
         Assert.Single(results);
         Assert.Equal(entry.Id,           results[0].Id);
@@ -53,9 +60,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
     public async Task GetActivitiesByHour_WrongHour_ReturnsEmpty()
     {
         var entry = MakeActivity("2026-02-24-10", ActivityType.HumanAction, "Edit file");
-        await _repo.SaveActivityAsync(entry);
+        await _activityRepo.SaveActivityAsync(entry);
 
-        var results = await _repo.GetActivitiesByHourAsync(entry.WorkspacePath, "2026-02-24-11");
+        var results = await _activityRepo.GetActivitiesByHourAsync(entry.WorkspacePath, "2026-02-24-11");
 
         Assert.Empty(results);
     }
@@ -64,9 +71,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
     public async Task GetActivitiesByHour_WrongWorkspace_ReturnsEmpty()
     {
         var entry = MakeActivity("2026-02-24-10", ActivityType.AgentTask, "Some action");
-        await _repo.SaveActivityAsync(entry);
+        await _activityRepo.SaveActivityAsync(entry);
 
-        var results = await _repo.GetActivitiesByHourAsync("/other/workspace", "2026-02-24-10");
+        var results = await _activityRepo.GetActivitiesByHourAsync("/other/workspace", "2026-02-24-10");
 
         Assert.Empty(results);
     }
@@ -77,9 +84,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
         var entry = MakeActivity("2026-02-24-10", ActivityType.FileModified, "Edited files");
         entry.FilePaths = ["src/Foo.cs", "src/Bar.cs"];
 
-        await _repo.SaveActivityAsync(entry);
+        await _activityRepo.SaveActivityAsync(entry);
 
-        var results = await _repo.GetActivitiesByHourAsync(entry.WorkspacePath, "2026-02-24-10");
+        var results = await _activityRepo.GetActivitiesByHourAsync(entry.WorkspacePath, "2026-02-24-10");
 
         Assert.Equal(["src/Foo.cs", "src/Bar.cs"], results[0].FilePaths);
     }
@@ -91,9 +98,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
         var entry = MakeActivity("2026-02-24-10", ActivityType.SystemEvent, "Boot", ws);
         entry.Metadata = new Dictionary<string, string> { ["key"] = "value", ["count"] = "3" };
 
-        await _repo.SaveActivityAsync(entry);
+        await _activityRepo.SaveActivityAsync(entry);
 
-        var results = await _repo.GetActivitiesByHourAsync(ws, "2026-02-24-10");
+        var results = await _activityRepo.GetActivitiesByHourAsync(ws, "2026-02-24-10");
 
         Assert.Equal("value", results[0].Metadata["key"]);
         Assert.Equal("3",     results[0].Metadata["count"]);
@@ -113,9 +120,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
         entry.GitCommitHash = "abc1234567890";
         entry.Details       = """{"sha":"abc123"}""";
 
-        await _repo.SaveActivityAsync(entry);
+        await _activityRepo.SaveActivityAsync(entry);
 
-        var results = await _repo.GetActivitiesByHourAsync(ws, "2026-02-24-10");
+        var results = await _activityRepo.GetActivitiesByHourAsync(ws, "2026-02-24-10");
 
         Assert.Equal(task.Id,                results[0].TaskId);
         Assert.Equal("abc1234567890",        results[0].GitCommitHash);
@@ -132,11 +139,11 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
         var e2 = MakeActivityAt(ws, new DateTime(2026, 2, 24, 12, 0, 0, DateTimeKind.Utc));
         var e3 = MakeActivityAt(ws, new DateTime(2026, 2, 24, 14, 0, 0, DateTimeKind.Utc));
 
-        await _repo.SaveActivityAsync(e1);
-        await _repo.SaveActivityAsync(e2);
-        await _repo.SaveActivityAsync(e3);
+        await _activityRepo.SaveActivityAsync(e1);
+        await _activityRepo.SaveActivityAsync(e2);
+        await _activityRepo.SaveActivityAsync(e3);
 
-        var results = await _repo.GetActivitiesByTimeRangeAsync(ws,
+        var results = await _activityRepo.GetActivitiesByTimeRangeAsync(ws,
             new DateTime(2026, 2, 24, 9, 0, 0, DateTimeKind.Utc),
             new DateTime(2026, 2, 24, 13, 0, 0, DateTimeKind.Utc));
 
@@ -150,9 +157,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
         var ws = $"/ws/{Guid.NewGuid():N}";
         var e1 = MakeActivityAt(ws, new DateTime(2026, 2, 24, 8, 0, 0, DateTimeKind.Utc));
 
-        await _repo.SaveActivityAsync(e1);
+        await _activityRepo.SaveActivityAsync(e1);
 
-        var results = await _repo.GetActivitiesByTimeRangeAsync(ws,
+        var results = await _activityRepo.GetActivitiesByTimeRangeAsync(ws,
             new DateTime(2026, 2, 24, 10, 0, 0, DateTimeKind.Utc),
             new DateTime(2026, 2, 24, 12, 0, 0, DateTimeKind.Utc));
 
@@ -165,11 +172,11 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
     public async Task GetHourBuckets_ReturnsDistinctBuckets()
     {
         var ws = $"/ws/{Guid.NewGuid():N}";
-        await _repo.SaveActivityAsync(MakeActivity("2026-02-24-10", ActivityType.AgentTask, "a", ws));
-        await _repo.SaveActivityAsync(MakeActivity("2026-02-24-10", ActivityType.AgentTask, "b", ws));
-        await _repo.SaveActivityAsync(MakeActivity("2026-02-24-11", ActivityType.AgentTask, "c", ws));
+        await _activityRepo.SaveActivityAsync(MakeActivity("2026-02-24-10", ActivityType.AgentTask, "a", ws));
+        await _activityRepo.SaveActivityAsync(MakeActivity("2026-02-24-10", ActivityType.AgentTask, "b", ws));
+        await _activityRepo.SaveActivityAsync(MakeActivity("2026-02-24-11", ActivityType.AgentTask, "c", ws));
 
-        var buckets = await _repo.GetHourBucketsAsync(ws);
+        var buckets = await _activityRepo.GetHourBucketsAsync(ws);
 
         Assert.Equal(2, buckets.Count);
         Assert.Contains("2026-02-24-10", buckets);
@@ -189,8 +196,8 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             MarkdownEnabled    = true,
         };
 
-        await _repo.SaveConfigAsync(config);
-        var result = await _repo.GetConfigAsync(config.WorkspacePath);
+        await _activityRepo.SaveConfigAsync(config);
+        var result = await _activityRepo.GetConfigAsync(config.WorkspacePath);
 
         Assert.NotNull(result);
         Assert.Equal(config.WorkspacePath,      result.WorkspacePath);
@@ -202,7 +209,7 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
     [Fact]
     public async Task GetConfig_UnknownWorkspace_ReturnsNull()
     {
-        var result = await _repo.GetConfigAsync($"/does/not/exist/{Guid.NewGuid():N}");
+        var result = await _activityRepo.GetConfigAsync($"/does/not/exist/{Guid.NewGuid():N}");
         Assert.Null(result);
     }
 
@@ -217,7 +224,7 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             GitIntegrationMode = GitIntegrationMode.Disabled,
             MarkdownEnabled    = false,
         };
-        await _repo.SaveConfigAsync(initial);
+        await _activityRepo.SaveConfigAsync(initial);
 
         var updated = new ActivityLogConfig
         {
@@ -226,9 +233,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             GitIntegrationMode = GitIntegrationMode.GenerateMessages,
             MarkdownEnabled    = true,
         };
-        await _repo.SaveConfigAsync(updated);
+        await _activityRepo.SaveConfigAsync(updated);
 
-        var result = await _repo.GetConfigAsync(ws);
+        var result = await _activityRepo.GetConfigAsync(ws);
 
         Assert.NotNull(result);
         Assert.False(result.Enabled);
@@ -250,9 +257,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             InputContext = new Dictionary<string, string> { ["branch"] = "main" },
         };
 
-        await _repo.SaveWorkflowInstanceAsync(instance);
+        await _wfRepo.SaveWorkflowInstanceAsync(instance);
 
-        var running = await _repo.LoadRunningInstancesAsync();
+        var running = await _wfRepo.LoadRunningInstancesAsync();
 
         Assert.Contains(running, i => i.InstanceId == id);
         var loaded = running.First(i => i.InstanceId == id);
@@ -271,9 +278,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             IsPaused   = true,
         };
 
-        await _repo.SaveWorkflowInstanceAsync(paused);
+        await _wfRepo.SaveWorkflowInstanceAsync(paused);
 
-        var running = await _repo.LoadRunningInstancesAsync();
+        var running = await _wfRepo.LoadRunningInstancesAsync();
 
         Assert.Contains(running, i => i.InstanceId == id);
     }
@@ -289,9 +296,9 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             CompletedAt = DateTime.UtcNow,
         };
 
-        await _repo.SaveWorkflowInstanceAsync(completed);
+        await _wfRepo.SaveWorkflowInstanceAsync(completed);
 
-        var running = await _repo.LoadRunningInstancesAsync();
+        var running = await _wfRepo.LoadRunningInstancesAsync();
 
         Assert.DoesNotContain(running, i => i.InstanceId == id);
     }
@@ -306,10 +313,10 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             Status     = WorkflowStatus.Running,
         };
 
-        await _repo.SaveWorkflowInstanceAsync(instance);
-        await _repo.DeleteWorkflowInstanceAsync(id);
+        await _wfRepo.SaveWorkflowInstanceAsync(instance);
+        await _wfRepo.DeleteWorkflowInstanceAsync(id);
 
-        var running = await _repo.LoadRunningInstancesAsync();
+        var running = await _wfRepo.LoadRunningInstancesAsync();
 
         Assert.DoesNotContain(running, i => i.InstanceId == id);
     }
@@ -324,13 +331,13 @@ public class ActivityAndWorkflowRepositoryTests : IAsyncLifetime
             Status     = WorkflowStatus.Running,
         };
 
-        await _repo.SaveWorkflowInstanceAsync(instance);
+        await _wfRepo.SaveWorkflowInstanceAsync(instance);
 
         instance.Status      = WorkflowStatus.Completed;
         instance.CompletedAt = DateTime.UtcNow;
-        await _repo.SaveWorkflowInstanceAsync(instance);
+        await _wfRepo.SaveWorkflowInstanceAsync(instance);
 
-        var running = await _repo.LoadRunningInstancesAsync();
+        var running = await _wfRepo.LoadRunningInstancesAsync();
 
         // After update to Completed the instance should no longer be returned
         Assert.DoesNotContain(running, i => i.InstanceId == id);

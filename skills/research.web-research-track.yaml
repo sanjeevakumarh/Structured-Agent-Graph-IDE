@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: web-research-track
+version: 1
+domain: research
+protocol_implements: [Collectible]
+
+description: >
+  Generates targeted search queries via an LLM planner, executes them via web search,
+  and returns structured evidence. Parameterised by focus topic and number of queries.
+  The primary data-gathering primitive for research workflows.
+
+inputs:
+  focus:
+    type: string
+    required: true
+    description: The research focus topic (e.g. "market sizing and competitors for {{idea}}")
+  num_queries:
+    type: integer
+    required: false
+    description: Number of search queries to generate (default 5)
+  max_results:
+    type: integer
+    required: false
+    description: Max search results per query (default 4)
+  idea:
+    type: string
+    required: false
+    description: The core product idea — injected into queries for specificity
+  domain:
+    type: string
+    required: false
+    description: Product domain (e.g. software, hardware, services)
+  market:
+    type: string
+    required: false
+    description: Target market segment (e.g. enterprise, consumer)
+  query_guidance:
+    type: string
+    required: false
+    description: >
+      Optional topic-specific query requirements appended to the planning prompt
+      (e.g. bullet points specifying which angles must be covered). Enables callers to
+      specialise search focus without replacing the full prompt.
+
+outputs_schema:
+  type: string
+  description: >
+    Concatenated search results grouped by query. Each section headed "## Search: <query>".
+    Free-form text; structured extraction is the responsibility of the downstream analyst skill.
+
+capability_requirements:
+  fast_general:
+    needs: [instruction_following, structured_output]
+    context_window_min: 8k
+
+parameters:
+  focus: "{{idea}}"
+  num_queries: "6"
+  max_results: "4"
+  idea: "{{idea}}"
+  domain: "{{domain}}"
+  market: "{{market}}"
+  query_guidance: ""
+  output_var: research_results
+
+implementation:
+  - name: search
+    type: llm_queries
+    model: "{{capability.fast_general}}"
+    planning_prompt: |
+      Generate exactly {{parameters.num_queries}} targeted search queries for: {{parameters.focus}}
+      Domain: {{parameters.domain}} | Market: {{parameters.market}} | Date: {{date}}
+      {{- if parameters.query_guidance != "" }}
+      {{parameters.query_guidance}}
+      {{- end }}
+      Rules:
+      - Every query MUST reference the core concept from "{{parameters.idea}}" — no generic queries
+      - Include {{date}} or the current year in at least 3 queries
+      - Return ONLY a valid JSON array of exactly {{parameters.num_queries}} strings. No explanation, no markdown:
+      ["query1", "query2", ...]
+    limit: "{{parameters.max_results}}"
+    output_var: "{{parameters.output_var}}"

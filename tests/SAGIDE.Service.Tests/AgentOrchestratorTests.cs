@@ -8,7 +8,9 @@ using SAGIDE.Service.ActivityLogging;
 using SAGIDE.Service.Agents;
 using SAGIDE.Service.Communication;
 using SAGIDE.Service.Communication.Messages;
+using SAGIDE.Service.Events;
 using SAGIDE.Service.Orchestrator;
+using SAGIDE.Service.Providers;
 using SAGIDE.Service.Resilience;
 
 namespace SAGIDE.Service.Tests;
@@ -34,6 +36,29 @@ internal sealed class FakeActivityRepository : IActivityRepository
     public Task SaveConfigAsync(ActivityLogConfig config) => Task.CompletedTask;
 }
 
+// ── Fake IAgentProvider ──────────────────────────────────────────────────────
+
+internal sealed class FakeAgentProvider : IAgentProvider
+{
+    public ModelProvider Provider { get; }
+    public int LastInputTokens => 0;
+    public int LastOutputTokens => 0;
+
+    public FakeAgentProvider(ModelProvider provider = ModelProvider.Ollama) => Provider = provider;
+
+    public Task<string> CompleteAsync(string prompt, ModelConfig model, CancellationToken ct = default)
+        => Task.FromResult("fake response");
+
+    public async IAsyncEnumerable<string> CompleteStreamingAsync(
+        string prompt, ModelConfig model, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        yield return "fake";
+        await Task.CompletedTask;
+    }
+
+    public Task<bool> IsAvailableAsync(CancellationToken ct = default) => Task.FromResult(true);
+}
+
 // ── AgentOrchestrator factory ─────────────────────────────────────────────────
 
 internal static class OrchestratorFactory
@@ -42,7 +67,7 @@ internal static class OrchestratorFactory
     /// Creates a minimal AgentOrchestrator with no providers (no actual LLM calls).
     /// Suitable for testing task queue operations and cancel behavior.
     /// </summary>
-    public static AgentOrchestrator Create(out TaskQueue queue)
+    public static AgentOrchestrator Create(out TaskQueue queue, IEventBus? eventBus = null)
     {
         queue = new TaskQueue();
         var services = new ServiceCollection().BuildServiceProvider();
@@ -60,7 +85,38 @@ internal static class OrchestratorFactory
             activityLogger: null,
             maxConcurrentTasks: 2,
             gitService: null,
-            gitConfig: null);
+            gitConfig: null,
+            eventBus: eventBus);
+    }
+
+    /// <summary>
+    /// Creates an AgentOrchestrator with a fake provider registered, so tasks
+    /// reach the execution path (past the NO_PROVIDER check).
+    /// </summary>
+    public static AgentOrchestrator CreateWithProvider(
+        out TaskQueue queue, out DeadLetterQueue dlq, IEventBus? eventBus = null)
+    {
+        queue = new TaskQueue();
+        var services = new ServiceCollection()
+            .AddSingleton<IAgentProvider>(new FakeAgentProvider(ModelProvider.Ollama))
+            .BuildServiceProvider();
+        dlq = new DeadLetterQueue(NullLogger<DeadLetterQueue>.Instance);
+
+        return new AgentOrchestrator(
+            queue,
+            services,
+            dlq,
+            new TimeoutConfig(),
+            new AgentLimitsConfig(),
+            new ResultParser(NullLogger<ResultParser>.Instance),
+            NullLogger<AgentOrchestrator>.Instance,
+            repository: null,
+            activityLogger: null,
+            maxConcurrentTasks: 2,
+            gitService: null,
+            gitConfig: null,
+            eventBus: eventBus,
+            promptBuilder: new PromptBuilder());
     }
 }
 
@@ -114,10 +170,11 @@ public class AgentOrchestratorTests
     [Fact]
     public async Task SubmitTask_FiresOnTaskUpdateEvent()
     {
-        var orch = OrchestratorFactory.Create(out _);
+        var bus = new InProcessEventBus(NullLogger<InProcessEventBus>.Instance);
+        var orch = OrchestratorFactory.Create(out _, eventBus: bus);
 
         TaskStatusResponse? received = null;
-        orch.OnTaskUpdate += r => received = r;
+        bus.Subscribe<TaskUpdatedEvent>(e => received = e.Status);
 
         var task = new AgentTask { Description = "Event test" };
         await orch.SubmitTaskAsync(task, CancellationToken.None);
@@ -177,6 +234,54 @@ public class AgentOrchestratorTests
     {
         var orch = OrchestratorFactory.Create(out _);
         Assert.Equal(2, orch.MaxConcurrentTasks);
+    }
+
+    // ── Empty ModelId guard ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ExecuteTask_EmptyModelId_FailsWithEmptyModelIdReason()
+    {
+        var orch = OrchestratorFactory.CreateWithProvider(out var queue, out var dlq);
+
+        var task = new AgentTask
+        {
+            ModelProvider = ModelProvider.Ollama,
+            ModelId       = "",
+            Description   = "Empty model test",
+        };
+        await orch.SubmitTaskAsync(task, CancellationToken.None);
+
+        // Start the processing loop briefly so the task gets picked up
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try { await orch.StartProcessingAsync(cts.Token); }
+        catch (OperationCanceledException) { /* expected */ }
+
+        var queued = queue.GetTask(task.Id)!;
+        Assert.Equal(AgentTaskStatus.Failed, queued.Status);
+        Assert.Contains("empty ModelId", queued.StatusMessage!);
+        Assert.True(dlq.Count > 0, "Failed task should be in DLQ");
+    }
+
+    [Fact]
+    public async Task ExecuteTask_WhitespaceModelId_FailsWithEmptyModelIdReason()
+    {
+        var orch = OrchestratorFactory.CreateWithProvider(out var queue, out var dlq);
+
+        var task = new AgentTask
+        {
+            ModelProvider = ModelProvider.Ollama,
+            ModelId       = "   ",
+            Description   = "Whitespace model test",
+        };
+        await orch.SubmitTaskAsync(task, CancellationToken.None);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try { await orch.StartProcessingAsync(cts.Token); }
+        catch (OperationCanceledException) { /* expected */ }
+
+        var queued = queue.GetTask(task.Id)!;
+        Assert.Equal(AgentTaskStatus.Failed, queued.Status);
+        Assert.Contains("empty ModelId", queued.StatusMessage!);
     }
 }
 

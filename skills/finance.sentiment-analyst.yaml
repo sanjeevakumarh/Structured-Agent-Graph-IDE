@@ -1,0 +1,88 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: sentiment-analyst
+version: 2
+domain: finance
+protocol_implements: [Analyzable]
+
+description: >
+  Analyses news flow, analyst sentiment, insider activity, and upcoming catalysts
+  for a stock. Produces a structured section with a Sentiment Signal at the end.
+
+inputs:
+  search_results:
+    type: string
+    required: true
+  ticker:
+    type: string
+    required: false
+  asset_type:
+    type: string
+    required: false
+  context:
+    type: string
+    required: false
+    description: Investment thesis or analytical focus for the investor
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown analysis covering Recent News, Analyst Consensus, Insider Activity,
+    Upcoming Catalysts, ending with:
+    **Signal: POSITIVE / NEUTRAL / NEGATIVE** — one sentence rationale.
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, financial_analysis]
+    context_window_min: 16k
+
+parameters:
+  output_var: sentiment_result
+
+implementation:
+  - name: analyse
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    output_var: "{{parameters.output_var}}"
+    section_title: "News & Catalysts"
+    section_analysis_prompt: |
+      {{ if parameters.search_results == "" }}ANALYSIS FAILURE: No search results provided for sentiment analysis. Cannot proceed.{{ end }}
+      Ticker: {{parameters.ticker | string.upcase}} ({{parameters.asset_type}})
+      Analyst context: {{parameters.context}}
+      Date: {{date}}
+
+      Source material:
+      ---
+      {{parameters.search_results}}
+      ---
+
+      {{blocks.data_integrity_rules}}
+
+      You are a market sentiment analyst. Write a focused sentiment and catalyst analysis
+      using these sub-headings. {{blocks.no_preamble}}
+
+      ### Recent News & Events
+      Most significant news in the past 30 days. Include any earnings, product launches,
+      regulatory actions, or leadership changes.
+
+      ### Analyst Consensus
+      Number of Buy/Hold/Sell ratings. Most recent price target changes. Average target price.
+
+      ### Insider Activity
+      Recent insider buys or sells. Options activity. Institutional ownership changes.
+
+      ### Upcoming Catalysts
+      Next earnings date. Expected product announcements, regulatory decisions, or macro events
+      that could move this stock in the next 60 days.
+
+      ### Short Interest
+      Short interest as % of float. Days to cover. Any short squeeze conditions?
+
+      Cite specific analyst names, dates, and numbers from source material.
+      If data is absent from sources, write "Data unavailable" — do NOT estimate.
+
+      **Signal: POSITIVE / NEUTRAL / NEGATIVE** — one sentence rationale.
+
+      ### GATE_SIGNAL
+      SIGNAL: [POSITIVE | NEUTRAL | NEGATIVE | INSUFFICIENT_DATA]
+      RATIONALE: [one sentence citing the key sentiment driver]

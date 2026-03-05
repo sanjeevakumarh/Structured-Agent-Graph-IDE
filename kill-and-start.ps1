@@ -6,6 +6,7 @@ $root       = $PSScriptRoot
 $exe        = "$root\src\SAGIDE.Service\bin\Release\net9.0\SAGIDE.Service.exe"
 $cwd        = "$root\src\SAGIDE.Service\bin\Release\net9.0"
 $prompts    = "$root\prompts"
+$skills     = "$root\skills"
 
 if (-not (Test-Path $exe)) {
     Write-Error "Service EXE not found. Run: .\build-all.ps1"
@@ -20,6 +21,6 @@ Write-Output "Old process stopped"
 # Start fresh
 Start-Process -FilePath $exe `
     -WorkingDirectory $cwd `
-    -ArgumentList "--SAGIDE:PromptsPath=`"$prompts`"" `
+    -ArgumentList "--SAGIDE:PromptsPath=$prompts", "--SAGIDE:SkillsPath=$skills" `
     -WindowStyle Normal
 Write-Output "SAGIDE Service started"

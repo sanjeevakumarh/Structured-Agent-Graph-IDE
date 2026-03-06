@@ -48,6 +48,7 @@ sequenceDiagram
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
 ## Updates (2026-03-06)
+- Configurable caching — new SAGIDE:Caching section toggles output caching and sets TTLs for search results, routing hints, and Ollama health polling; AgentOrchestrator now honors the cache enable flag.
 - Startup and auth hardening — async DB bootstrap/pruning via hosted service, shared ModelIdParser reused by scheduler/endpoints with tests, and bearer-token guard now HMAC-normalized for constant-time comparison.
 - RAG safety nets — embedding resolver logs missing configs and short-circuits cleanly; VectorStore initializes lazily with concurrency guard to avoid startup blocking.
 - Extension resilience — pipe connect timeout + lower send default, workspace-only writes in Diff Approval, JSON fetch helper reused across prompt/skill views, and message parsing now shields malformed payloads.

@@ -42,7 +42,14 @@ export class NamedPipeClient extends EventEmitter {
         return new Promise((resolve, reject) => {
             this.socket = net.createConnection(this.pipeName);
 
+            // Defensive timeout in case the pipe exists but the server is frozen
+            const timeout = setTimeout(() => {
+                this.socket?.destroy();
+                reject(new Error('Pipe connection timed out after 10s'));
+            }, 10_000);
+
             this.socket.once('connect', () => {
+                clearTimeout(timeout);
                 this.connected = true;
                 resolve();
             });
@@ -58,6 +65,7 @@ export class NamedPipeClient extends EventEmitter {
             });
 
             this.socket.on('error', (err: Error) => {
+                clearTimeout(timeout);
                 if (!this.connected) {
                     reject(err);
                 } else {
@@ -78,7 +86,7 @@ export class NamedPipeClient extends EventEmitter {
         }
     }
 
-    async send(message: PipeMessage, timeoutMs = 7_200_000): Promise<PipeMessage> {
+    async send(message: PipeMessage, timeoutMs = 300_000): Promise<PipeMessage> {
         if (!this.socket || !this.connected) {
             throw new Error('Not connected to service');
         }

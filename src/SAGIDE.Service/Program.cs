@@ -99,17 +99,23 @@ try
     app.UseRateLimiter();
 
     // Bearer-token guard — only active when SAGIDE:RestApi:BearerToken is set.
-    // Applies to /api/* paths only; uses constant-time comparison to prevent timing attacks.
+    // Applies to /api/* paths only.
+    // Uses HMAC-then-compare to prevent timing side-channels: FixedTimeEquals alone
+    // short-circuits on length mismatch, leaking token length. HMAC normalizes both
+    // values to a fixed-length MAC before the constant-time comparison.
     if (!string.IsNullOrEmpty(restBearerToken))
     {
-        var expectedBytes = Encoding.UTF8.GetBytes($"Bearer {restBearerToken}");
+        var hmacKey      = RandomNumberGenerator.GetBytes(32);
+        var expectedText = $"Bearer {restBearerToken}";
+        var expectedMac  = HMACSHA256.HashData(hmacKey, Encoding.UTF8.GetBytes(expectedText));
+
         app.Use(async (ctx, next) =>
         {
             if (ctx.Request.Path.StartsWithSegments("/api"))
             {
-                var header      = ctx.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
-                var headerBytes = Encoding.UTF8.GetBytes(header);
-                if (!CryptographicOperations.FixedTimeEquals(headerBytes, expectedBytes))
+                var header    = ctx.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
+                var headerMac = HMACSHA256.HashData(hmacKey, Encoding.UTF8.GetBytes(header));
+                if (!CryptographicOperations.FixedTimeEquals(headerMac, expectedMac))
                 {
                     ctx.Response.StatusCode = 401;
                     ctx.Response.Headers.WWWAuthenticate = "Bearer realm=\"SAGIDE\"";
@@ -120,9 +126,8 @@ try
         });
     }
 
-    // OpenAPI document — /openapi/v1.json (development only)
-    if (app.Environment.IsDevelopment())
-        app.MapOpenApi();
+    // OpenAPI document — /openapi/v1.json (all environments; auth required like other API routes)
+    app.MapOpenApi();
 
     // REST API endpoints
     app.MapTaskEndpoints();

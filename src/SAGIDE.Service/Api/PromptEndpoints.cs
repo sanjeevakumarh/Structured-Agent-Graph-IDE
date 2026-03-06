@@ -7,8 +7,11 @@ namespace SAGIDE.Service.Api;
 
 internal static class PromptEndpoints
 {
+    private static ILogger? _logger;
+
     internal static IEndpointRouteBuilder MapPromptEndpoints(this IEndpointRouteBuilder app)
     {
+        _logger = app.ServiceProvider.GetService<ILoggerFactory>()?.CreateLogger("SAGIDE.PromptEndpoints");
         // GET /api/prompts — all registered prompts (summary fields)
         app.MapGet("/api/prompts", (PromptRegistry registry) =>
         {
@@ -66,7 +69,21 @@ internal static class PromptEndpoints
             // Check inline subtasks OR objects/workflow declarations (WorkflowExpander runs inside RunAsync).
             if (prompt.Subtasks.Count > 0 || prompt.Objects.Count > 0 || prompt.DataCollection?.Steps.Count > 0)
             {
-                _ = Task.Run(() => coordinator.RunAsync(prompt, variables, CancellationToken.None));
+                // Use the host shutdown token so RunAsync stops cleanly on service shutdown.
+                // Log exceptions instead of silently discarding the Task.
+                var hostLifetime = app.ServiceProvider.GetRequiredService<IHostApplicationLifetime>();
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await coordinator.RunAsync(prompt, variables, hostLifetime.ApplicationStopping);
+                    }
+                    catch (OperationCanceledException) { /* host shutting down */ }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "Background RunAsync failed for {Domain}/{Name}", domain, name);
+                    }
+                }, hostLifetime.ApplicationStopping);
 
                 return Results.Accepted($"/api/prompts/{domain}/{name}", new
                 {
@@ -83,8 +100,8 @@ internal static class PromptEndpoints
             var modelId     = prompt.ModelPreference?.Primary
                            ?? prompt.ModelPreference?.Orchestrator
                            ?? string.Empty;
-            var providerStr = ParseProviderFromModelId(modelId);
-            var cleanModel  = StripProviderPrefix(modelId);
+            var providerStr = ModelIdParser.ParseProvider(modelId);
+            var cleanModel  = ModelIdParser.StripPrefix(modelId);
 
             // Merge YAML defaults with caller overrides, then render the Scriban template.
             var renderVars = prompt.Variables
@@ -127,19 +144,4 @@ internal static class PromptEndpoints
         return app;
     }
 
-    private static ModelProvider ParseProviderFromModelId(string modelId)
-    {
-        if (modelId.StartsWith("claude", StringComparison.OrdinalIgnoreCase))  return ModelProvider.Claude;
-        if (modelId.StartsWith("ollama/", StringComparison.OrdinalIgnoreCase)) return ModelProvider.Ollama;
-        if (modelId.StartsWith("codex/", StringComparison.OrdinalIgnoreCase) ||
-            modelId.StartsWith("openai/", StringComparison.OrdinalIgnoreCase)) return ModelProvider.Codex;
-        if (modelId.StartsWith("gemini/", StringComparison.OrdinalIgnoreCase)) return ModelProvider.Gemini;
-        return ModelProvider.Ollama;
-    }
-
-    private static string StripProviderPrefix(string modelId)
-    {
-        var slash = modelId.IndexOf('/');
-        return slash >= 0 ? modelId[(slash + 1)..] : modelId;
-    }
 }

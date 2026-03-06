@@ -60,8 +60,18 @@ export class DiffApprovalPanel {
             return;
         }
 
+        // Guard against path traversal — only allow writes within open workspace folders
+        const normalizedPath = path.resolve(filePath);
+        const inWorkspace = (vscode.workspace.workspaceFolders ?? []).some(
+            wf => normalizedPath.startsWith(wf.uri.fsPath));
+        if (!inWorkspace) {
+            vscode.window.showWarningMessage(
+                `Blocked write outside workspace: ${filePath}`);
+            return;
+        }
+
         try {
-            const uri = vscode.Uri.file(filePath);
+            const uri = vscode.Uri.file(normalizedPath);
             const bytes = Buffer.from(newContent, 'utf8');
             await vscode.workspace.fs.writeFile(uri, bytes);
             this.applied.add(index);

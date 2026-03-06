@@ -47,7 +47,8 @@ implementation:
     section_analysis_prompt: |
       {{ if parameters.report == "" }}EVALUATION FAILURE: No report provided. Cannot evaluate.{{ end }}
       You are an independent quality evaluator scoring a product research report.
-      Idea under evaluation: {{parameters.idea}}
+      The idea being evaluated is exactly: "{{parameters.idea}}"
+      Use this exact name throughout — do NOT substitute a different name or topic.
 
       Report to evaluate:
       ---
@@ -55,6 +56,8 @@ implementation:
       ---
 
       ⚠ OUTPUT RULE: Start immediately with the evaluation header — no preamble.
+      ⚠ GROUNDING RULE: Your evaluation MUST be about "{{parameters.idea}}" — if the report
+      discusses something else, note this as a critical finding, but still use the correct idea name.
 
       # Evaluation Report: {{parameters.idea}}
 

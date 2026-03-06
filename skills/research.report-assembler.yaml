@@ -81,18 +81,21 @@ implementation:
       Two-sentence rationale citing the two strongest signals found.
 
       ## Signals At A Glance
-      Copy each SIGNAL value and RATIONALE line exactly from the GATE_SIGNAL blocks.
+      For each phase, find the GATE_SIGNAL block (look for lines matching "SIGNAL: [GO" or
+      "SIGNAL: [CONDITIONAL" or "SIGNAL: [NO-GO") and copy the signal value and rationale.
+      If a phase has no GATE_SIGNAL block, write "MISSING" as the signal.
+      NEVER write "Data unavailable" in the Signal column — always extract or write MISSING.
 
       | Phase | Signal | Rationale |
       |---|---|---|
-      | Thesis & Market Fit | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Technology Strategy | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Financial Viability & Exit | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Risk & Compliance | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Product Scope & Roadmap | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Architecture & Implementation | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Support & Compatibility | [copy SIGNAL] | [copy RATIONALE exactly] |
-      | Implementation Plan & Release Cycles | [copy SIGNAL] | [copy RATIONALE exactly] |
+      | Thesis & Market Fit | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Technology Strategy | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Financial Viability & Exit | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Risk & Compliance | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Product Scope & Roadmap | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Architecture & Implementation | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Support & Compatibility | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
+      | Implementation Plan & Release Cycles | [GO/CONDITIONAL/NO-GO/MISSING] | [rationale from GATE_SIGNAL] |
 
       ## Strategic Acquirers (Consolidated)
       Find "### Strategic Acquirers" inside the Financial Viability & Exit section above.

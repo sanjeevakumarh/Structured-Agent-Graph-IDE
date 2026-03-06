@@ -47,6 +47,19 @@ function Warn([string]$msg)  { Write-Host "    WARN $msg" -ForegroundColor Yello
 function Err([string]$msg)   { Write-Host "`n    ERROR: $msg" -ForegroundColor Red; exit 1 }
 
 # ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
+Step "Checking prerequisites..."
+$missing = @()
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { $missing += 'dotnet' }
+if (-not (Get-Command node   -ErrorAction SilentlyContinue)) { $missing += 'node' }
+if (-not (Get-Command npm    -ErrorAction SilentlyContinue)) { $missing += 'npm' }
+if ($missing.Count -gt 0) {
+    Err "Missing required tools: $($missing -join ', '). Install them and retry."
+}
+Ok "dotnet, node, npm found"
+
+# ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 $serviceExe  = "$root\src\SAGIDE.Service\bin\Release\net9.0\SAGIDE.Service.exe"

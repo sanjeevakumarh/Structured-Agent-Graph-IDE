@@ -58,18 +58,22 @@ export class ServiceConnection implements vscode.Disposable {
         });
 
         this.client.on('message', (msg: PipeMessage) => {
-            if (msg.type === MessageTypes.TaskUpdate && msg.payload) {
-                const status = JSON.parse(msg.payload.toString()) as TaskStatusResponse;
-                this._onTaskUpdate.fire(status);
-            } else if (msg.type === MessageTypes.StreamingOutput && msg.payload) {
-                const streamMsg = JSON.parse(msg.payload.toString()) as StreamingOutputMessage;
-                this._onStreamingOutput.fire(streamMsg);
-            } else if (msg.type === MessageTypes.WorkflowUpdate && msg.payload) {
-                const instance = JSON.parse(msg.payload.toString()) as WorkflowInstance;
-                this._onWorkflowUpdate.fire(instance);
-            } else if (msg.type === MessageTypes.WorkflowApprovalNeeded && msg.payload) {
-                const payload = JSON.parse(msg.payload.toString()) as WorkflowApprovalNeededPayload;
-                this._onApprovalNeeded.fire(payload);
+            try {
+                if (msg.type === MessageTypes.TaskUpdate && msg.payload) {
+                    const status = JSON.parse(msg.payload.toString()) as TaskStatusResponse;
+                    this._onTaskUpdate.fire(status);
+                } else if (msg.type === MessageTypes.StreamingOutput && msg.payload) {
+                    const streamMsg = JSON.parse(msg.payload.toString()) as StreamingOutputMessage;
+                    this._onStreamingOutput.fire(streamMsg);
+                } else if (msg.type === MessageTypes.WorkflowUpdate && msg.payload) {
+                    const instance = JSON.parse(msg.payload.toString()) as WorkflowInstance;
+                    this._onWorkflowUpdate.fire(instance);
+                } else if (msg.type === MessageTypes.WorkflowApprovalNeeded && msg.payload) {
+                    const payload = JSON.parse(msg.payload.toString()) as WorkflowApprovalNeededPayload;
+                    this._onApprovalNeeded.fire(payload);
+                }
+            } catch {
+                // Malformed payload — skip this message rather than crashing the handler
             }
         });
     }

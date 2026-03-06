@@ -47,6 +47,12 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-03-06)
+- Startup and auth hardening — async DB bootstrap/pruning via hosted service, shared ModelIdParser reused by scheduler/endpoints with tests, and bearer-token guard now HMAC-normalized for constant-time comparison.
+- RAG safety nets — embedding resolver logs missing configs and short-circuits cleanly; VectorStore initializes lazily with concurrency guard to avoid startup blocking.
+- Extension resilience — pipe connect timeout + lower send default, workspace-only writes in Diff Approval, JSON fetch helper reused across prompt/skill views, and message parsing now shields malformed payloads.
+- Prompt/schema refresh — finance stock-analysis guardrails tightened,  skill schema locks capability enums, and research assembler/evaluator prompts clarify GATE_SIGNAL extraction.
+
 ## Updates (2026-03-05)
 - Workflow schema docs — published docs/workflow-schema.json describing workflow YAML structure (steps, parameters, convergence policy).
 - Pipe broadcast controls — new BroadcastAllTasks toggle in CommunicationConfig/appsettings with event-bus routing to limit VS Code updates to task owners.

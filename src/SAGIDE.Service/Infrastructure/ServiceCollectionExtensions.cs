@@ -55,12 +55,9 @@ public static class ServiceCollectionExtensions
 
         // SqliteTaskRepository bootstraps the schema (InitializeAsync creates all tables).
         // The three sibling repositories each cover one persistence concern and share the same DB file.
+        // Async initialization (table creation, pruning) runs in DatabaseInitializer hosted service.
         services.AddSingleton<ITaskRepository>(sp =>
-        {
-            var repo = new SqliteTaskRepository(dbPath, sp.GetRequiredService<ILogger<SqliteTaskRepository>>());
-            repo.InitializeAsync().GetAwaiter().GetResult();
-            return repo;
-        });
+            new SqliteTaskRepository(dbPath, sp.GetRequiredService<ILogger<SqliteTaskRepository>>()));
         services.AddSingleton<IActivityRepository>(sp =>
             new SqliteActivityRepository(dbPath, sp.GetRequiredService<ILogger<SqliteActivityRepository>>()));
         services.AddSingleton<IWorkflowRepository>(_ =>
@@ -85,23 +82,14 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<ResultParser>();
 
-        // Model performance tracking — prune old samples on startup
-        services.AddSingleton<IModelPerfRepository>(sp =>
-        {
-            var repo = new SqliteModelPerfRepository(dbPath);
-            var retentionDays = cfg.GetValue("SAGIDE:Routing:PerfRetentionDays", 3);
-            repo.PruneOldSamplesAsync(retentionDays).GetAwaiter().GetResult();
-            return repo;
-        });
+        // Model performance tracking — pruning runs in DatabaseInitializer hosted service
+        services.AddSingleton<IModelPerfRepository>(_ => new SqliteModelPerfRepository(dbPath));
 
-        // Model quality tracking — prune old samples on startup
-        services.AddSingleton<IModelQualityRepository>(sp =>
-        {
-            var repo = new SqliteModelQualityRepository(dbPath);
-            var retentionDays = cfg.GetValue("SAGIDE:Routing:QualityRetentionDays", 7);
-            repo.PruneOldSamplesAsync(retentionDays).GetAwaiter().GetResult();
-            return repo;
-        });
+        // Model quality tracking — pruning runs in DatabaseInitializer hosted service
+        services.AddSingleton<IModelQualityRepository>(_ => new SqliteModelQualityRepository(dbPath));
+
+        // Async DB initialization — registered here so it starts before all other hosted services.
+        services.AddHostedService<DatabaseInitializer>();
 
         return services;
     }
@@ -301,12 +289,9 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient<WebSearchAdapter>();
         services.AddHttpClient<EmbeddingService>();
         services.AddSingleton<TextChunker>();
-        services.AddSingleton<VectorStore>(sp =>
-        {
-            var store = new VectorStore(dbPath, sp.GetRequiredService<ILogger<VectorStore>>());
-            store.InitializeAsync().GetAwaiter().GetResult();
-            return store;
-        });
+        // VectorStore initialization runs in DatabaseInitializer hosted service
+        services.AddSingleton(sp =>
+            new VectorStore(dbPath, sp.GetRequiredService<ILogger<VectorStore>>()));
         services.AddSingleton<RagPipeline>();
 
         return services;

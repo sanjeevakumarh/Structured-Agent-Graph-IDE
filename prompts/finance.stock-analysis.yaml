@@ -98,6 +98,22 @@ data_collection:
         Date: {{date}}
         Personal notes: {{personal_context}}
 
+        ## DATA RULES (apply to EVERY section)
+        1. Copy numbers VERBATIM from the source material below. Search snippets are
+           abbreviated — "P/E Ratio of 22.5" or "RSI...is 54" IS valid data. Extract and use it.
+        2. Only write "[DATA UNAVAILABLE]" for a metric when NO snippet mentions it.
+           Use this exact marker — not "Data unavailable" or "[DATA MISSING]".
+        3. DO NOT use training knowledge to fill gaps. DO NOT fabricate numbers.
+        4. Start directly with the first sub-heading; no preamble or commentary.
+        5. VERIFY before writing: if you state "price is above 50-day MA of $X",
+           confirm that the current price you stated is actually > $X.
+
+        ## FORMATTING RULES
+        - The sub-headings below are INSTRUCTIONS telling you what to write.
+          Write your own analytical prose under each heading.
+          DO NOT copy instruction sentences into your output.
+        - Every "[DATA UNAVAILABLE]" metric still gets its own bullet or line — do not skip it.
+
         Regulatory context: ONLY if {{context}} explicitly names a specific bill, act, or regulation
         (e.g. "CLARITY Act", "SEC market structure reform"), add a "Regulatory Lens" subsection.
         If the context does NOT mention any specific legislation, do NOT add a Regulatory Lens subsection
@@ -115,6 +131,11 @@ data_collection:
 
         {{ if section_name == "Technical Analysis" }}
         You are a technical analyst. Write a focused technical analysis using the sub-headings below.
+        SCOPE: Write ONLY about technical/price analysis. Do NOT write about fundamentals,
+        investment thesis, bull/bear/base cases, catalysts, risk matrices, or conviction levels.
+        Do NOT output a "Signals At A Glance" table.
+        STRICT: If an exact RSI or MACD value is not stated in the source snippets, write
+        "[DATA UNAVAILABLE]" — do NOT write "likely", "probably", or "around".
         {{ if asset_type == "etf" -}}
 
         ### ETF Type Classification
@@ -215,65 +236,74 @@ data_collection:
         Flow Strength Score:      [+1 = strong sustained inflows | 0 = neutral | -1 = outflows or redemption pressure]
 
         {{- else }}
-        You are a fundamental analyst.
+        You are a fundamental analyst. Write analytical prose under each heading.
+        DO NOT echo these instructions — write your own analysis text.
 
-        ## UNIT VERIFICATION (apply before writing — correct any mismatches)
-        - EPS: must be per-share (not total dollars)
-        - Revenue: express in billions (e.g. $14.2B)
-        - Valuation multiples: must be ratios (e.g. P/E 22x, not "22 dollars")
-        If any unit mismatch is detected, correct it before output.
+        ALLOWED SUB-HEADINGS — output ONLY these, in this exact order:
+        ### Revenue & Earnings → ### Margins → ### Valuation → ### Cyclical Analysis →
+        ### Balance Sheet → ### Guidance & Analyst Estimates → ### Capital Allocation →
+        ### Fundamental Signal
+        After "### Fundamental Signal", STOP. Do NOT add any more sub-headings or content.
+        FORBIDDEN: Do NOT write Competitive Landscape, Technical Signal, Investment Thesis,
+        price targets, buy/sell/hold ratings, bull/bear/base cases, catalysts, risk matrices,
+        conviction levels, or a "Signals At A Glance" table.
+
+        UNIT VERIFICATION: EPS must be per-share, revenue in billions (e.g. $14.2B),
+        multiples as ratios (e.g. P/E 22x). Correct mismatches before output.
 
         ### Revenue & Earnings
-        Most recent quarter: revenue (in billions), EPS (per-share), YoY growth, beat or miss vs consensus estimate.
+        Write the most recent quarter's revenue, EPS, YoY growth, and beat/miss vs consensus.
 
         ### Margins
-        Gross, operating, and net margin — trend YoY and vs sector peers.
-        FLAG: If both margins AND EPS are declining quarter-over-quarter, explicitly note:
+        Write gross, operating, and net margin with YoY trend and vs sector peers.
+        If both margins AND EPS are declining QoQ, add:
         "WARNING: Declining margins + declining EPS — must include forward improvement argument or downgrade rating."
 
         ### Valuation
-        P/E (TTM + forward), P/B, EV/EBITDA. Premium or discount to sector? Explain the gap.
-        If claiming undervalued:
-        - Compare against 5-year historical P/E range (state the range)
-        - Calculate PEG ratio = forward P/E ÷ EPS growth rate
-        - If PEG > 2: state "WARNING: PEG > 2 — valuation not compelling despite apparent discount"
+        Write P/E (TTM + forward), P/B, EV/EBITDA. State premium or discount to sector.
+        If claiming undervalued: compare against 5-year historical P/E range, calculate PEG ratio.
+        If PEG > 2: "WARNING: PEG > 2 — valuation not compelling despite apparent discount"
 
         ### Cyclical Analysis
-        Identify whether this company is cyclical (materials, energy, industrials, consumer discretionary, financials).
-        If cyclical:
-        - State current position in economic cycle: early expansion / mid-cycle / late cycle / contraction
-        - Adjust valuation expectation (e.g. late cycle: expect P/E compression; early expansion: expect expansion)
+        State whether this company is cyclical. If so, state position in economic cycle
+        and adjust valuation expectation accordingly.
 
         ### Balance Sheet
-        Debt-to-equity ratio, cash & equivalents, free cash flow yield, interest coverage ratio.
+        Write debt-to-equity ratio, cash & equivalents, free cash flow yield, interest coverage ratio.
 
         ### Guidance & Analyst Estimates
-        Management full-year guidance. Analyst consensus EPS and revenue for next quarter and full year.
+        Write management full-year guidance and analyst consensus EPS/revenue for next quarter and full year.
 
         ### Capital Allocation
-        Dividend yield and payout ratio (if applicable). Share buyback authorisation and history.
+        Write dividend yield and payout ratio (if applicable), share buyback authorisation and history.
 
         ### Fundamental Signal
-        Fundamental Score: [+1 = UNDERVALUED | 0 = FAIRLY VALUED | -1 = OVERVALUED]
-        **Score: [write exactly +1, 0, or -1 — no other values]**
-        **Signal: OVERVALUED / FAIRLY VALUED / UNDERVALUED** — one sentence rationale.
+        MANDATORY — you MUST output this block even if most metrics are unavailable:
+        **Score: [+1, 0, or -1]**
+        **Signal: [UNDERVALUED / FAIRLY VALUED / OVERVALUED]** — one sentence rationale.
+        Rules: +1 = UNDERVALUED, 0 = FAIRLY VALUED, -1 = OVERVALUED.
+        If 3+ metrics above are [DATA UNAVAILABLE], you MUST set Score to 0 and Signal to FAIRLY VALUED
+        with rationale: "Insufficient data for valuation assessment."
 
-        DATA INTEGRITY RULES (apply before scoring):
-        - If any of forward P/E, margins (gross/operating/net), or EPS growth are missing from source snippets, write "Data unavailable" for that metric.
-        - If two or more of those metrics are unavailable, set Fundamental Score to 0 unless you have sufficient coverage to justify otherwise.
-        - If both margins AND EPS are declining QoQ, include the warning and consider downgrading the score.
-        - P/E ratio: if the company has negative earnings, write "P/E: N/A (negative earnings)" — NEVER report a positive P/E for an unprofitable company.
-        - Do NOT copy financial data from search results about OTHER companies — verify the ticker matches before using any number.
+        DATA INTEGRITY RULES:
+        - Use "[DATA UNAVAILABLE]" (this exact marker) when data is not in source snippets.
+        - If both margins AND EPS are declining QoQ, include the warning and consider downgrading.
+        - P/E with negative earnings: write "P/E: N/A (negative earnings)".
+        - Do NOT copy financial data from search results about OTHER companies.
 
         ### Context Impact
-        In 2-3 sentences, tie valuation sensitivity to "{{context}}" (e.g., regulation affecting fee take rates, volumes, or cost to comply).
+        In 2-3 sentences, tie valuation sensitivity to "{{context}}".
 
         ### Regulatory Lens
-        Summarize bill/act impact on revenue, costs, and capital needs under bull/base/bear passage scenarios; note how it would change valuation multiples.
+        Summarize bill/act impact on revenue, costs, and capital needs under bull/base/bear scenarios.
 
         {{ end -}}
         {{ else if section_name == "Competitive Landscape" }}
         You are a competitive intelligence analyst. Write a focused competitive assessment.
+        SCOPE: Write ONLY about competitive positioning using the sub-headings listed below.
+        FORBIDDEN: Do NOT write about investment thesis, price targets, buy/sell/hold
+        ratings, bull/bear/base cases, catalysts, risk matrices, or conviction levels.
+        Do NOT output a "Signals At A Glance" table.
 
         ### Market Position
         Estimated market share, rank among peers, recent gains or losses.
@@ -309,12 +339,9 @@ data_collection:
         ### Context-Specific Impact
         How does "{{context}}" specifically affect {{ticker_upper}}'s competitive position?
 
-        ### Top 3 Risks
-        For each risk, provide all four fields:
-        - Risk name: [name]
-        - Mechanism: [how this risk would materialise in practice]
-        - Financial metric affected: [revenue / EPS / margins / cash flow / AUM / etc.]
-        - Magnitude: High / Medium / Low
+        ### Key Risk Factors
+        List the top 3 competitive risks as bullet points (not a table):
+        - **[Risk name]**: [how it materialises] → affects [metric], magnitude [High/Medium/Low]
 
         ### Competitive Signal
         Competitive Score: [+1 = STRENGTHENING | 0 = STABLE | -1 = WEAKENING]
@@ -329,6 +356,7 @@ data_collection:
 
         {{ else if section_name == "Investment Thesis" }}
         You are a portfolio manager writing a structured investment thesis. Be direct — no hedging.
+        Do NOT output a "Signals At A Glance" table — that is assembled separately.
 
         ### Summary
         What {{ticker_upper}} is and why it is worth analysing right now (2-3 sentences).
@@ -396,14 +424,6 @@ data_collection:
 
         {{ end }}
 
-        ## DATA RULES
-        1. Copy numbers VERBATIM from the source material. Search snippets are
-           abbreviated — a snippet saying "P/E Ratio of 22.5" or "RSI...is 54"
-           IS valid data. Extract and use it.
-        2. Only write "Data unavailable" for a metric when NO snippet mentions it.
-        3. DO NOT use training knowledge to fill gaps.
-        4. Start directly with the first sub-heading; no preamble or commentary.
-
 # ── Assembler subtask ─────────────────────────────────────────────────────────
 # Single Claude Sonnet pass: assembles sections into a polished final report
 # with an executive summary, signals table, and action items.
@@ -423,76 +443,89 @@ subtasks:
       {{section_analyses}}
 
       SCORE EXTRACTION (perform before assembling):
-      Scan each section for a line containing "Score: +1", "Score: 0", or "Score: -1".
+      Scan each section for a line matching "**Score: +1**", "**Score: 0**", or "**Score: -1**".
       {{ if asset_type == "etf" -}}
       Extract: Technical Score, Structure Quality Score, Expense Efficiency Score,
                Concentration Risk Score, Flow Strength Score.
       ETF Total Score = sum of all 5 dimension scores.
       {{- else -}}
       Extract: Technical Score, Fundamental Score, Competitive Score.
-      Total Score = sum of the 3 scores (range: -3 to +3).
-      GATE RULE: If Total Score < +2 AND the Investment Thesis rates STRONG BUY, DOWNGRADE the rating to BUY unless an explicit catalyst in Key Catalysts justifies override; in all cases annotate the gate warning.
+      If a score line is not found for a dimension, set that score to 0.
+      Total Score = Technical + Fundamental + Competitive (range: -3 to +3).
+
+      GATE RULES (you MUST apply these — write out the check explicitly):
+      Step A: Write "Total Score = [T] + [F] + [C] = [sum]" using the extracted values.
+      Step B: If Total Score < +2 AND the Investment Thesis section says STRONG BUY,
+              you MUST change it to BUY in your output. Add after the Signals table:
+              "**Note:** Total score [sum] < +2 — STRONG BUY downgraded to BUY."
+      Step C: If Fundamental Score is 0 because most metrics are [DATA UNAVAILABLE],
+              cap the maximum rating at BUY regardless of total score. Add after the Signals table:
+              "**Note:** Fundamental data insufficient — rating capped at BUY."
       {{ end -}}
 
-      ASSEMBLE THE FINAL REPORT in this exact structure:
+      INTERNAL PRE-OUTPUT CHECK (do this silently — never output these instructions):
+      Before writing, scan the analyst sections and silently remove: Base/Bull/Bear scenarios,
+      Key Catalysts lists, Risk Matrix tables, Confidence Level blocks, or Conviction ratings
+      that appear in Technical Analysis, Fundamental Analysis, or Competitive Landscape.
+      Also remove any mini "Signals At A Glance" tables from individual sections.
 
-      1. **Title:** # {{ticker_upper}} — Investment Analysis ({{date}})
-         Subtitle: > *{{context}}*
+      YOUR OUTPUT MUST be clean Markdown only — start with the title heading below and end
+      with the footer. Do NOT output numbered instructions, JSON, meta-commentary, or any
+      text that looks like a template. Every line of your output is the final report.
 
-      2. **## Signals At A Glance**
-         {{ if asset_type == "etf" -}}
-         Extract scores and signals from each section. Include all ETF dimensions:
-         | Dimension | Score | Signal | One-Line Rationale |
-         |---|---|---|---|
-         | Technical | [score] | BULLISH / NEUTRAL / BEARISH | [from section] |
-         | Structure Quality | [score] | SOUND / ADEQUATE / FLAWED | [from section] |
-         | Expense Efficiency | [score] | LOW / AVERAGE / HIGH COST | [from section] |
-         | Concentration Risk | [score] | LOW / MODERATE / HIGH | [from section] |
-         | Flow Strength | [score] | STRONG / NEUTRAL / WEAK | [from section] |
-         | Conviction | [total] | STRONG BUY / BUY / HOLD / SELL / STRONG SELL | [from section] |
-         {{- else -}}
-         Extract score and signal from each section:
-         | Dimension | Score | Signal | One-Line Rationale |
-         |---|---|---|---|
-         | Technical | [score] | BULLISH / NEUTRAL / BEARISH | [from section] |
-         | Fundamental | [score] | OVERVALUED / FAIRLY VALUED / UNDERVALUED | [from section] |
-         | Competitive | [score] | STRENGTHENING / STABLE / WEAKENING | [from section] |
-         | Conviction | [total] | STRONG BUY / BUY / HOLD / SELL / STRONG SELL | [from section] |
-         Apply gate rule: if Total Score < +2 and the Investment Thesis rates STRONG BUY without an explicit regulatory or fundamental catalyst spelled out in Key Catalysts, DOWNGRADE the rating to BUY and annotate the warning. If core metrics are missing (marked "Data unavailable"), cap rating at BUY.
-         {{ end -}}
+      Begin output:
 
-      3. **## Executive Summary**
-         3-5 sentences: the single most important insight from each analysis dimension
-         and what the combined picture means for the analyst's stated context.
+      # {{ticker_upper}} — Investment Analysis ({{date}})
+      > *{{context}}*
 
-      4. **## Technical Analysis** — include the section verbatim with its sub-headings
+      ## Signals At A Glance
+      {{ if asset_type == "etf" -}}
+      Pick EXACTLY ONE signal value per row — never list alternatives with slashes:
+      | Dimension | Score | Signal | One-Line Rationale |
+      |---|---|---|---|
+      | Technical | [+1, 0, or -1] | [pick one: BULLISH or NEUTRAL or BEARISH] | [from section] |
+      | Structure Quality | [+1, 0, or -1] | [pick one: SOUND or ADEQUATE or FLAWED] | [from section] |
+      | Expense Efficiency | [+1, 0, or -1] | [pick one: LOW COST or AVERAGE or HIGH COST] | [from section] |
+      | Concentration Risk | [+1, 0, or -1] | [pick one: LOW or MODERATE or HIGH] | [from section] |
+      | Flow Strength | [+1, 0, or -1] | [pick one: STRONG or NEUTRAL or WEAK] | [from section] |
+      | Conviction | [total score] | [pick one: STRONG BUY or BUY or HOLD or SELL or STRONG SELL] | [from thesis] |
+      {{- else -}}
+      Pick EXACTLY ONE signal value per row — never list alternatives with slashes:
+      | Dimension | Score | Signal | One-Line Rationale |
+      |---|---|---|---|
+      | Technical | [+1, 0, or -1] | [pick one: BULLISH or NEUTRAL or BEARISH] | [from section] |
+      | Fundamental | [+1, 0, or -1] | [pick one: UNDERVALUED or FAIRLY VALUED or OVERVALUED] | [from section] |
+      | Competitive | [+1, 0, or -1] | [pick one: STRENGTHENING or STABLE or WEAKENING] | [from section] |
+      | Conviction | [total score] | [pick one: STRONG BUY or BUY or HOLD or SELL or STRONG SELL] | [from thesis] |
+      Apply gate rules from SCORE EXTRACTION above.
+      {{ end -}}
 
-      5. **## Fundamental Analysis** — include the section verbatim with its sub-headings
+      ## Executive Summary
+      3-5 sentences: the single most important insight from each analysis dimension
+      and what the combined picture means for the analyst's stated context.
 
-      6. **## Competitive Landscape** — include the section verbatim with its sub-headings
+      ## Technical Analysis
+      Copy the Technical Analysis section from above with all its sub-headings.
 
-      7. **## Investment Thesis** — include the section verbatim with its sub-headings
+      ## Fundamental Analysis
+      Copy the Fundamental Analysis section from above with all its sub-headings.
 
-        If the Investment Thesis rating conflicts with the gate rule above, adjust the rating per the rule and note the adjustment inline.
+      ## Competitive Landscape
+      Copy the Competitive Landscape section from above with all its sub-headings.
 
-      8. **Duplicate Check**
-        Ensure no section text is duplicated; if any section appears twice, keep the first and drop repeats while preserving headings.
+      ## Investment Thesis
+      Copy the Investment Thesis section from above with all its sub-headings.
+      If the rating conflicts with the gate rule, adjust per the rule and note the adjustment inline.
 
-      9. **## Action Items**
-         3-5 numbered, concrete actions the analyst should take NOW based on this report.
-         Tailor to the stated context: "{{context}}"
-         If personal notes are available and relevant, reference them.
+      ## Action Items
+      3-5 numbered, concrete actions the analyst should take NOW based on this report.
+      Tailor to the stated context: "{{context}}"
+      If personal notes are available and relevant, reference them.
 
-      10. **Footer:**
-         ---
-         *Report generated {{date}} by SAGIDE Research · Ticker: {{ticker_upper}} · Do your own due diligence.*
+      ---
+      *Report generated {{date}} by SAGIDE Research · Ticker: {{ticker_upper}} · Do your own due diligence.*
 
-      STRICT OUTPUT RULES:
-      - Output ONLY clean Markdown — no JSON, no meta-commentary, no instructions
-      - Sections 4-7: include analyst text verbatim, only add ## heading if missing
-      - Every signal and score in the Signals table must match the text in its section exactly
-      - Apply gate rule if applicable (Strong Buy with total score < +2)
-      - Personal notes: {{personal_context}}
+      End of output format. Personal notes: {{personal_context}}
 
 # ── Synthesis ─────────────────────────────────────────────────────────────────
 synthesis:

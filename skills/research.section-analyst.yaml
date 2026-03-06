@@ -106,14 +106,14 @@ implementation:
       Begin IMMEDIATELY with "## {{section_name}}" then the first sub-heading.
       Ground every finding in the source material. Write "Data unavailable" for facts not in source material.
 
-      ## ENTITY EXTRACTION RULES
+      ENTITY EXTRACTION RULES (internal — do NOT include this heading in output):
       - You MUST name at least 3 specific competitors or companies found in the source material.
       - You MUST name at least 3 specific technologies, platforms, or frameworks found in the source material.
       - Do not use generic terms (e.g. "cloud providers", "industry leaders") when specific names are available.
       - If insufficient named entities exist in source material → write "Data unavailable" for that item.
 
-      ## DATA INTEGRITY RULES
-      - Every numeric claim (market size, cost, growth rate, performance) MUST end with [Source: Name Year].
+      DATA INTEGRITY RULES (internal — do NOT include this heading in output):
+      - Every numeric claim (market size, cost, growth rate, performance) MUST end with a real source citation (e.g. [Source: Gartner 2025]) — never write "[Source: Name Year]" literally.
       - Analytical projections without a source MUST be flagged [Model Estimate].
       - Uncited numbers will be treated as hallucinations by the evaluator — omit them entirely.
 

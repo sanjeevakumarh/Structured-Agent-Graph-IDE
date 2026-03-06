@@ -26,7 +26,17 @@ public sealed class EmbeddingService
         // Resolve embedding model and its server URL from SAGIDE:Ollama:Servers
         // by finding the first model whose name contains "embed".
         (_model, _baseUrl) = ResolveEmbeddingFromServers(configuration);
+
+        if (string.IsNullOrEmpty(_model))
+            _logger.LogWarning("No embedding model found in SAGIDE:Ollama:Servers — " +
+                "RAG embed/search calls will return empty results. " +
+                "Add a model whose name contains 'embed' to fix this.");
+        else
+            _logger.LogInformation("Embedding model resolved: {Model} at {BaseUrl}", _model, _baseUrl);
     }
+
+    /// <summary>True when an embedding model was found in configuration.</summary>
+    public bool IsConfigured => !string.IsNullOrEmpty(_model);
 
     private static (string Model, string BaseUrl) ResolveEmbeddingFromServers(IConfiguration cfg)
     {
@@ -76,6 +86,12 @@ public sealed class EmbeddingService
     private async Task<IReadOnlyList<float[]>> EmbedBatchAsync(
         IReadOnlyList<string> texts, CancellationToken ct)
     {
+        if (!IsConfigured)
+        {
+            _logger.LogWarning("EmbedBatchAsync called but no embedding model is configured — returning empty");
+            return [];
+        }
+
         var results = new List<float[]>(texts.Count);
 
         for (var i = 0; i < texts.Count; i += _batchSize)

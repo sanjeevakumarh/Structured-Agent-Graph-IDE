@@ -15,6 +15,8 @@ public sealed class VectorStore
 {
     private readonly string _connectionString;
     private readonly ILogger<VectorStore> _logger;
+    private readonly SemaphoreSlim _initGate = new(1, 1);
+    private bool _initialized;
 
     public VectorStore(string dbPath, ILogger<VectorStore> logger)
     {
@@ -24,16 +26,28 @@ public sealed class VectorStore
 
     // ── Initialization ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Creates the rag_chunks table if it doesn't exist. Safe to call multiple times;
+    /// also called lazily on first use so no sync GetAwaiter().GetResult() is needed at startup.
+    /// </summary>
     public async Task InitializeAsync()
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync();
+        if (_initialized) return;
+        await _initGate.WaitAsync();
+        try
+        {
+            if (_initialized) return;
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync();
 
-        var cmd = conn.CreateCommand();
-        cmd.CommandText = CreateRagChunksTable;
-        await cmd.ExecuteNonQueryAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = CreateRagChunksTable;
+            await cmd.ExecuteNonQueryAsync();
 
-        _logger.LogDebug("VectorStore initialized");
+            _initialized = true;
+            _logger.LogDebug("VectorStore initialized");
+        }
+        finally { _initGate.Release(); }
     }
 
     // ── Write ─────────────────────────────────────────────────────────────────
@@ -45,6 +59,7 @@ public sealed class VectorStore
         string? sourceTag = null,
         CancellationToken ct = default)
     {
+        await InitializeAsync();
         if (chunks.Count != embeddings.Count)
             throw new ArgumentException("chunks and embeddings must have the same length");
 
@@ -86,6 +101,7 @@ public sealed class VectorStore
         string? sourceTag = null,
         CancellationToken ct = default)
     {
+        await InitializeAsync();
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
 

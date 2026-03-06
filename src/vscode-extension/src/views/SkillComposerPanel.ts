@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import * as http from 'http';
+import { fetchJson } from '../utils/fetchJson';
 
 // ── Data types ──────────────────────────────────────────────────────────────────
 
@@ -333,27 +333,6 @@ function computeLayers(nodes: SkillNode[], edges: SkillEdge[]): string[][] {
     return layers;
 }
 
-// ── HTTP helper ─────────────────────────────────────────────────────────────────
-
-function fetchJson<T>(baseUrl: string, path: string): Promise<T> {
-    return new Promise((resolve, reject) => {
-        const url = `${baseUrl.replace(/\/$/, '')}${path}`;
-        const req = http.get(url, { timeout: 5_000 }, (res) => {
-            let body = '';
-            res.on('data', (chunk: string) => body += chunk);
-            res.on('end', () => {
-                if ((res.statusCode ?? 0) >= 400) {
-                    reject(new Error(`HTTP ${res.statusCode}`));
-                } else {
-                    try { resolve(JSON.parse(body) as T); }
-                    catch { reject(new Error('Invalid JSON')); }
-                }
-            });
-        });
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
-    });
-}
 
 function escapeHtml(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

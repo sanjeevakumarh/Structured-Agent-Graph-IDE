@@ -161,8 +161,8 @@ public sealed class SchedulerService : BackgroundService
         var modelId      = prompt.ModelPreference?.Primary
                         ?? prompt.ModelPreference?.Orchestrator
                         ?? string.Empty;
-        var providerStr  = ParseProviderFromModelId(modelId);
-        var cleanModelId = StripProviderPrefix(modelId);
+        var providerStr  = ModelIdParser.ParseProvider(modelId);
+        var cleanModelId = ModelIdParser.StripPrefix(modelId);
 
         var task = new AgentTask
         {
@@ -185,19 +185,4 @@ public sealed class SchedulerService : BackgroundService
             taskId, prompt.Domain, prompt.Name);
     }
 
-    internal static ModelProvider ParseProviderFromModelId(string modelId)
-    {
-        if (modelId.StartsWith("claude", StringComparison.OrdinalIgnoreCase))  return ModelProvider.Claude;
-        if (modelId.StartsWith("ollama/", StringComparison.OrdinalIgnoreCase)) return ModelProvider.Ollama;
-        if (modelId.StartsWith("codex/", StringComparison.OrdinalIgnoreCase) ||
-            modelId.StartsWith("openai/", StringComparison.OrdinalIgnoreCase)) return ModelProvider.Codex;
-        if (modelId.StartsWith("gemini/", StringComparison.OrdinalIgnoreCase)) return ModelProvider.Gemini;
-        return ModelProvider.Ollama;
-    }
-
-    internal static string StripProviderPrefix(string modelId)
-    {
-        var slash = modelId.IndexOf('/');
-        return slash >= 0 ? modelId[(slash + 1)..] : modelId;
-    }
 }

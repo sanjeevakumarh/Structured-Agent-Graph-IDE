@@ -1420,9 +1420,12 @@ public sealed class SubtaskCoordinator
                 return allVars;
 
             // Clone allVars rather than mutating the shared dict.
+            // Pre-render parameter values so nested Scriban expressions like
+            // "{{assembler_result}}" or "{{idea}}" are resolved before injection.
+            var rendered = PreRenderParameters(subtask.Parameters, allVars);
             return new Dictionary<string, object>(allVars, StringComparer.OrdinalIgnoreCase)
             {
-                ["parameters"] = subtask.Parameters,
+                ["parameters"] = rendered,
             };
         }
 
@@ -1451,11 +1454,31 @@ public sealed class SubtaskCoordinator
             if (allVars.TryGetValue(key, out var val))
                 result[key] = val;
 
-        // Inject skill parameters so templates can reference {{parameters.X}}
+        // Inject skill parameters so templates can reference {{parameters.X}}.
         if (subtask.Parameters.Count > 0)
-            result["parameters"] = subtask.Parameters;
+            result["parameters"] = PreRenderParameters(subtask.Parameters, allVars);
 
         return result;
+    }
+
+    /// <summary>
+    /// Pre-renders Scriban expressions in parameter values against the current variable
+    /// context so that nested templates like <c>{{assembler_result}}</c> or <c>{{idea}}</c>
+    /// are resolved before being injected as <c>parameters.*</c> in the template context.
+    /// </summary>
+    private static Scriban.Runtime.ScriptObject PreRenderParameters(
+        Dictionary<string, object> parameters,
+        Dictionary<string, object> vars)
+    {
+        var rendered = new Scriban.Runtime.ScriptObject();
+        foreach (var kv in parameters)
+        {
+            if (kv.Value is string s && s.Contains("{{"))
+                rendered[kv.Key] = PromptTemplate.RenderRaw(s, vars);
+            else
+                rendered[kv.Key] = kv.Value;
+        }
+        return rendered;
     }
 
     private async Task<string> WaitForTaskAsync(string taskId, CancellationToken ct)

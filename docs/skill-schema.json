@@ -57,8 +57,11 @@
         "properties": {
           "needs": {
             "type": "array",
-            "items": { "type": "string" },
-            "description": "Required model capabilities (e.g. deep_reasoning, long_context_understanding)."
+            "items": {
+              "type": "string",
+              "enum": ["fast_general", "deep_analyst", "coder", "extractor", "critic"]
+            },
+            "description": "Required model capabilities. Must use approved vocabulary slots."
           },
           "context_window_min": {
             "type": "string",

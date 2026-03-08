@@ -47,7 +47,20 @@ public class ClaudeProvider : BaseHttpAgentProvider
     };
 
     protected override string? ExtractContent(JsonDocument response)
-        => response.RootElement.GetProperty("content")[0].GetProperty("text").GetString();
+    {
+        // Use TryGetProperty to avoid KeyNotFoundException when the API response
+        // has an unexpected shape (e.g. error responses, future API changes).
+        if (response.RootElement.TryGetProperty("content", out var content) &&
+            content.ValueKind == JsonValueKind.Array &&
+            content.GetArrayLength() > 0 &&
+            content[0].TryGetProperty("text", out var text))
+        {
+            return text.GetString();
+        }
+
+        _logger.LogWarning("Claude API response missing expected 'content[0].text' field");
+        return null;
+    }
 
     protected override void ExtractTokenUsage(JsonDocument response)
     {

@@ -17,6 +17,15 @@ public sealed class TextChunker
 
     public TextChunker(int chunkSize = 1500, int overlap = 200)
     {
+        if (chunkSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(chunkSize), chunkSize, "chunkSize must be positive");
+        if (overlap < 0)
+            throw new ArgumentOutOfRangeException(nameof(overlap), overlap, "overlap must be non-negative");
+        if (overlap >= chunkSize)
+            throw new ArgumentException(
+                $"overlap ({overlap}) must be less than chunkSize ({chunkSize}); " +
+                "otherwise the chunking loop would never advance.", nameof(overlap));
+
         _chunkSize = chunkSize;
         _overlap   = overlap;
     }

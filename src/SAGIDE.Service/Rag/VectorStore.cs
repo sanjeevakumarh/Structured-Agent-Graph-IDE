@@ -155,8 +155,17 @@ public sealed class VectorStore
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM rag_chunks WHERE source_url LIKE @prefix";
-        cmd.Parameters.AddWithValue("@prefix", urlPrefix + "%");
+        // Escape LIKE wildcards in the caller-supplied prefix so a URL that happens
+        // to contain '%' or '_' does not accidentally match unintended rows.
+        // NOTE: the backslash replacement MUST come first; if it were done after the
+        // '%' or '_' replacements, the newly introduced backslashes would themselves
+        // be double-escaped, corrupting the pattern.
+        var escapedPrefix = urlPrefix
+            .Replace("\\", "\\\\")
+            .Replace("%",  "\\%")
+            .Replace("_",  "\\_");
+        cmd.CommandText = "DELETE FROM rag_chunks WHERE source_url LIKE @prefix ESCAPE '\\'";
+        cmd.Parameters.AddWithValue("@prefix", escapedPrefix + "%");
         var deleted = await cmd.ExecuteNonQueryAsync(ct);
         _logger.LogDebug("VectorStore deleted {Count} chunks with prefix {Prefix}", deleted, urlPrefix);
     }

@@ -221,6 +221,47 @@ public class TextChunkerTests
         Assert.Empty(chunks);
     }
 
+    // ── Constructor validation ────────────────────────────────────────────────
+
+    [Fact]
+    public void Constructor_ZeroChunkSize_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TextChunker(chunkSize: 0, overlap: 0));
+    }
+
+    [Fact]
+    public void Constructor_NegativeChunkSize_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TextChunker(chunkSize: -1, overlap: 0));
+    }
+
+    [Fact]
+    public void Constructor_NegativeOverlap_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TextChunker(chunkSize: 100, overlap: -1));
+    }
+
+    [Fact]
+    public void Constructor_OverlapEqualsChunkSize_Throws()
+    {
+        // overlap == chunkSize would cause ChunkFixed to never advance (i += 0)
+        Assert.Throws<ArgumentException>(() => new TextChunker(chunkSize: 10, overlap: 10));
+    }
+
+    [Fact]
+    public void Constructor_OverlapGreaterThanChunkSize_Throws()
+    {
+        // overlap > chunkSize would cause ChunkFixed to go backwards
+        Assert.Throws<ArgumentException>(() => new TextChunker(chunkSize: 10, overlap: 11));
+    }
+
+    [Fact]
+    public void Constructor_ValidArguments_DoesNotThrow()
+    {
+        var ex = Record.Exception(() => new TextChunker(chunkSize: 10, overlap: 9));
+        Assert.Null(ex);
+    }
+
     // ── Default constructor ───────────────────────────────────────────────────
 
     [Fact]

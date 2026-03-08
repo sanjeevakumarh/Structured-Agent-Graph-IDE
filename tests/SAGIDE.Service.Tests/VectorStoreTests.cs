@@ -154,6 +154,64 @@ public class VectorStoreTests : IAsyncLifetime
         Assert.Equal(2, results.Count);
     }
 
+    // ── DeleteBySourceUrlPrefix — LIKE wildcard escaping ─────────────────────
+
+    [Fact]
+    public async Task DeleteBySourceUrlPrefix_PlainPrefix_DeletesMatchingChunks()
+    {
+        var chunks = Chunks(
+            ("keep",   "http://other/doc.txt", 0),
+            ("delete", "http://project/a.txt", 0),
+            ("delete", "http://project/b.txt", 0));
+        var v = Vecs(new[] { 1f, 0f }, new[] { 1f, 0f }, new[] { 1f, 0f });
+
+        await _store.UpsertAsync(chunks, v);
+        await _store.DeleteBySourceUrlPrefixAsync("http://project/");
+
+        var results = await _store.SearchAsync(new[] { 1f, 0f }, topK: 10);
+
+        Assert.Single(results);
+        Assert.Equal("keep", results[0].Chunk.Text);
+    }
+
+    [Fact]
+    public async Task DeleteBySourceUrlPrefix_PrefixContainsPercent_OnlyDeletesExactPrefix()
+    {
+        // A prefix that literally contains '%' should be treated as a literal character,
+        // not a LIKE wildcard, so only URLs that actually start with "http://host%"
+        // should be deleted — all others must survive.
+        var chunks = Chunks(
+            ("should delete", "http://host%2Fpath/file.txt", 0),
+            ("should keep",   "http://host/anything/file.txt", 0));
+        var v = Vecs(new[] { 1f, 0f }, new[] { 1f, 0f });
+
+        await _store.UpsertAsync(chunks, v);
+        await _store.DeleteBySourceUrlPrefixAsync("http://host%2Fpath/");
+
+        var results = await _store.SearchAsync(new[] { 1f, 0f }, topK: 10);
+
+        Assert.Single(results);
+        Assert.Equal("should keep", results[0].Chunk.Text);
+    }
+
+    [Fact]
+    public async Task DeleteBySourceUrlPrefix_PrefixContainsUnderscore_OnlyDeletesExactPrefix()
+    {
+        // '_' is a single-character wildcard in LIKE; must be escaped to be literal.
+        var chunks = Chunks(
+            ("should delete", "http://my_bucket/file.txt", 0),
+            ("should keep",   "http://myXbucket/file.txt", 0));
+        var v = Vecs(new[] { 1f, 0f }, new[] { 1f, 0f });
+
+        await _store.UpsertAsync(chunks, v);
+        await _store.DeleteBySourceUrlPrefixAsync("http://my_bucket/");
+
+        var results = await _store.SearchAsync(new[] { 1f, 0f }, topK: 10);
+
+        Assert.Single(results);
+        Assert.Equal("should keep", results[0].Chunk.Text);
+    }
+
     // ── Scores are in [0, 1] ──────────────────────────────────────────────────
 
     [Fact]

@@ -150,7 +150,7 @@ internal static class SkillsEndpoints
                 // Build a minimal synthetic PromptDefinition that runs just this skill
                 var defaultModel = config[$"SAGIDE:Routing:Capabilities:deep_analyst"]
                                 ?? config[$"SAGIDE:Routing:Capabilities:fast_general"]
-                                ?? "ollama/gemma3:27b@workstation";
+                                ?? "openai/gpt-oss-120b@gmini";
                 var prompt = new PromptDefinition
                 {
                     Name       = skill.Name,

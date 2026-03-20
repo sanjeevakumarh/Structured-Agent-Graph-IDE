@@ -1,5 +1,6 @@
 using SAGIDE.Contracts;
 using SAGIDE.Core.DTOs;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Prompts;
@@ -59,7 +60,7 @@ internal static class PromptEndpoints
             Dictionary<string, string>? variables,
             IPromptRegistry registry,
             AgentOrchestrator orchestrator,
-            SubtaskCoordinator coordinator,
+            ISubtaskCoordinator coordinator,
             CancellationToken ct) =>
         {
             var prompt = registry.GetByKey(domain, name);

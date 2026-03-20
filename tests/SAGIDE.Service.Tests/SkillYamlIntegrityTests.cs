@@ -29,6 +29,7 @@ public class SkillYamlIntegrityTests
     [
         "localhost",
         "workstation",
+        "gmini",
         "mini",
         "edge",
         "orin",

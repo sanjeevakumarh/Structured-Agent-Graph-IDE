@@ -27,6 +27,8 @@
     <ProjectReference Include="..\..\src\SAGIDE.Service\SAGIDE.Service.csproj" />
     <ProjectReference Include="..\..\src\SAGIDE.Core\SAGIDE.Core.csproj" />
     <ProjectReference Include="..\..\src\SAGIDE.Contracts\SAGIDE.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\SAGIDE.Workflows\SAGIDE.Workflows.csproj" />
+    <ProjectReference Include="..\..\src\SAGIDE.Memory\SAGIDE.Memory.csproj" />
   </ItemGroup>
 
 </Project>

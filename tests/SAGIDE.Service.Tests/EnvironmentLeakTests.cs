@@ -8,7 +8,7 @@ namespace SAGIDE.Service.Tests;
 /// appsettings.json under SAGIDE:Ollama:Servers[].Name and SAGIDE:OpenAICompatible:Servers[].Name.
 /// Real hostnames belong only inside appsettings.json (which is gitignored / kept private).
 ///
-/// Approved aliases: localhost, workstation, mini, edge, orin
+    /// Approved aliases: localhost, workstation, 
 /// When you add a new machine, add its alias here AND in appsettings.json — never use the real hostname elsewhere.
 /// </summary>
 public class EnvironmentLeakTests
@@ -16,16 +16,12 @@ public class EnvironmentLeakTests
     // Logical aliases defined in appsettings.json — the ONLY names permitted in @machine notation
     private static readonly HashSet<string> ApprovedAliases =
     [
-        "localhost",
-        "workstation",
-        "mini",
-        "edge",
-        "orin",
     ];
 
     // Real hostnames / usernames that must never appear in shared files
     private static readonly string[] ForbiddenPatterns =
     [
+
     ];
 
     // Directories that are shared (scanned for leaks)

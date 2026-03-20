@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Service.Communication;
 using SAGIDE.Service.Communication.Messages;
 using SAGIDE.Service.Events;
@@ -12,13 +13,13 @@ public class ServiceLifetime : BackgroundService
 {
     private readonly NamedPipeServer    _pipeServer;
     private readonly AgentOrchestrator  _orchestrator;
-    private readonly WorkflowEngine     _workflowEngine;
+    private readonly IWorkflowEngine    _workflowEngine;
     private readonly ILogger<ServiceLifetime> _logger;
 
     public ServiceLifetime(
         NamedPipeServer    pipeServer,
         AgentOrchestrator  orchestrator,
-        WorkflowEngine     workflowEngine,
+        IWorkflowEngine    workflowEngine,
         CommunicationConfig commConfig,
         IEventBus          eventBus,
         ILogger<ServiceLifetime> logger)

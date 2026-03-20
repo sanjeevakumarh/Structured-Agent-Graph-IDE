@@ -49,5 +49,21 @@ reports/
 # Extension
 *.vsix
 
-# Cache
-.cache/
+# Planning / research artifacts
+.planning/
+
+# Test results and coverage
+TestResults/
+coverage/
+perfdata/
+*.trx
+*.coverage
+*.coveragexml
+
+# Benchmark results
+benchmarkDotNetArtifacts/
+
+# Debug / temp
+*.tmp
+tmp/
+.tmp/

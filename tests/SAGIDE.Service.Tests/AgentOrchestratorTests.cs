@@ -323,6 +323,7 @@ public class MessageHandlerTests
             new TaskAffinitiesConfig(),
             policyEngine,
             new Infrastructure.GitService(NullLogger<Infrastructure.GitService>.Instance),
+            new NullWorkflowStepRenderer(),
             NullLogger<WorkflowEngine>.Instance);
 
         return new MessageHandler(

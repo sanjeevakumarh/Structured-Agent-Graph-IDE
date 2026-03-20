@@ -10,11 +10,12 @@ description: >
   AI/ML, embedded systems, vision models, research papers. Runs every Monday at 9am.
 
 model_preference:
-  orchestrator: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+  orchestrator: openai/gpt-oss-120b@gmini
+  fallback: ollama/qwen3:30b-a3b@workstation
   subtasks:
-    hardware_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
-    software_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
-    paper_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    hardware_scan: ollama/qwen3:30b-a3b@workstation
+    software_scan: ollama/qwen3:30b-a3b@workstation
+    paper_scan: ollama/qwen3:30b-a3b@workstation
 
 variables:
   max_results: "10"

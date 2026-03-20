@@ -68,7 +68,7 @@ implementation:
 
   - name: direct_stats
     type: web_fetch
-    source: "https://stockanalysis.com/stocks/{{parameters.ticker | string.upcase}}/financials/"
+    source: "https://stockanalysis.com/{{ if parameters.asset_type == 'etf' }}etf{{ else }}stocks{{ end }}/{{parameters.ticker | string.upcase}}/financials/"
     max_chars_per_page: 4000
     output_var: stockanalysis_data
 

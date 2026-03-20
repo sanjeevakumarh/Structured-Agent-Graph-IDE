@@ -2,50 +2,162 @@
 
 Local-first deterministic workflow + RAG runtime for agent-native engineering.
 
-Built as a .NET 9 orchestration service with SQLite WAL persistence, prompt registry/templates, scheduler, and RAG pipeline (fetch → chunk → embed → vector search) plus a thin VS Code extension. Runs fully local with Ollama; swap to Claude/Codex/Gemini by adding keys.
+A .NET 9 orchestration service with SQLite WAL persistence, prompt/skill registries, scheduler, and RAG pipeline (fetch → chunk → embed → vector search). Multiple clients connect via REST API and named-pipe IPC: a VS Code extension, a CLI, a Logseq plugin, and a built-in web dashboard. Runs fully local with Ollama or LM Studio; swap to Claude/Codex/Gemini by adding keys.
 
 ## What makes this different
-- Local-first, provider-agnostic: works fully offline with Ollama; affinity routing spans local/cloud (Claude/Codex/Gemini) and multiple Ollama hosts.
-- Workflow + RAG: queueing/scheduling, DLQ, retries/timeouts, prompt registry/templates, and a built-in RAG pipeline (web fetch/search, chunk, embed, vector search) that feeds orchestrated subtasks.
-- Split architecture: orchestration engine in a .NET service; thin VS Code extension over named pipes (<10ms). Broadcasts reach all clients fast and don’t burden the extension host.
+- Local-first, provider-agnostic: works fully offline with Ollama or LM Studio; affinity routing spans local/cloud (Claude/Codex/Gemini) and multiple Ollama hosts.
+- Service is the product: a self-contained orchestration platform exposing REST + named-pipe IPC. Clients (VS Code, CLI, Logseq, web dashboard) are thin and interchangeable.
+- Workflow + RAG: queueing/scheduling, DLQ, retries/timeouts, prompt/skill registry/templates, and a built-in RAG pipeline (web fetch/search, chunk, embed, vector search) that feeds orchestrated subtasks.
 - Workflow engine: DAGs, routers, pause/resume, human approval gates, auditable activity logs—closer to a mini Temporal/Airflow than chat UIs.
 
 ## Capabilities
 - Task orchestration with queueing, scheduler, DLQ, persistence, retry/timeout policies.
-- Workflow engine with DAGs/routers/pause/resume/human approval gates, context var substitution ({{var}}), Git-linked activity logging, and prompt registry/templates loaded from `prompts/`.
+- Workflow engine with DAGs/routers/pause/resume/human approval gates, context var substitution ({{var}}), Git-linked activity logging, prompt registry/templates loaded from `prompts/`, and skill registry loaded from `skills/`.
 - RAG pipeline: web fetch/search, text chunking, embeddings, vector search, cache, and safety redaction feeding orchestrated subtasks.
 - Multi-provider LLM support (Claude, Codex, Gemini, Ollama) with streaming, token counting, structured parsing, and affinity-based model routing across multiple Ollama hosts.
-- VS Code UI: Active Tasks, History, DLQ, Workflow Explorer graph, Streaming Output, Diff Approval, Comparison panel, Problems integration.
-- Extras: CLI (`tools/cli/sag`), Logseq plugin scaffold, build/deploy helpers (`utils/*.ps1`/`.sh`), comparison groups, configurable concurrency.
+- Quality scoring, workflow policy enforcement (protected paths, max steps), audit logging, and run tracing.
+- Clients: VS Code extension (Active Tasks, History, DLQ, Workflow Explorer, Streaming Output, Diff Approval), CLI (`sag`), web dashboard at `http://localhost:5100`, Logseq plugin scaffold.
+- Extras: 39 skill definitions (`skills/`), build/deploy/validation PowerShell scripts, comparison groups, configurable concurrency.
 
-## Architecture (high level)
+## Architecture
 
-### Task and workflow path
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant V as VS Code Extension
-  participant P as Named Pipe
-  participant S as .NET Orchestration Service
-  participant M as Model Provider
-  participant D as Persistence (SQLite)
+### Service modules (`src/SAGIDE.*`)
 
-  U->>V: Submit Task / Run Workflow
-  V->>P: PipeMessage (submit_task/start_workflow)
-  P->>S: MessageHandler (15+ message types)
-  S->>D: Persist task/workflow (SQLite WAL)
-  S->>M: Send prompt (streaming enabled)
-  M-->>S: Stream output (real-time chunks, token counts)
-  S-->>P: Task updates / streaming (<0.5ms broadcast)
-  P-->>V: UI updates
-  V-->>U: Status, output, diffs (Apply/Skip buttons)
+The orchestration service is the core of the system. It is split across 7 projects:
+
+| Project | Responsibility |
+|---------|----------------|
+| **SAGIDE.Service** | Host: ASP.NET Core Kestrel, named-pipe server, REST API (12 endpoint groups), web dashboard (`wwwroot/`) |
+| **SAGIDE.Contracts** | Interfaces: `IPromptRegistry`, `ISkillRegistry`, `PromptDefinition`, `SkillDefinition` |
+| **SAGIDE.Core** | Domain models, DTOs, events |
+| **SAGIDE.Workflows** | Workflow engine: DAG evaluation, step dispatch, approval gates, loop control, instance store, policy engine, run tracing |
+| **SAGIDE.ModelRouter** | Capability-based model routing, quality sampling |
+| **SAGIDE.Memory** | RAG pipeline: `WebFetcher`, `WebSearchAdapter`, `TextChunker`, `EmbeddingService`, `VectorStore`, `NotesIndexerService` |
+| **SAGIDE.Security** | Bearer-token auth (HMAC constant-time), SQLite audit log |
+| **SAGIDE.Observability** | OpenTelemetry tracing (ASP.NET Core, HttpClient, OTLP exporters) |
+| **SAGIDE.Tools** | In-process tool registry for agent tool calls |
+
+### Service internals (`src/SAGIDE.Service/`)
+
+```
+SAGIDE.Service/
+├── Api/               REST endpoints (12 groups)
+│   ├── TaskEndpoints.cs        /api/tasks
+│   ├── PromptEndpoints.cs      /api/prompts
+│   ├── SkillsEndpoints.cs      /api/skills
+│   ├── ResultEndpoints.cs      /api/results
+│   ├── ReportsEndpoints.cs     /api/reports
+│   ├── NotesEndpoints.cs       /api/notes
+│   ├── MetricsEndpoints.cs     /api/metrics
+│   ├── MemoryEndpoints.cs      /api/memory
+│   └── ...
+├── Communication/     Named-pipe IPC
+│   ├── NamedPipeServer.cs      Multi-client server with binary framing
+│   ├── MessageHandler.cs       15+ message types (submit_task, start_workflow, ...)
+│   └── Messages/PipeMessage.cs
+├── Orchestrator/      Task + workflow coordination
+│   ├── AgentOrchestrator.cs    Routes tasks to providers, manages lifecycle
+│   ├── SubtaskCoordinator.cs   Expands prompts into subtasks, dispatches, synthesizes
+│   ├── TaskQueue.cs            Priority queue with DLQ
+│   ├── QualityScorer.cs        Post-run quality evaluation
+│   └── Templates/              Built-in workflow YAML (6 templates)
+├── Providers/         LLM backends
+│   ├── ProviderFactory.cs      Selects provider by name/modelId
+│   ├── ClaudeProvider.cs
+│   ├── CodexProvider.cs
+│   ├── GeminiProvider.cs
+│   ├── OllamaProvider.cs       Multi-host with affinity routing
+│   └── OllamaHostHealthMonitor.cs
+├── Rag/               RAG pipeline (mirrors SAGIDE.Memory)
+├── Persistence/       SQLite repositories (11)
+│   ├── SqliteTaskRepository.cs
+│   ├── SqliteWorkflowRepository.cs
+│   ├── SqliteSchedulerRepository.cs
+│   ├── SearchCacheRepository.cs
+│   └── ...
+├── Scheduling/        Cron-based prompt scheduler
+├── Prompts/           Prompt/skill file registry
+├── Routing/           Capability-based model routing
+├── Resilience/        Retry, timeout, circuit-breaker policies
+├── Events/            Event bus (broadcast to pipe clients)
+└── wwwroot/           Web dashboard (HTML/JS/CSS)
 ```
 
-### Why named pipes
+### Clients
+
+| Client | Protocol | Source |
+|--------|----------|--------|
+| **VS Code extension** | Named pipe (IPC) | `src/vscode-extension/` |
+| **CLI (`sag`)** | REST API | `tools/cli/sag/` |
+| **Web dashboard** | REST API (built-in) | Served from `SAGIDE.Service/wwwroot/` at `/` |
+| **Logseq plugin** | REST API | `tools/logseq-plugin/` |
+
+Any HTTP client can consume the REST API; any named-pipe client can subscribe to real-time broadcasts.
+
+### Request flow
+
+```mermaid
+graph LR
+  subgraph Clients
+    VSC[VS Code Extension]
+    CLI[CLI - sag]
+    WEB[Web Dashboard]
+    LOG[Logseq Plugin]
+  end
+
+  subgraph SAGIDE.Service
+    NP[Named Pipe Server]
+    API[REST API]
+    ORCH[AgentOrchestrator]
+    WF[WorkflowEngine]
+    SCH[Scheduler]
+    Q[TaskQueue + DLQ]
+    REG[Prompt/Skill Registry]
+    RAG[RAG Pipeline]
+    P[ProviderFactory]
+    DB[(SQLite WAL)]
+  end
+
+  subgraph External
+    OLL[Ollama]
+    CLO[Claude / Codex / Gemini]
+    SFX[SearXNG]
+  end
+
+  VSC -- pipe messages --> NP
+  CLI -- HTTP --> API
+  WEB -- HTTP --> API
+  LOG -- HTTP --> API
+
+  NP --> ORCH
+  API --> ORCH
+  SCH --> ORCH
+
+  ORCH --> Q
+  ORCH --> REG
+  ORCH --> RAG
+  ORCH --> P
+  ORCH --> WF
+
+  P --> OLL
+  P --> CLO
+  RAG --> SFX
+  Q --> DB
+  WF --> DB
+  ORCH --> DB
+```
+
+### Why named pipes for VS Code
 - Keeps the extension host lean; orchestration/state lives in the isolated .NET process with bidirectional IPC and per-client write locks.
 - Avoids Node event-loop stalls under heavy streaming with concurrent task queue, retry policies, and timeout management.
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
-- ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
+- Real-time broadcasts (task updates, streaming chunks) reach all connected clients in <0.5ms.
+
+## Updates (2026-03-20)
+- README overhaul: architecture redesign positions the .NET service as the core product. Added service modules table (9 projects), service internals tree, clients table (VS Code, CLI, Logseq, web dashboard), and a component-level Mermaid diagram replacing the VS Code-centric sequence diagram.
+- LM Studio support documented: `OpenAICompatible` provider config covers LM Studio servers alongside Ollama. README split into Ollama and LM Studio subsections with install/verify steps and config examples.
+- PowerShell script audit: fixed `Invoke-EndToEndTest.ps1` referencing `build-all.ps1` at repo root (script lives in `utils/`). README now documents all 18 scripts across build/deploy, testing, infrastructure, and a 10-script validation suite.
+- `.gitignore` refresh: added `.planning/` and test result directories (`TestResults/`, `coverage/`, `perfdata/`, `*.trx`, `benchmarkDotNetArtifacts/`, `tmp/`) to exclude build/test/debug artifacts from version control.
 
 ## Updates (2026-03-14)
 - New `SAGIDE.Contracts` project surfaces Prompt/Skill definitions and registry interfaces; registries now merge file + API registrations, DI exposes interfaces, and prompt/skill endpoints gain register/bulk/delete flows plus typed resolution across orchestrator components and tests.
@@ -112,9 +224,8 @@ sequenceDiagram
 ## Prerequisites (summary)
 - OS: Windows 10/11 (full named-pipe support)
 - Runtime/tooling: .NET SDK 9.0, Node.js 20+ (npm 10+), VS Code 1.85+
-- Packaging: `vsce` (`npm install -g @vscode/vsce`) to build the VSIX
-- Models: Ollama with at least one model (e.g., `qwen2.5-coder:7b-instruct`) and `nomic-embed-text` for RAG; cloud keys optional (Anthropic/OpenAI/Google)
-- Optional: SearXNG for web search, Logseq 0.9+ if using the plugin
+- Models: Ollama or LM Studio with at least one model (e.g., `qwen2.5-coder:7b-instruct`) and `nomic-embed-text` for RAG; cloud keys optional (Anthropic/OpenAI/Google)
+- Optional: Docker (for SearXNG), Logseq 0.9+ if using the plugin
 
 ## First-time setup
 1) Clone
@@ -124,49 +235,88 @@ cd SAGExtention
 ```
 
 2) Configure
-- Copy `src/SAGIDE.Service/appsettings.Template.json` to `src/SAGIDE.Service/appsettings.json`.
-- Fill API keys (Anthropic/OpenAI/Google) and set Ollama server/models and optional `Rag.SearchUrl` (SearXNG).
+- Edit `src/SAGIDE.Service/appsettings.json` directly.
+- Set API keys (Anthropic/OpenAI/Google), Ollama server URLs/models, and optional `Rag`/`Notes` settings.
 - Align VS Code setting `sagIDE.pipeName` with `SAGIDE:NamedPipeName` (default `SAGIDEPipe`).
 
 3) Install prerequisites
-- Verify: `dotnet --version` (9.x), `node --version` (20.x), `npm --version`, `vsce --version`.
+- Verify: `dotnet --version` (9.x), `node --version` (20.x), `npm --version`.
 - Pull models: `ollama pull qwen2.5-coder:7b-instruct` and `ollama pull nomic-embed-text`.
+- Optional: run `./utils/validation/Invoke-CodexValidation.ps1` to verify all prerequisites at once.
 
 4) Build, test, deploy
 ```powershell
-./build-all.ps1          # builds service, CLI, extension (packages VSIX), Logseq plugin
+./utils/build-all.ps1 -BuildClients   # builds service, CLI, extension (packages VSIX), Logseq plugin
 dotnet test tests/SAGIDE.Service.Tests
-./deploy.ps1             # installs VSIX locally and starts service (if scripted)
+./deploy.ps1                          # installs VSIX locally and starts service
 ```
 
 5) Run the stack
-- Service: `dotnet run --project src/SAGIDE.Service/SAGIDE.Service.csproj` (or keep deploy.ps1 running).
-- Extension: install `src/vscode-extension/sag-ide-0.1.0.vsix` then press F5 or reload VS Code.
+- Service: `dotnet run --project src/SAGIDE.Service/SAGIDE.Service.csproj` (or use `./deploy.ps1`).
+- Extension: install the VSIX from `src/vscode-extension/` then reload VS Code.
 - CLI: `dotnet run --project tools/cli/sag/sag.csproj -- --help`.
 - Web dashboard: open `http://localhost:5100`.
 - Logseq (optional): load `tools/logseq-plugin/` as unpacked plugin (Developer Mode), set `baseUrl=http://localhost:5100`.
 
 ## Use the features 
 - VS Code extension: submit tasks (`SAGIDE: Submit Task`), review files, run prompt library items, manage DLQ (retry/discard), compare models, stream output, start/pause/resume workflows, and toggle git auto-commit/activity logging.
-- CLI: `sag health`, `sag prompts [domain]`, `sag submit --prompt <domain/name> --var key=val`, `sag status [taskId]`, `sag results`, `sag cancel <taskId>`, `sag reports [domain] [file]`.
+- CLI: `sag health`, `sag prompts [domain]`, `sag submit --prompt <domain/name> --var key=val`, `sag status [taskId]`, `sag results [--tag tag] [--since today] [--limit N]`, `sag cancel <taskId>`, `sag reports [domain] [file] [--html]`.
 - Web dashboard: monitor tasks, prompts, reports, and workflows (cancel/pause/resume) at `http://localhost:5100`.
 - Scheduler: add `schedule: "* * * * *"` (cron) to a prompt; scheduler fires and tags results (e.g., `scheduled_finance`).
 - Workflows: run via VS Code (`Run Workflow`) or API; supports sequential/parallel, router branches, pause/resume, human approval gates, convergence loops, and restart recovery.
 - RAG pipeline: use prompts with `data_collection` (web_api/web_search_batch) and embeddings; ensure `nomic-embed-text` is running in Ollama.
 - Logseq plugin: `/sag run`, `/sag status`, `/sag prompts` with insert modes (current-block/new-page/notification-only).
-- REST API: `POST /api/tasks`, `GET /api/tasks/{id}`, `POST /api/prompts/{domain}/{name}/run`, `GET /api/reports`.
+- REST API: `POST /api/tasks`, `GET /api/tasks/{id}`, `DELETE /api/tasks/{id}`, `POST /api/prompts/{domain}/{name}/run`, `GET /api/reports`.
 
 ## Quick validation
 - `curl http://localhost:5100/api/health` → `{"status":"ok"...}`
 - VS Code status bar shows `SAG: Connected`; prompt library lists domains; tasks stream output.
 - `sag status` returns recent tasks; web dashboard shows live task list; scheduler logs firing messages if cron prompts exist.
 
+## PowerShell scripts
+
+### Build and deploy
+| Script | Location | Purpose |
+|--------|----------|---------|
+| `build-all.ps1` | `utils/` | Builds .NET solution, optionally CLI + VS Code extension (VSIX) + Logseq plugin (`-BuildClients`) |
+| `deploy.ps1` | root | Installs VSIX, starts backend service, runs health check. Flags: `-SkipExtension`, `-SkipService`, `-InstallCli`, `-Background` |
+| `kill-and-start.ps1` | root | Quick dev helper: kills running service, restarts from Release build |
+| `clean-all.ps1` | `utils/` | Removes `bin/`, `obj/`, `out/`, `dist/`, `node_modules/`, `*.vsix`, `*.bak`, `package-lock.json` |
+
+### Testing
+| Script | Location | Purpose |
+|--------|----------|---------|
+| `Invoke-EndToEndTest.ps1` | `utils/` | Full pipeline: optional build → start service (isolated temp DB) → smoke tests → teardown |
+| `test-runner.ps1` | `tools/` | Batch workflow test runner: submits prompts/skills via API, critiques output with Ollama |
+| `OllamaTest.ps1` | `utils/` | Benchmarks an Ollama model with 5 coding prompts, logs timing |
+
+### Infrastructure
+| Script | Location | Purpose |
+|--------|----------|---------|
+| `runSearxng.ps1` | `utils/` | Starts SearXNG Docker container on port 8888 with JSON+HTML output formats |
+
+### Validation suite (`utils/validation/`)
+| Script | Checks |
+|--------|--------|
+| `Invoke-CodexValidation.ps1` | Master orchestrator — runs all checks below |
+| `Test-DotNet.ps1` | .NET SDK >= 9.0.0 |
+| `Test-NodeNpm.ps1` | Node >= 20, npm >= 10 |
+| `Test-Git.ps1` | Git on PATH |
+| `Test-Docker.ps1` | Docker engine, compose, buildx |
+| `Test-Python.ps1` | Python on PATH |
+| `Test-Ollama.ps1` | Ollama reachable, model present |
+| `Test-Searxng.ps1` | SearXNG endpoints reachable |
+| `Test-Paths.ps1` | `C:\Temp\Logs` writable, >= 10 GB free |
+| `Test-SmokeTests.ps1` | 14 REST API smoke tests against running service |
+
 ## Model and RAG configuration
 Configuration lives in two places:
-- Service: `src/SAGIDE.Service/appsettings.json` (or appsettings.Template.json as a starter)
+- Service: `src/SAGIDE.Service/appsettings.json`
 - Extension: `sagIDE.*` VS Code settings
 
-### Local (Ollama)
+### Local (Ollama or LM Studio)
+
+#### Ollama
 1. Install Ollama: https://ollama.com (or TensorRT-LLM for edge devices like Orin Nano / Jetson)
 2. Pull a model:
    ```bash
@@ -175,28 +325,72 @@ Configuration lives in two places:
 3. Verify:
    ```bash
    ollama list
-   ```
-4. Verify via HTTP (service health and tags):
-   ```bash
    curl http://localhost:11434/api/tags
    ```
+
+#### LM Studio
+1. Install LM Studio: https://lmstudio.ai
+2. Download a model and start the local server (Developer tab → Start Server)
+3. LM Studio exposes an OpenAI-compatible API — configure it under `SAGIDE:OpenAICompatible:Servers`
+
+#### Service config example
+```json
+{
+  "SAGIDE": {
+    "Ollama": {
+      "Servers": [
+        { "Name": "localhost", "BaseUrl": "http://localhost:11434", "Models": ["qwen2.5-coder:7b-instruct", "nomic-embed-text"] }
+      ]
+    },
+    "OpenAICompatible": {
+      "Servers": [
+        { "Name": "lmstudio", "BaseUrl": "http://localhost:1234/v1", "Models": ["your-model-name"] }
+      ]
+    }
+  }
+}
+```
 
 Service example (trim to your hosts/models):
 ```json
 {
   "SAGIDE": {
     "PromptsPath": "../../prompts",
+    "SkillsPath": "../../skills",
     "NamedPipeName": "SAGIDEPipe",
     "MaxConcurrentAgents": 5,
     "Scheduler": { "Enabled": true },
-    "Providers": { "Claude": { "MaxTokens": 4096 }, "Gemini": { "MaxTokens": 4096 }, "Codex": { "MaxTokens": 4096 }, "Ollama": { "MaxTokens": 4096 } },
+    "Providers": { "Claude": { "MaxTokens": 4096 }, "Gemini": { "MaxTokens": 4096 }, "Codex": { "MaxTokens": 16384 }, "Ollama": { "MaxTokens": 4096 } },
     "Rag": { "EmbeddingBatchSize": 32, "ChunkSize": 1500, "ChunkOverlap": 200, "CacheTtlHours": 4, "RateLimitDelayMs": 1000 },
+    "Caching": {
+      "OutputCacheEnabled": false,
+      "SearchCacheTtlMinutes": 0,
+      "HealthPollIntervalSeconds": 30,
+      "PersistentSearchCacheTtlHours": 0
+    },
+    "RunTracing": { "Enabled": true, "Path": "~/reports/traces" },
     "Ollama": {
       "Servers": [
         { "Name": "localhost", "BaseUrl": "http://localhost:11434", "RagOrder": 0, "SearchUrl": "http://localhost:8888", "Models": ["nomic-embed-text", "qwen2.5-coder:7b-instruct"] }
       ]
     },
-    "OpenAICompatible": { "Servers": [] },
+    "OpenAICompatible": {
+      "Servers": [
+        { "Name": "lmstudio", "BaseUrl": "http://localhost:1234/v1", "Models": ["your-model-name"] }
+      ]
+    },
+    "Routing": {
+      "QualitySamplingEnabled": true,
+      "SamplingRate": 0.25,
+      "Capabilities": {
+        "fast_general": "ollama/qwen3:30b-a3b@workstation",
+        "deep_analyst": "openai/gpt-oss-120b@gmini",
+        "coder": "openai/qwen3-coder-next@gmini"
+      }
+    },
+    "QualityScoring": { "Enabled": true, "Mode": "workflow" },
+    "WorkflowPolicy": { "Enabled": true, "MaxStepsPerWorkflow": 50 },
+    "Notes": { "Enabled": true, "GraphPath": "/path/to/logseq", "Schedule": "0 0 * * *" },
     "ApiKeys": { "Anthropic": "", "OpenAI": "", "Google": "" }
   }
 }
@@ -220,7 +414,33 @@ Then select the provider in `SAG: Submit Task`.
 
 ## Defining Workflows and Prompts (YAML)
 - Prompts/templates live under `prompts/` and are loaded by the Prompt Registry.
-- Workflows live in `.sagide/workflows/*.yaml` (or built-in templates); they support DAG dependencies, conditional routing, context vars, human approval gates, and convergence policies.
+- Skills live under `skills/` and are loaded by the Skill Registry.
+- Built-in workflow templates live at `src/SAGIDE.Service/Orchestrator/Templates/*.yaml`; they support DAG dependencies, conditional routing, context vars, human approval gates, and convergence policies.
+
+### Skill example
+```yaml
+name: fundamental-analyst
+version: 3
+domain: finance
+description: Performs fundamental financial analysis.
+
+inputs:
+  search_results:
+    type: string
+    required: true
+  ticker:
+    type: string
+    required: false
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, financial_analysis]
+    context_window_min: 16k
+
+parameters:
+  output_var: fundamental_result
+  model_capability: deep_analyst
+```
 
 ```yaml
 name: "Refactor and Test"
@@ -269,8 +489,8 @@ convergencePolicy:
 - VS Code status bar shows `$(check) SAG: Connected`; Output panel → `SAG IDE` shows heartbeat/connection logs.
 
 ### How do I run only local models?
-- Install Ollama, pull a model: `ollama pull qwen2.5-coder:7b-instruct`.
-- In `SAG: Submit Task`, select your Ollama model from the list (detected via ProviderFactory affinity routing).
+- Install Ollama (https://ollama.com) or LM Studio (https://lmstudio.ai), pull/download a model.
+- In `SAG: Submit Task`, select your local model from the list (detected via ProviderFactory affinity routing).
 - Leave `SAGIDE:ApiKeys` section empty in `appsettings.json` (no cloud keys configured = no cloud access).
 
 ### How do I fix "Service not running"?
@@ -280,8 +500,8 @@ convergencePolicy:
 - If extension shows "Disconnected" but service is running, extension auto-reconnects every 3 seconds (exponential backoff).
 
 ### Where do workflows live?
-- Built-in workflows: shipped with the service (in memory, loaded by WorkflowEngine on startup).
-- Custom workflows: `.sagide/workflows/*.yaml` in your workspace root (parsed by AgentOrchestrator during `start_workflow` message handling).
+- Built-in templates: `src/SAGIDE.Service/Orchestrator/Templates/*.yaml` (review-fix-loop, build-and-verify, write-and-test, code-audit, ship-feature, tdd-workflow).
+- Workflows are defined in YAML with DAG dependencies, conditional routing, context vars, human approval gates, and convergence policies.
 - Syntax validation: DAG topological sort, step type validation (agent/router/tool/constraint/human_approval), dependency resolution.
 
 ## Troubleshooting quick links

@@ -1,25 +1,5 @@
+// IEventBus has been promoted to SAGIDE.Core.Events.
+// This alias keeps existing code in SAGIDE.Service.* compiling without changes.
+global using IEventBus = SAGIDE.Core.Events.IEventBus;
+
 namespace SAGIDE.Service.Events;
-
-/// <summary>
-/// In-process event bus: decouples publishers from subscribers and
-/// isolates subscriber exceptions so one failing handler cannot
-/// prevent other handlers from running.
-/// </summary>
-public interface IEventBus
-{
-    /// <summary>
-    /// Publishes <paramref name="evt"/> to all registered handlers.
-    /// Exceptions thrown by individual handlers are caught and logged; they do NOT
-    /// propagate to the caller or to subsequent handlers.
-    /// </summary>
-    void Publish<TEvent>(TEvent evt) where TEvent : class;
-
-    /// <summary>Registers a synchronous handler for events of type <typeparamref name="TEvent"/>.</summary>
-    void Subscribe<TEvent>(Action<TEvent> handler) where TEvent : class;
-
-    /// <summary>
-    /// Registers an asynchronous handler.  The returned <see cref="Task"/> is awaited
-    /// in a fire-and-forget fashion; exceptions are caught and logged.
-    /// </summary>
-    void Subscribe<TEvent>(Func<TEvent, Task> handler) where TEvent : class;
-}

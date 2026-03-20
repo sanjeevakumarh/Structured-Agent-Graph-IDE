@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Service.Communication;
 using SAGIDE.Service.Observability;
 using SAGIDE.Service.Orchestrator;
@@ -16,7 +17,7 @@ internal static class MetricsEndpoints
             SagideMetrics        metrics,
             TaskQueue            taskQueue,
             DeadLetterQueue      dlq,
-            WorkflowEngine       workflows,
+            IWorkflowEngine      workflows,
             NamedPipeServer      pipeServer,
             IServiceProvider     sp) =>
         {

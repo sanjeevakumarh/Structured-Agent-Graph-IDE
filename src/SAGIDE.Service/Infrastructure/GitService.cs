@@ -1,9 +1,10 @@
 ﻿using System.Diagnostics;
 using Microsoft.Extensions.Logging;
+using SAGIDE.Core.Interfaces;
 
 namespace SAGIDE.Service.Infrastructure;
 
-public class GitService
+public class GitService : IWorkflowGitService
 {
     private readonly ILogger<GitService> _logger;
     private readonly SemaphoreSlim _branchSetupLock = new(1, 1);
@@ -287,6 +288,17 @@ public class GitService
         {
             return (false, string.Empty);
         }
+    }
+
+    /// <summary>
+    /// Runs a read-only git command in the given workspace and returns (output, exitCode).
+    /// Exposed for <c>GitTool</c> in the tool registry — write operations are rejected.
+    /// </summary>
+    public async Task<(string Output, int ExitCode)> RunReadOnlyAsync(
+        string workspacePath, string arguments, CancellationToken ct = default)
+    {
+        var (success, output) = await RunGitAsync(workspacePath, arguments, ct);
+        return (output, success ? 0 : 1);
     }
 
     private async Task<(bool success, string output)> RunGitAsync(

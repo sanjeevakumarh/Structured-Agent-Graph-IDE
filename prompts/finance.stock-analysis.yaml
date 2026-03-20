@@ -13,14 +13,15 @@ description: >
   POST /api/prompts/finance/stock-analysis/run with ticker + context.
 
 model_preference:
-  orchestrator: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+  orchestrator: openai/gpt-oss-120b@gmini
+  fallback: ollama/qwen3:30b-a3b@workstation
   subtasks:
     # Fast structured-output model for query planning
-    planner:   ollama/llama3.1:8b-instruct-q6_K@mini
+    planner:   ollama/qwen3:30b-a3b@workstation
     # Strong local model for the four parallel analysis sections
-    analyst:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    analyst:   openai/gpt-oss-120b@gmini
     # Frontier model for final assembly — coherence + writing quality matter here
-    assembler: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    assembler: ollama/qwen3:30b-a3b@workstation
 
 # ── Variables ─────────────────────────────────────────────────────────────────
 # Override any of these via POST body when running from the web UI:

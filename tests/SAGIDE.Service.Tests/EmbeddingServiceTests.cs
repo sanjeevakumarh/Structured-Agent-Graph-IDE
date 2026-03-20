@@ -4,7 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using SAGIDE.Core.Models;
-using SAGIDE.Service.Rag;
+using SAGIDE.Memory;
 
 namespace SAGIDE.Service.Tests;
 

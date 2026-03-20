@@ -44,6 +44,8 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly EndpointAliasResolver? _aliasResolver;
     private readonly Routing.QualitySampler? _qualitySampler;
     private readonly CachingConfig _cachingConfig;
+    private readonly IModelRouter? _modelRouter;
+    private readonly IAuditLog? _auditLog;
     private CancellationTokenSource? _processingCts;
 
     // ── Ollama failover constants ──────────────────────────────────────────────
@@ -94,7 +96,9 @@ public class AgentOrchestrator : ITaskSubmissionService
         IModelPerfRepository? perfRepo = null,
         EndpointAliasResolver? aliasResolver = null,
         Routing.QualitySampler? qualitySampler = null,
-        CachingConfig? cachingConfig = null)
+        CachingConfig? cachingConfig = null,
+        IModelRouter? modelRouter = null,
+        IAuditLog? auditLog = null)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
@@ -125,6 +129,8 @@ public class AgentOrchestrator : ITaskSubmissionService
         _metrics                 = metrics;
         _circuitBreakerRegistry  = circuitBreakerRegistry;
         _eventBus                = eventBus ?? new NullEventBus();
+        _modelRouter             = modelRouter;
+        _auditLog                = auditLog;
     }
 
     // Idempotent — duplicate task ID returns existing, no re-execution
@@ -139,6 +145,14 @@ public class AgentOrchestrator : ITaskSubmissionService
 
         var taskId = _taskQueue.Enqueue(task);
         _metrics?.RecordTaskSubmitted();
+
+        // Audit trail — fire-and-forget, never blocks submission
+        if (_auditLog is not null)
+            _ = _auditLog.RecordTaskSubmittedAsync(
+                taskId, task.AgentType.ToString(),
+                task.ModelProvider.ToString(), task.ModelId,
+                task.SourceTag ?? "");
+
         _logger.LogInformation(
             "Task {TaskId} queued: {AgentType} on {ModelProvider}/{ModelId}",
             taskId, task.AgentType, task.ModelProvider, task.ModelId);
@@ -372,12 +386,12 @@ public class AgentOrchestrator : ITaskSubmissionService
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 lastResponse = await StreamToStringAsync(provider, prompt, modelConfig, task, taskCt);
                 sw.Stop();
-                _metrics?.RecordLlmCall(sw.ElapsedMilliseconds, provider.LastInputTokens, provider.LastOutputTokens);
-
-                // Record token counts and latency on the task span for cross-cutting analysis.
-                taskActivity?.SetTag("llm.latency_ms",     sw.ElapsedMilliseconds);
-                taskActivity?.SetTag("llm.tokens_input",   provider.LastInputTokens);
-                taskActivity?.SetTag("llm.tokens_output",  provider.LastOutputTokens);
+                if (lastResponse.Length == 0)
+                    _logger.LogWarning("Task {TaskId}: LLM returned empty response after {Ms}ms (model: {Model})",
+                        task.Id, sw.ElapsedMilliseconds, task.ModelId);
+                var tokensIn  = _modelRouter?.LastInputTokens  ?? provider.LastInputTokens;
+                var tokensOut = _modelRouter?.LastOutputTokens ?? provider.LastOutputTokens;
+                _metrics?.RecordLlmCall(sw.ElapsedMilliseconds, tokensIn, tokensOut);
 
                 // Persist per-call performance sample (fire-and-forget — never blocks task execution)
                 if (_perfRepo is not null)
@@ -391,8 +405,8 @@ public class AgentOrchestrator : ITaskSubmissionService
                         ServerAlias:  _aliasResolver?.GetAlias(endpoint) ?? "unknown",
                         StartedAt:    task.StartedAt ?? DateTime.UtcNow,
                         LatencyMs:    sw.ElapsedMilliseconds,
-                        TokensInput:  provider.LastInputTokens,
-                        TokensOutput: provider.LastOutputTokens,
+                        TokensInput:  tokensIn,
+                        TokensOutput: tokensOut,
                         Status:       "success",
                         ErrorCode:    null));
                 }
@@ -581,7 +595,13 @@ public class AgentOrchestrator : ITaskSubmissionService
         using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         idleCts.CancelAfter(_timeoutConfig.StreamingIdleTimeout);
 
-        await foreach (var chunk in provider.CompleteStreamingAsync(prompt, modelConfig, idleCts.Token))
+        // Route through IModelRouter when available (new path); fall back to direct
+        // provider call for backward compat with test constructors that don't supply it.
+        var stream = _modelRouter is not null
+            ? _modelRouter.CompleteStreamingAsync(prompt, modelConfig, idleCts.Token)
+            : provider.CompleteStreamingAsync(prompt, modelConfig, idleCts.Token);
+
+        await foreach (var chunk in stream)
         {
             // Reset idle watchdog on every received chunk.
             idleCts.CancelAfter(_timeoutConfig.StreamingIdleTimeout);
@@ -625,7 +645,13 @@ public class AgentOrchestrator : ITaskSubmissionService
             IsLastChunk = true,
         }));
 
-        return output.ToString();
+        var result = output.ToString();
+        if (result.Length == 0 && tokenCount > 0)
+            _logger.LogWarning(
+                "Task {TaskId}: StreamToStringAsync received {TokenCount} estimated tokens but output is empty — " +
+                "streaming chunks may have been empty strings",
+                task.Id, tokenCount);
+        return result;
     }
 
     // ── Ollama failover helpers ───────────────────────────────────────────────

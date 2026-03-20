@@ -1,10 +1,9 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Serilog;
 using SAGIDE.Observability;
+using SAGIDE.Security;
 using SAGIDE.Service.Api;
 using SAGIDE.Service.Infrastructure;
 using SAGIDE.Service.Orchestrator;
@@ -36,7 +35,6 @@ try
     if (string.IsNullOrEmpty(builder.Configuration["Kestrel:Endpoints:Http:Url"]))
         builder.WebHost.UseUrls("http://127.0.0.1:5100");
 
-    var restBearerToken    = builder.Configuration["SAGIDE:RestApi:BearerToken"];
     var rateLimitPerMinute = builder.Configuration.GetValue("SAGIDE:RestApi:RateLimitPerMinute", 300);
 
     // Per-IP fixed-window rate limiter — applies to all endpoint-routed requests (/api/* and /dashboard).
@@ -62,10 +60,9 @@ try
     // ── Config singletons ──────────────────────────────────────────────────────
     builder.Services.AddConfiguredSingleton<LoggingConfig>(builder.Configuration, "SAGIDE:Logging");
     builder.Services.AddConfiguredSingleton<AgentLimitsConfig>(builder.Configuration, "SAGIDE:AgentLimits");
-    builder.Services.AddConfiguredSingleton<WorkflowPolicyConfig>(builder.Configuration, "SAGIDE:WorkflowPolicy");
     builder.Services.AddConfiguredSingleton<CachingConfig>(builder.Configuration, "SAGIDE:Caching");
-    builder.Services.AddSingleton<WorkflowPolicyEngine>();
     builder.Services.AddSingleton(new TaskAffinitiesConfig());
+    // WorkflowPolicyConfig + WorkflowPolicyEngine registered by AddSagideWorkflows() below
 
     // TimeoutConfig is also passed directly to AddSagideProviders before the container is built.
     var timeoutConfig = new TimeoutConfig();
@@ -85,6 +82,8 @@ try
     builder.Services.AddSagideOrchestration(builder.Configuration);
     builder.Services.AddSagideCommunication(builder.Configuration, pipeName);
     builder.Services.AddSagideRagPipeline(builder.Configuration, dbPath);
+    builder.Services.AddSagideSecurity(builder.Configuration, dbPath);
+    builder.Services.AddSagideTools();
 
     // OpenAPI — JSON schema at /openapi/v1.json; endpoint is gated on development below.
     builder.Services.AddOpenApi();
@@ -104,33 +103,9 @@ try
     // Rate limiting — per-IP fixed window; applies to all endpoint-routed requests.
     app.UseRateLimiter();
 
-    // Bearer-token guard — only active when SAGIDE:RestApi:BearerToken is set.
-    // Applies to /api/* paths only.
-    // Uses HMAC-then-compare to prevent timing side-channels: FixedTimeEquals alone
-    // short-circuits on length mismatch, leaking token length. HMAC normalizes both
-    // values to a fixed-length MAC before the constant-time comparison.
-    if (!string.IsNullOrEmpty(restBearerToken))
-    {
-        var hmacKey      = RandomNumberGenerator.GetBytes(32);
-        var expectedText = $"Bearer {restBearerToken}";
-        var expectedMac  = HMACSHA256.HashData(hmacKey, Encoding.UTF8.GetBytes(expectedText));
-
-        app.Use(async (ctx, next) =>
-        {
-            if (ctx.Request.Path.StartsWithSegments("/api"))
-            {
-                var header    = ctx.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
-                var headerMac = HMACSHA256.HashData(hmacKey, Encoding.UTF8.GetBytes(header));
-                if (!CryptographicOperations.FixedTimeEquals(headerMac, expectedMac))
-                {
-                    ctx.Response.StatusCode = 401;
-                    ctx.Response.Headers.WWWAuthenticate = "Bearer realm=\"SAGIDE\"";
-                    return;
-                }
-            }
-            await next();
-        });
-    }
+    // Security middleware — bearer token guard + audit logging.
+    // BearerTokenPolicy is a passthrough when no token is configured.
+    app.UseSagideSecurity();
 
     // OpenAPI document — /openapi/v1.json (all environments; auth required like other API routes)
     app.MapOpenApi();
@@ -153,6 +128,9 @@ try
     });
 
     // REST API endpoints
+    app.MapAuditEndpoints();
+    app.MapToolsEndpoints();
+    app.MapMemoryEndpoints();
     app.MapTaskEndpoints();
     app.MapResultEndpoints();
     app.MapPromptEndpoints();
@@ -161,6 +139,7 @@ try
     app.MapModelMetricsEndpoints();
     app.MapSkillsEndpoints();
     app.MapNotesEndpoints();
+    app.MapPreflightEndpoints();
 
     // Redirect /dashboard → / for discoverability
     app.MapGet("/dashboard", () => Results.Redirect("/"));

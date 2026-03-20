@@ -93,11 +93,23 @@ public class CodexProvider : IAgentProvider
 
         var responseJson = await response.Content.ReadAsStringAsync(ct);
         var doc = JsonDocument.Parse(responseJson);
-        var textContent = doc.RootElement
-            .GetProperty("choices")[0]
-            .GetProperty("message")
-            .GetProperty("content")
-            .GetString();
+        string? textContent = null;
+        if (doc.RootElement.TryGetProperty("choices", out var choicesArr) &&
+            choicesArr.GetArrayLength() > 0 &&
+            choicesArr[0].TryGetProperty("message", out var msg))
+        {
+            if (msg.TryGetProperty("content", out var cnt))
+                textContent = cnt.GetString();
+
+            // Fallback to reasoning field for reasoning models (e.g. gpt-oss)
+            if (string.IsNullOrEmpty(textContent) &&
+                msg.TryGetProperty("reasoning", out var reasoning))
+            {
+                textContent = reasoning.GetString();
+                _logger.LogWarning("Model {Model} returned reasoning instead of content — using reasoning as output",
+                    model.ModelId);
+            }
+        }
 
         if (doc.RootElement.TryGetProperty("usage", out var usage))
         {
@@ -142,23 +154,50 @@ public class CodexProvider : IAgentProvider
         using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
         string? line;
+        var hasContent = false;
+        var reasoningBuffer = new StringBuilder();
         while ((line = await reader.ReadLineAsync(ct)) != null)
         {
             if (!line.StartsWith("data: ")) continue;
             var data = line["data: ".Length..];
             if (data == "[DONE]") break;
-            string? text = null;
+            string? contentText = null;
+            string? reasoningText = null;
             try
             {
                 var doc = JsonDocument.Parse(data);
-                var choices = doc.RootElement.GetProperty("choices");
-                if (choices.GetArrayLength() > 0 &&
-                    choices[0].TryGetProperty("delta", out var delta) &&
-                    delta.TryGetProperty("content", out var content))
-                    text = content.GetString();
+                if (doc.RootElement.TryGetProperty("choices", out var choices) &&
+                    choices.GetArrayLength() > 0 &&
+                    choices[0].TryGetProperty("delta", out var delta))
+                {
+                    if (delta.TryGetProperty("content", out var content))
+                        contentText = content.GetString();
+                    if (delta.TryGetProperty("reasoning", out var reasoning))
+                        reasoningText = reasoning.GetString();
+                }
             }
             catch (JsonException) { continue; }
-            if (!string.IsNullOrEmpty(text)) yield return text;
+
+            // Prefer content tokens (actual output)
+            if (!string.IsNullOrEmpty(contentText))
+            {
+                hasContent = true;
+                yield return contentText;
+            }
+            // Buffer reasoning tokens as fallback for reasoning models (e.g. gpt-oss)
+            else if (!hasContent && !string.IsNullOrEmpty(reasoningText))
+            {
+                reasoningBuffer.Append(reasoningText);
+            }
+        }
+
+        // If model produced only reasoning (no content), yield the reasoning as output
+        if (!hasContent && reasoningBuffer.Length > 0)
+        {
+            _logger.LogWarning(
+                "Model {Model} produced {ReasoningChars} reasoning chars but no content — using reasoning as output",
+                model.ModelId, reasoningBuffer.Length);
+            yield return reasoningBuffer.ToString();
         }
 
         _logger.LogInformation("OpenAI-compatible streaming complete (model {Model}, endpoint {BaseUrl})",

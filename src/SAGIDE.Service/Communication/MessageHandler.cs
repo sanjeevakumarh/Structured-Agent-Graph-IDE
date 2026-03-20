@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.DTOs;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Communication.Messages;
 using SAGIDE.Service.Orchestrator;
@@ -17,7 +18,7 @@ public class MessageHandler
     private readonly ActivityLogger _activityLogger;
     private readonly GitIntegration _gitIntegration;
     private readonly Infrastructure.GitConfig? _gitConfig;
-    private readonly WorkflowEngine _workflowEngine;
+    private readonly IWorkflowEngine _workflowEngine;
     private readonly IConfiguration _configuration;
     private readonly TaskAffinitiesConfig _taskAffinities;
     private readonly ILogger<MessageHandler> _logger;
@@ -27,7 +28,7 @@ public class MessageHandler
         AgentOrchestrator orchestrator,
         ActivityLogger activityLogger,
         GitIntegration gitIntegration,
-        WorkflowEngine workflowEngine,
+        IWorkflowEngine workflowEngine,
         IConfiguration configuration,
         TaskAffinitiesConfig taskAffinities,
         ILogger<MessageHandler> logger,

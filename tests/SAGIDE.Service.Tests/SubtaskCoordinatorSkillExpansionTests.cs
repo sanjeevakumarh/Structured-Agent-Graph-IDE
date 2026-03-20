@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Prompts;
-using SAGIDE.Service.Rag;
+using SAGIDE.Memory;
 
 namespace SAGIDE.Service.Tests;
 

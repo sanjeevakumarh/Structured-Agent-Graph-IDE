@@ -2,7 +2,7 @@ using System.Net;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using SAGIDE.Service.Rag;
+using SAGIDE.Memory;
 
 namespace SAGIDE.Service.Tests;
 

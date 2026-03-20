@@ -4,13 +4,18 @@
     <ProjectReference Include="..\SAGIDE.Core\SAGIDE.Core.csproj" />
     <ProjectReference Include="..\SAGIDE.Contracts\SAGIDE.Contracts.csproj" />
     <ProjectReference Include="..\SAGIDE.Observability\SAGIDE.Observability.csproj" />
+    <ProjectReference Include="..\SAGIDE.ModelRouter\SAGIDE.ModelRouter.csproj" />
+    <ProjectReference Include="..\SAGIDE.Security\SAGIDE.Security.csproj" />
+    <ProjectReference Include="..\SAGIDE.Tools\SAGIDE.Tools.csproj" />
+    <ProjectReference Include="..\SAGIDE.Workflows\SAGIDE.Workflows.csproj" />
+    <ProjectReference Include="..\SAGIDE.Memory\SAGIDE.Memory.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="AngleSharp" Version="1.4.0" />
     <PackageReference Include="Cronos" Version="0.8.4" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.3" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.3" />
     <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="9.0.3" />
     <PackageReference Include="Microsoft.SemanticKernel" Version="1.28.0" />
     <PackageReference Include="Scriban" Version="5.12.1" />

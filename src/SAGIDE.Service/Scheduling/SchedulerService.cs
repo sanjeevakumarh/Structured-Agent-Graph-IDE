@@ -7,7 +7,6 @@ using SAGIDE.Core.Interfaces;
 using SAGIDE.Contracts;
 using SAGIDE.Core.Models;
 using SAGIDE.Observability;
-using SAGIDE.Service.Orchestrator;
 
 namespace SAGIDE.Service.Scheduling;
 
@@ -21,7 +20,7 @@ public sealed class SchedulerService : BackgroundService
 {
     private readonly IPromptRegistry _registry;
     private readonly ITaskSubmissionService _taskSubmission;
-    private readonly SubtaskCoordinator _coordinator;
+    private readonly ISubtaskCoordinator _coordinator;
     private readonly ISchedulerRepository _schedulerRepo;
     private readonly bool _enabled;
     private readonly ILogger<SchedulerService> _logger;
@@ -32,7 +31,7 @@ public sealed class SchedulerService : BackgroundService
     public SchedulerService(
         IPromptRegistry registry,
         ITaskSubmissionService taskSubmission,
-        SubtaskCoordinator coordinator,
+        ISubtaskCoordinator coordinator,
         ISchedulerRepository schedulerRepo,
         IConfiguration configuration,
         ILogger<SchedulerService> logger)

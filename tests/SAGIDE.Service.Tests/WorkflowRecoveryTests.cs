@@ -73,6 +73,7 @@ internal sealed class RecoveryTestHarness : IDisposable
             new TaskAffinitiesConfig(),
             policy,
             new GitService(NullLogger<GitService>.Instance),
+            new NullWorkflowStepRenderer(),
             NullLogger<WorkflowEngine>.Instance,
             Repository);
     }

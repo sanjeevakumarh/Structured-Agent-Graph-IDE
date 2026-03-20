@@ -100,6 +100,7 @@ internal sealed class WorkflowTestHarness : IDisposable
             new TaskAffinitiesConfig(),
             policy,
             new GitService(NullLogger<GitService>.Instance),
+            new NullWorkflowStepRenderer(),
             NullLogger<WorkflowEngine>.Instance);
     }
 

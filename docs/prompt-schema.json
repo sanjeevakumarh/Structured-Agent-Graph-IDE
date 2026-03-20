@@ -96,7 +96,7 @@
         "primary": {
           "type": "string",
           "description": "Legacy single-model field. Prefer orchestrator + subtasks for multi-model prompts.",
-          "examples": ["ollama/deepseek-coder-v2:16b@workstation", "ollama/qwen2.5-coder:7b-instruct-q4_K_M@mini"]
+          "examples": ["ollama/qwen3-coder:30b@workstation", "ollama/qwen2.5-coder:7b-instruct-q6_K@mini"]
         },
         "orchestrator": {
           "type": "string",

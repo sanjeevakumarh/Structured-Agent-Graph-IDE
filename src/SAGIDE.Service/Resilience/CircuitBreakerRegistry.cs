@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
+using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 
 namespace SAGIDE.Service.Resilience;
@@ -7,8 +8,10 @@ namespace SAGIDE.Service.Resilience;
 /// <summary>
 /// Holds one <see cref="ProviderCircuitBreaker"/> per <see cref="ModelProvider"/>.
 /// Created lazily on first access so providers that are never used don't get breakers.
+/// Implements <see cref="ICircuitBreakerRegistry"/> so the ModelRouter module can query
+/// breaker state without depending on this assembly directly.
 /// </summary>
-public sealed class CircuitBreakerRegistry
+public sealed class CircuitBreakerRegistry : ICircuitBreakerRegistry
 {
     private readonly CircuitBreakerConfig _config;
     private readonly ILoggerFactory _loggerFactory;
@@ -33,6 +36,14 @@ public sealed class CircuitBreakerRegistry
             failureThreshold : _config.FailureThreshold,
             resetTimeout     : TimeSpan.FromSeconds(_config.ResetTimeoutSec),
             logger           : _loggerFactory.CreateLogger<ProviderCircuitBreaker>()));
+    }
+
+    /// <inheritdoc/>
+    public bool IsCallPermitted(ModelProvider provider)
+    {
+        if (!_config.Enabled) return true;
+        var breaker = GetBreaker(provider);
+        return breaker is null || breaker.IsCallPermitted();
     }
 
     /// <summary>Snapshot of all breaker states for the metrics/health endpoint.</summary>

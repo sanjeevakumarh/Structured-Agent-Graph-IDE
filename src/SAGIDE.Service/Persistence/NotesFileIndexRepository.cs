@@ -1,4 +1,10 @@
+// NotesFileEntry, NotesStats promoted to SAGIDE.Core.Models — aliases for back-compat
+global using NotesFileEntry = SAGIDE.Core.Models.NotesFileEntry;
+global using NotesStats     = SAGIDE.Core.Models.NotesStats;
+
 using Microsoft.Data.Sqlite;
+using SAGIDE.Core.Interfaces;
+using SAGIDE.Core.Models;
 
 namespace SAGIDE.Service.Persistence;
 
@@ -6,7 +12,7 @@ namespace SAGIDE.Service.Persistence;
 /// Tracks which Logseq note files have been indexed and when.
 /// Used by <see cref="Rag.NotesIndexerService"/> for delta processing.
 /// </summary>
-public sealed class NotesFileIndexRepository : SqliteRepositoryBase
+public sealed class NotesFileIndexRepository : SqliteRepositoryBase, INotesFileIndexRepository
 {
     public NotesFileIndexRepository(string dbPath) : base(dbPath) { }
 
@@ -98,17 +104,6 @@ public sealed class NotesFileIndexRepository : SqliteRepositoryBase
     }
 }
 
-public record NotesFileEntry(
-    string FilePath,
-    long FileSize,
-    string LastModified,
-    string LastIndexed,
-    int ChunkCount,
-    bool HasTasks,
-    string ContentHash = "");
+// NotesFileEntry promoted to SAGIDE.Core.Models.NotesFileEntry (alias above)
 
-public record NotesStats(
-    int TotalFiles,
-    int TotalChunks,
-    string? LastIndexTime,
-    int FilesWithTasks);
+// NotesStats promoted to SAGIDE.Core.Models.NotesStats (alias above)

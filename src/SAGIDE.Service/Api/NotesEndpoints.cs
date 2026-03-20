@@ -1,7 +1,7 @@
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Persistence;
 using SAGIDE.Service.Providers;
-using SAGIDE.Service.Rag;
+using SAGIDE.Memory;
 using SAGIDE.Service.Routing;
 
 namespace SAGIDE.Service.Api;

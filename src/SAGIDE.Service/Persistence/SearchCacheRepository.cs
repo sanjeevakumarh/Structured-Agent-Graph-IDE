@@ -1,6 +1,11 @@
+// SearchCacheEntry promoted to SAGIDE.Core.Models — alias for back-compat
+global using SearchCacheEntry = SAGIDE.Core.Models.SearchCacheEntry;
+
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
+using SAGIDE.Core.Interfaces;
+using SAGIDE.Core.Models;
 
 namespace SAGIDE.Service.Persistence;
 
@@ -8,7 +13,7 @@ namespace SAGIDE.Service.Persistence;
 /// Persistent SQLite-backed search result cache. Survives restarts.
 /// Keyed by SHA-256 hash of (query + maxResults).
 /// </summary>
-public sealed class SearchCacheRepository : SqliteRepositoryBase
+public sealed class SearchCacheRepository : SqliteRepositoryBase, ISearchCacheRepository
 {
     public SearchCacheRepository(string dbPath) : base(dbPath) { }
 
@@ -72,11 +77,4 @@ public sealed class SearchCacheRepository : SqliteRepositoryBase
     }
 }
 
-public record SearchCacheEntry(
-    string QueryHash,
-    string QueryText,
-    string ResultText,
-    int ResultCount,
-    double QualityScore,
-    string Domain,
-    string FetchedAt);
+// SearchCacheEntry promoted to SAGIDE.Core.Models (alias above)

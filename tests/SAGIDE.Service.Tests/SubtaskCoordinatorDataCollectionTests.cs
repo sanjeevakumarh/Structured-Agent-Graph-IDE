@@ -6,7 +6,7 @@ using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
-using SAGIDE.Service.Rag;
+using SAGIDE.Memory;
 
 namespace SAGIDE.Service.Tests;
 

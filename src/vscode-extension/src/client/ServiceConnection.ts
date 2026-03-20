@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
 import { NamedPipeClient } from './NamedPipeClient';
+import { logError } from '../utils/Logger';
 import {
     PipeMessage,
     MessageTypes,
@@ -38,7 +41,7 @@ export class ServiceConnection implements vscode.Disposable {
     constructor(pipeName: string, sharedSecret?: string) {
         const fullPipeName = process.platform === 'win32'
             ? `\\\\.\\pipe\\${pipeName}`
-            : `/tmp/CoreFxPipe_${pipeName}`;
+            : path.join(os.tmpdir(), `CoreFxPipe_${pipeName}`);
 
         this.client = new NamedPipeClient(fullPipeName, sharedSecret);
         this.statusBarItem = vscode.window.createStatusBarItem(
@@ -72,8 +75,10 @@ export class ServiceConnection implements vscode.Disposable {
                     const payload = JSON.parse(msg.payload.toString()) as WorkflowApprovalNeededPayload;
                     this._onApprovalNeeded.fire(payload);
                 }
-            } catch {
-                // Malformed payload — skip this message rather than crashing the handler
+            } catch (err) {
+                // Malformed payload — skip this message rather than crashing the handler,
+                // but surface the error so protocol issues can be diagnosed.
+                logError('[ServiceConnection] Failed to process pipe message', err);
             }
         });
     }

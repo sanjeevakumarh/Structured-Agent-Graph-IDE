@@ -705,6 +705,6 @@ public sealed partial class SubtaskCoordinator
 
         var json = text[start..(end + 1)];
         try   { return JsonSerializer.Deserialize<List<string>>(json) ?? []; }
-        catch { return []; }
+        catch (JsonException) { return []; } // callers log a warning when the empty list is detected
     }
 }

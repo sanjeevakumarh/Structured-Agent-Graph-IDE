@@ -1,4 +1,6 @@
 import * as net from 'net';
+import * as os from 'os';
+import * as path from 'path';
 import { EventEmitter } from 'events';
 import { PipeMessage, MessageTypes } from './MessageProtocol';
 
@@ -23,7 +25,7 @@ export class NamedPipeClient extends EventEmitter {
         this.pipeName = pipeName ?? (
             process.platform === 'win32'
                 ? '\\\\.\\pipe\\SAGIDEPipe'
-                : '/tmp/CoreFxPipe_SAGIDEPipe'
+                : path.join(os.tmpdir(), 'CoreFxPipe_SAGIDEPipe')
         );
         this.sharedSecret = sharedSecret;
     }
@@ -162,6 +164,8 @@ export class NamedPipeClient extends EventEmitter {
             try {
                 await this.connect();
             } catch {
+                // Reconnect attempt failed — expected while the service is not yet running.
+                // Schedule another attempt rather than surfacing an error event.
                 this.scheduleReconnect();
             }
         }, 3000);

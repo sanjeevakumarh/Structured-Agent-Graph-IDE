@@ -262,7 +262,7 @@ public sealed class QualitySampler
                     return Math.Clamp(d, 0, 100);
             }
         }
-        catch { /* fall through */ }
+        catch (JsonException) { /* fall through — caller logs raw response on -1 return */ }
         return -1;
     }
 

@@ -57,7 +57,7 @@ public class MemoryTests : IDisposable
         mem.Set("k", "first");
         mem.Set("k", "second");
         Assert.Equal("second", mem.Get("k"));
-        Assert.Equal(1, mem.All.Count);
+        Assert.Single(mem.All);
     }
 
     [Fact]
@@ -101,7 +101,6 @@ public class MemoryTests : IDisposable
     {
         ISessionMemory mem = new InMemorySessionMemory();
         Assert.Empty(mem.All);
-        Assert.Equal(0, mem.All.Count);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -213,7 +212,7 @@ public class MemoryTests : IDisposable
         await Task.Delay(30);
 
         var all = await mem.GetAllAsync("/ws");
-        Assert.Equal(1, all.Count);
+        Assert.Single(all);
         Assert.False(all.ContainsKey("removeme"));
         Assert.True(all.ContainsKey("keepme"));
     }

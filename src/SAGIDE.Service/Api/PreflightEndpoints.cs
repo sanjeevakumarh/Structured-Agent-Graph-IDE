@@ -58,8 +58,10 @@ public sealed class PreflightChecker(
     IConfiguration config,
     ProviderFactory providerFactory,
     EmbeddingService embeddingService,
+#pragma warning disable CS9113 // Parameters injected for future use / API forward-compatibility
     RagPipeline ragPipeline,
     WebSearchAdapter searchAdapter,
+#pragma warning restore CS9113
     ILogger<PreflightChecker> logger)
 {
     private const string SmokePrompt = "Say hello in one word.";
@@ -197,6 +199,7 @@ public sealed class PreflightChecker(
             sw.Stop();
             check.LatencyMs = sw.ElapsedMilliseconds;
             check.Error = $"{ex.GetType().Name}: {ex.Message}";
+            logger.LogWarning(ex, "Preflight model check failed for {Target}", check.Target);
         }
         result.AddCheck(check);
     }
@@ -231,6 +234,7 @@ public sealed class PreflightChecker(
             sw.Stop();
             check.LatencyMs = sw.ElapsedMilliseconds;
             check.Error = $"{ex.GetType().Name}: {ex.Message}";
+            logger.LogWarning(ex, "Preflight model check failed for {Target}", check.Target);
         }
         result.AddCheck(check);
     }
@@ -289,6 +293,7 @@ public sealed class PreflightChecker(
             sw.Stop();
             check.LatencyMs = sw.ElapsedMilliseconds;
             check.Error = $"{ex.GetType().Name}: {ex.Message}";
+            logger.LogWarning(ex, "Preflight search check failed for {Target}", check.Target);
         }
         result.AddCheck(check);
     }
@@ -329,6 +334,7 @@ public sealed class PreflightChecker(
             sw.Stop();
             check.LatencyMs = sw.ElapsedMilliseconds;
             check.Error = $"{ex.GetType().Name}: {ex.Message}";
+            logger.LogWarning(ex, "Preflight RAG check failed for {Target}", check.Target);
         }
         result.AddCheck(check);
     }

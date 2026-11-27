@@ -7,8 +7,8 @@ bind: localhost # change only for a trusted network
 context: 4096
 request_timeout: 300
 edge_models:
-  nano/qwen3.5-4b: {id: 'qwen3.5:4b', context: 4096, think: false}
-  nano/gemma4-e2b-q4_k_m: {id: 'gemma4:e2b-it-q4_K_M', context: 4096}
+  nano/qwen3.5-4b: {id: 'qwen3.5:4b', context: 4096, target_context: 16384, think: false}
+  nano/gemma4-e2b-q4_k_m: {id: 'gemma4:e2b-it-q4_K_M', context: 4096, target_context: 16384, think: false}
 # Explicit legacy tags eligible for cleanup; previously adopted tags also qualify.
 retire_models: []
 calibration:

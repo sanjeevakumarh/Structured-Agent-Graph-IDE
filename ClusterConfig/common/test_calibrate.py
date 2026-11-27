@@ -79,6 +79,30 @@ class CalibrationTests(unittest.TestCase):
         self.assertIsNone(cal.intel_memory_used('Timestamp, DeviceId, GPU Utilization (%)\n2026,0,90\n'))
         self.assertIsNone(cal.intel_memory_used('Timestamp, DeviceId, TileId, GPU Memory Used (MiB)\n2026,0,0,1024\n'))
 
+    def test_backend_memory_parser_from_hardware_output(self):
+        intel = 'Available devices:\n  Vulkan0: Intel(R) Graphics (BMG G31) (32656 MiB, 29354 MiB free)'
+        amd = 'Available devices:\n  Vulkan0: AMD Radeon Graphics (RADV GFX1151) (115712 MiB, 115546 MiB free)'
+        self.assertEqual(cal.backend_memory_free(intel, 'Intel|BMG|Arc'), 29354)
+        self.assertEqual(cal.backend_memory_free(amd, 'AMD|Radeon|gfx1151'), 115546)
+        self.assertIsNone(cal.backend_memory_free(intel, 'AMD'))
+        self.assertIsNone(cal.backend_memory_free(intel + '\n' + intel, 'Intel'))
+        self.assertIsNone(cal.backend_memory_free(intel.replace('29354', '99999'), 'Intel'))
+
+    def test_backend_probe_reads_stderr_and_never_caches(self):
+        def result(free):
+            return SimpleNamespace(stdout='', stderr=f'Vulkan0: Intel(R) Graphics (BMG G31) (32656 MiB, {free} MiB free)')
+        with patch.object(cal.subprocess,'run',side_effect=[result(29354),result(1024)]) as run:
+            self.assertEqual(cal.backend_probe('/bin/server',{},'Intel'),29354)
+            self.assertEqual(cal.backend_probe('/bin/server',{},'Intel'),1024)
+            self.assertEqual(run.call_count,2)
+
+    def test_native_memory_is_preferred_and_missing_uses_fallback(self):
+        probe=MagicMock(return_value=29354)
+        with patch.object(cal,'native_gpu_free',return_value=0):
+            self.assertEqual(cal.gpu_free('p520',{},probe),0); probe.assert_not_called()
+        with patch.object(cal,'native_gpu_free',return_value=None):
+            self.assertEqual(cal.gpu_free('p520',{},probe),29354); probe.assert_called_once()
+
     def test_flash_attention_yaml_boolean_and_slots(self):
         self.assertEqual(m.flash_mode(True),'on')
         self.assertEqual(m.flash_mode(False),'off')

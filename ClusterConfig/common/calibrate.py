@@ -81,7 +81,7 @@ def drm_memory_free(hw, region, root=Path('/sys/class/drm')):
     return min(values.values()) if values else None
 
 
-def gpu_free(node, cfg):
+def native_gpu_free(node, cfg):
     """Observed device-wide free MiB; fail closed on unavailable telemetry.
     Hardware settings come from YAML. Per-process DRM fdinfo is not global free VRAM.
     """
@@ -119,21 +119,56 @@ def gpu_free(node, cfg):
     return None
 
 
+def backend_memory_free(output, device_regex):
+    """Parse one matching accelerator's live backend-reported budget (MiB)."""
+    rows = []
+    for line in output.splitlines():
+        hit = re.match(r'^\s*(?:Vulkan|CUDA|ROCm|HIP|SYCL)[^:]*:\s*(.*?)\s*\(([\d.]+) MiB,\s*([\d.]+) MiB free\)\s*$', line, re.I)
+        if hit and re.search(device_regex, hit[1], re.I):
+            total, free = float(hit[2]), float(hit[3])
+            if total > 0 and 0 <= free <= total:
+                rows.append(free)
+            else:
+                return None
+    return rows[0] if len(rows) == 1 else None
+
+
+def device_list(server, env):
+    result = subprocess.run([str(server), '--list-devices'], env=env, text=True,
+                            capture_output=True, timeout=12, check=True)
+    return result.stdout + '\n' + result.stderr
+
+
+def backend_probe(server, env, device_regex):
+    try:
+        return backend_memory_free(device_list(server, env), device_regex)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def gpu_free(node, cfg, fallback=None):
+    value = native_gpu_free(node, cfg)
+    if value is not None:
+        return value
+    return fallback() if fallback else None
+
+
 class Monitor:
     """Sample host and GPU memory, kill test process if safety floor is crossed."""
-    def __init__(self, proc, node, cfg, baseline):
+    def __init__(self, proc, node, cfg, baseline, fallback=None):
         self.proc, self.node, self.cfg = proc, node, cfg
         self.done = threading.Event()
         self.samples = []
         self.error = None
         self.baseline = baseline
+        self.fallback = fallback
         self.thread = threading.Thread(target=self.loop, daemon=True)
 
     def loop(self):
         while not self.done.is_set():
             try:
                 m = meminfo()
-                m['gpu_free_mib'] = gpu_free(self.node, self.cfg)
+                m['gpu_free_mib'] = gpu_free(self.node, self.cfg, self.fallback)
                 self.samples.append(m)
                 if m['host_free_mib'] < self.cfg['min_host_free_gib'] * 1024:
                     self.error = 'Host memory safety floor crossed'
@@ -149,7 +184,7 @@ class Monitor:
                 with contextlib.suppress(ProcessLookupError):
                     self.proc.terminate()
                 return
-            self.done.wait(2)
+            self.done.wait(5 if self.fallback else 2)
 
     def summary(self):
         gpu = [s['gpu_free_mib'] for s in self.samples if s['gpu_free_mib'] is not None]
@@ -253,8 +288,17 @@ def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, r
     base = f'http://127.0.0.1:{port}'
     say(f'CALIBRATE {alias} {ctx} {cache_k}/{cache_v}')
     baseline = meminfo()
+    # On Intel Xe and AMD UMA, vendor sysfs/counters may not expose free memory.
+    # Query the selected engine for its live budget, never cache a startup value.
+    fallback = None
+    if cfg.get('hardware', {}).get('telemetry') in ('intel_xpu', 'amd_gtt'):
+        fallback = lambda: backend_probe(server, cluster.runtime_env(), cfg['hardware']['device_regex'])
     free = gpu_free(cluster.a.node, cfg)
-    result['baseline'] = dict(baseline, gpu_free_mib=free, telemetry=cfg.get('hardware', {}).get('telemetry'))
+    source = cfg.get('hardware', {}).get('telemetry')
+    if free is None and fallback:
+        free = fallback()
+        source = 'backend_memory_budget' if free is not None else source
+    result['baseline'] = dict(baseline, gpu_free_mib=free, telemetry=source)
     say(f'BASELINE: host available={baseline["host_free_mib"]:.0f} MiB; GPU/GTT free={free} MiB; telemetry={result["baseline"]["telemetry"]}')
     if free is None or free < cfg['min_gpu_free_mib'] or baseline['host_free_mib'] < cfg['min_host_free_gib'] * 1024:
         result['error'] = ('GPU telemetry unavailable' if free is None else 'Insufficient GPU/GTT headroom' if free < cfg['min_gpu_free_mib'] else 'Insufficient host memory headroom') + '; no load attempted'
@@ -265,11 +309,16 @@ def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, r
         return result
     with log.open('w') as f:
         proc = subprocess.Popen(cmd, env=env, stdout=f, stderr=subprocess.STDOUT)
-        mon = Monitor(proc, cluster.a.node, cfg, baseline)
+        mon = Monitor(proc, cluster.a.node, cfg, baseline, fallback)
         mon.thread.start()
         try:
-            deadline = time.monotonic() + cfg['request_timeout_seconds']
+            started = time.monotonic(); next_update = started + 15
+            deadline = started + cfg['request_timeout_seconds']
             while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now >= next_update:
+                    say(f'  Loading model: {now-started:.0f}s')
+                    next_update = now + 15
                 if proc.poll() is not None or mon.error:
                     fail(mon.error or 'Server exited during model load')
                 try:
@@ -321,6 +370,7 @@ def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, r
             for i in range(int(cfg['trials'])):
                 if mon.error:
                     fail(mon.error)
+                say(f'Trial {i+1}/{cfg["trials"]}: preparing {parallel} long prompt(s) at context {ctx}')
                 batch = []
                 for j in range(parallel):
                     fraction = (.1, .5, .9)[(i + j) % 3]
@@ -339,7 +389,12 @@ def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, r
                 with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
                     futures = [pool.submit(execute, item) for item in batch]
                     peak = 0
+                    started = time.monotonic(); next_update = started + 15
                     while not all(f.done() for f in futures):
+                        now = time.monotonic()
+                        if now >= next_update:
+                            say(f'  Inference running: {now-started:.0f}s; {sum(f.done() for f in futures)}/{parallel} request(s) complete')
+                            next_update = now + 15
                         if parallel > 1:
                             try:
                                 states = api(base + '/slots', key, timeout=3)
@@ -458,7 +513,7 @@ def calibrate_cluster(c, migration=False):
             records = json.loads((folder / 'weights.json').read_text())
             reportdir = c.root / 'benchmarks' / f'{alias.replace("/", "--")}-{c.backend}-{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}'
             reportdir.mkdir(parents=True)
-            report = {'model': alias, 'backend': c.backend, 'engine': c.v['llama_cpp'], 'kernel': platform.release(), 'device_list': subprocess.run([str(c.locate(c.runtime, 'llama-server')), '--list-devices'], env=c.runtime_env(), text=True, capture_output=True, timeout=30).stdout,
+            report = {'model': alias, 'backend': c.backend, 'engine': c.v['llama_cpp'], 'kernel': platform.release(), 'device_list': device_list(c.locate(c.runtime, 'llama-server'), c.runtime_env()),
                       'weights': records, 'runtime_args': spec.get('args', []), 'settings': cfg, 'runtime': str(c.runtime), 'profile_sha256': hashlib.sha256(original.encode()).hexdigest(), 'results': []}
             results = report['results']
             def test(ctx, k, v, flash):

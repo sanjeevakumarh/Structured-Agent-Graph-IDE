@@ -1,6 +1,6 @@
-# Local AI Cluster — v0.7
+# Local AI Cluster — v0.9
 
-Rebuildable inference on mixed hardware, with a single OpenAI-compatible gateway. Git contains only scripts and configuration.
+Reproducible local inference on mixed hardware. Git stores scripts and YAML only; weights, binaries and credentials stay local.
 
 | Node | Runtime |
 |---|---|
@@ -13,62 +13,56 @@ Rebuildable inference on mixed hardware, with a single OpenAI-compatible gateway
 
 ## Setup
 
-Use `./setup-gmini.sh --version` to verify the extracted release (v0.7). Use a normal login user with supported OS/GPU drivers. Linux needs `python3`, `python3-yaml`, `curl`, `ca-certificates`, `git`; Mac needs `uv` and running Ollama. Edge setup installs its runtime if missing, using upstream installers. No partitions or GPU driver changes.
-
-Edit `config/<node>.yaml` for models, backend and context; `config/versions.yaml` pins runtime candidates. Default binds are local-only. Set `bind: tailnet` and tailnet-resolvable worker hostnames (preferred), or a trusted LAN bind in `config/macmini.yaml` for remote access. Do not expose unauthenticated edge APIs publicly.
+Use a normal login user. Linux needs Python 3 with PyYAML, curl, git and working GPU drivers; Mac needs uv and Ollama. Edge setup installs missing native runtimes. No partition or driver changes. Review `config/<node>.yaml` and `config/versions.yaml` first.
 
 ```sh
-# On Mac, once. Copy worker.key to ~/inference/config/ on gmini, p520, z820 (chmod 600).
+# On Mac once; copy worker.key to ~/inference/config/ on the three workers (chmod 600).
 ./setup-macmini.sh --init-keys
-# On each respective worker: preview, then reconcile (includes legacy migration).
+# On each worker or edge, using its own node name:
+./setup-gmini.sh --version    # expect v0.9
 ./setup-gmini.sh --dry-run
 ./setup-gmini.sh
-# On each edge board
-./setup-nano.sh
-./setup-ventunoq.sh
-# On Mac, after workers (offline workers may be skipped)
+# Once workers are ready, on Mac:
 ./setup-macmini.sh
 ```
 
-Use the same setup command on fresh and existing hosts. Mac's client API is `http://macmini:4001/v1`, with the key in `~/inference/config/gateway.key`. Primary workers use port 8081. Gateway routes are derived from worker profiles; rerun Mac setup after model changes. Edge routes are disabled by default; enable explicitly after configuring network access. Model IDs are `node/model-quantization`; no silent cross-server fallback.
+Replace old source files, not `~/inference/`. Verified weights and resumable `.partial` downloads are reused. Default binds are local-only. For remote access, set `bind: tailnet` on Mac and primary workers and configure resolvable worker hostnames in `config/macmini.yaml`. The client API is `http://macmini:4001/v1` with `gateway.key`. Workers listen on port 8081. Edge routes are optional and disabled by default. Explicit `node/model-quantization` IDs do not fail over to other machines.
 
 ## Commands
 
-Pass to the respective `setup-<node>.sh`:
+Use the appropriate `setup-<node>.sh`:
 
-| Argument | Action |
+| Option | Action |
 |---|---|
-| None / `--install` | Reconcile, test inference, migrate legacy assets and clean up obsolete managed files |
-| `--models` | Sync desired models, validate and remove obsolete managed models (workers/edges) |
-| `--cleanup` | Remove obsolete managed artifacts |
-| `--reset` | Rebuild managed runtime, retain weights; edges reconcile/restart |
-| `--migrate` | Explicitly repeat migration; ordinary setup detects it automatically |
-| `--health` | Read-only system/API status (not inference) |
-| `--validate [--model ID]` | Execute inference on configured models |
-| `--benchmark [--model ID]` | Performance test (primary workers require ID; edges optional) |
-| `--calibrate [--model ID]` | Measure context on workers/Nano; `--apply` updates YAML |
-| `--backend rocm` | Worker backend override |
-| `--dry-run` / `--help` | Preview / help |
+| None / `--install` | Install, reconcile, validate, migrate old services and prune obsolete managed weights |
+| `--models` | Reconcile the YAML model catalog |
+| `--cleanup` | Remove obsolete managed assets |
+| `--reset` | Rebuild managed runtime, preserve weights |
+| `--health` | Read-only service and model discovery |
+| `--validate [--model ID]` | Actual inference test |
+| `--benchmark [--model ID]` | Throughput test (worker requires ID) |
+| `--calibrate [--model ID]` | Context tests; `--apply` writes recommendations to YAML |
+| `--backend rocm` | Override worker backend |
+| `--migrate` | Explicit legacy migration (usually automatic) |
+| `--help` | All options |
 
-Mac setup syncs local embedding models and tests local/reachable routes through LiteLLM. Network-unreachable workers are reported as SKIP; HTTP/auth errors fail. Mac `--validate --model ID` requires that specific route to work. Known legacy services are automatically stopped and retired during setup; no manual service changes. Mac model cleanup is not automatic.
+## Models and validation
 
-## Models and calibration
+Edit the node YAML, then run setup. Disabled model entries retain weights; removed entries become cleanup candidates. Worker weights use pinned upstream GGUF revisions and verified hashes; raw Ollama blobs are not trusted as sources. Exact-hash matches can be reused. Edge and Mac native model tags are mutable.
 
-Edit the YAML catalog, then use `--models`. Worker models use pinned upstream Hugging Face GGUF revisions. Exact SHA-256 matches may be reused from local stores; raw Ollama model layers are not accepted as sources. Disabled entries retain their cached weights; deleted entries become cleanup candidates. Nano uses native Ollama tags; GenieX uses native cached IDs. Edge cleanup only removes previously adopted or explicitly listed `retire_models` tags, after successful validation. Disabled/unlisted external models are retained unless explicitly retired. Nano reports GPU-resident bytes and generation timing; GenieX tests actual completions but does not independently prove NPU placement of an existing service.
-
-Calibration and benchmarking stage missing runtime/weights, pause known GPU services, and restore their prior state afterward (including Ctrl-C). They do not permanently retire services or delete weights. Primary-worker calibration stops at `target_context`, prefers the highest cache precision that meets it, and tests real long prompts concurrently at the configured per-model `parallel` slot count. Reports include retrieval, GPU offload, memory and latency; Nano tests context and retrieval with native Ollama timings and before/after memory. `--apply` updates tested YAML settings; rerun setup afterward. Tests can be lengthy and memory checks cannot eliminate OOM risk. GenieX context depends on model bundles; use `--benchmark` rather than claiming a calibrated context. Mac/GenieX context calibration and edge vendor uninstall are not implemented.
+Worker calibration pauses/restores known services, tests concurrent configured slots and stops at the target context. Intel/AMD use vendor counters or fresh backend-reported memory budgets if counters are missing; unknown telemetry fails closed. Nano samples unified RAM, adjusts prompt size using measured tokens, and reports failed checks. `--apply` changes only measured settings; rerun setup to deploy. Full calibration can be lengthy. GenieX QAIRT bundle context is fixed: `--calibrate` runs a real benchmark instead of recommending an unverified context. VENTUNO Q's failing Gemma plugin is disabled by default; cached weights remain. Qwen is enabled. NPU placement is not independently verified.
 
 ## Cleanup and recovery
 
-Review `legacy_cleanup` before setup; optional `migration_hostnames` restricts destructive migration to selected hosts. Setup reclaims explicitly listed oversized legacy or obsolete managed weights on disk pressure after confirmation and retries; `--reclaim-first` allows early legacy removal. Deleted weights cannot be rolled back. Failed migration attempts to restore the previous service. Upstream llama.cpp info-level logs are forwarded to the systemd journal; failed model smoke tests save a bounded diagnostic log under `~/inference/benchmarks/`; calibration records separate host/GPU memory readings and per-candidate logs; cleanup requires fresh GPU-offload evidence and calibration at deployed settings. Unknown services and unlisted assets remain untouched. `--yes` bypasses confirmations. Vendor drivers, partitions and unrelated files are preserved. Mac setup disables its known previous LiteLLM launch agent after tests. An already-running GenieX service is reused rather than replaced; its external service configuration/cache are preserved.
+Review `legacy_cleanup`. Setup stages verified files, stops known legacy services, tests inference, fresh GPU-offload evidence and deployed-context performance, then retires explicitly listed assets. Failed validation attempts rollback; unknown services/files are preserved. On disk pressure it offers listed early reclamation and retries. Early deletion cannot be rolled back. `--reclaim-first` explicitly requests early deletion; `--yes` bypasses prompts. No OS partition or driver changes. Mac skips unreachable workers but fails on auth/protocol or reachable-model errors.
 
-`~/inference/` contains `bin/`, `config/`, `models/`, `cache/`, `benchmarks/` and Mac logs. Native edge/Mac Ollama and GenieX stores remain in their existing locations. Preserve keys, weights and caches before reinstalling an OS. No downloaded artifacts or credentials belong in Git.
+Managed files live under `~/inference/{bin,config,models,cache,benchmarks}`. Native vendor stores remain in place. Preserve keys/models/cache before OS reinstall. Failure reports are in `benchmarks/`. Worker native startup logs are captured per model in private `config/` and cleared at smoke-test restart. Verbosity 4 may include prompt data and grow logs; automatic native/Mac log rotation is not implemented. Review logs before sharing.
 
-## Checks
+## Tests and limits
 
 ```sh
 python3 -m unittest discover -s common
 for f in setup-*.sh common/setup.sh; do bash -n "$f"; done
 ```
 
-Deployment candidate, not hardware-certified. Z820 may require `cuda-native` because it lacks AVX2. Native builds need compatible toolchains. Mac/edge mutable tags and transitive Python packages are not fully locked. P520 needs actual device-wide VRAM telemetry (DRM sysfs or xpu-smi); missing readings block calibration rather than inventing free memory. Verify real hardware results, network access and model compatibility before destructive cleanup. Per-model slots are tested together; multi-model `resident_groups` are opt-in after cutover and need separate combined-memory testing. Local loopback model subprocesses are unauthenticated; Mac log rotation is not automated. Remove legacy migration code after all nodes are cut over.
+Deployment candidate; real hardware validation still required. GPU budget readings are driver estimates, not guaranteed physical free memory. Edge memory sampling is observational. Resident groups require separate combined-memory tests. GenieX plugin repair and clean-OS GPU driver installation are outside this package. Mac model cleanup and vendor uninstall remain manual. Remove legacy migration code after cutover.

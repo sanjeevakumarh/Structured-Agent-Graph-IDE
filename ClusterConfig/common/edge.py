@@ -12,10 +12,53 @@ import re
 import shutil
 import subprocess
 import time
+import threading
+import contextlib
 import urllib.parse
 from pathlib import Path
 
 from manage import api, atomic, confirm, fail, run, say, valid_alias
+
+
+def context_checks(result, code, ctx, cfg, before, after):
+    n = result.get('prompt_tokens') or 0
+    checks = {
+        'prompt_fill': ctx*.70 <= n <= ctx*.85,
+        'retrieval': code in result.get('text', ''),
+        'uncached_prompt': (result.get('cached_prompt_tokens') or 0) <= n*.05,
+        'allocated_context': (result.get('context_allocated') or 0) >= ctx,
+        'generation_speed': result.get('generation_tps', 0) >= cfg['min_generation_tps'],
+        'host_memory': after['host_free_mib'] >= cfg['min_host_free_mib'],
+        'no_swapout': after['swapout_pages'] == before['swapout_pages'],
+        'request_time': result['seconds'] <= cfg['max_request_seconds'],
+    }
+    return [name for name, ok in checks.items() if not ok]
+
+
+@contextlib.contextmanager
+def observe_memory(meminfo, interval=2):
+    """Sample unified host RAM throughout an edge request; no vendor daemon changes."""
+    samples = [meminfo()]
+    errors = []
+    stop = threading.Event()
+    def sample():
+        started=time.monotonic(); next_update=started+15
+        while not stop.wait(interval):
+            try:
+                samples.append(meminfo())
+                now=time.monotonic()
+                if now>=next_update:
+                    say(f'  Inference running: {now-started:.0f}s; host available={samples[-1]["host_free_mib"]:.0f} MiB')
+                    next_update=now+15
+            except (OSError, ValueError, KeyError) as exc:
+                errors.append(str(exc)); return
+    worker = threading.Thread(target=sample, daemon=True)
+    worker.start()
+    try:
+        yield samples, errors
+    finally:
+        stop.set(); worker.join(timeout=5)
+        samples.append(meminfo())
 
 
 class Edge:
@@ -192,8 +235,12 @@ class Edge:
 
     def cleanup(self, validated=False):
         # Only explicitly adopted or listed legacy tags; never rm arbitrary directories.
-        old = ((self.previous() | set(self.spec.get('retire_models', []))) - self.wanted()) & self.ids()
+        retained = {m['id'] for m in self.spec['edge_models'].values()}
+        explicit = set(self.spec.get('retire_models', [])) - self.wanted()
+        old = (((self.previous() - retained) | explicit) & self.ids())
         if not old:
+            if validated:
+                self.record(self.previous() | self.wanted())
             say('No obsolete adopted or explicitly listed edge models.'); return
         if not validated:
             self.validate(all_models=True)
@@ -207,7 +254,7 @@ class Edge:
                 run(self.cli(), 'remove', model, env=self.env)
         if old & self.ids():
             fail('Some removed models are still advertised. Verify server cache ownership; no filesystem deletion attempted.')
-        self.record(self.wanted())
+        self.record((self.previous() - old) | self.wanted())
         say('Model cleanup complete.')
 
     def request(self, spec, prompt, context=None, tokens=256):
@@ -228,6 +275,8 @@ class Edge:
             return {'text': data['response'], 'prompt_tokens': data.get('prompt_eval_count'), 'generated_tokens': data['eval_count'],
                     'prompt_tps': data.get('prompt_eval_count', 0)*1e9/max(1,data.get('prompt_eval_duration', 0)),
                     'generation_tps': data['eval_count']*1e9/max(1,data.get('eval_duration', 0)),
+                    'cached_prompt_tokens': data.get('prompt_eval_cached_count', 0),
+                    'done_reason': data.get('done_reason'),
                     'load_seconds': data.get('load_duration', 0)/1e9, 'seconds': time.monotonic()-start,
                     'context_allocated': loaded.get('context_length'), 'gpu_bytes': loaded['size_vram'], 'loaded_bytes': loaded.get('size')}
         # GenieX uses the advertised vendor model ID. NPU placement for an existing server is not inferred from a chat response.
@@ -254,13 +303,28 @@ class Edge:
         ids = self.ids()
         missing = self.wanted() - ids
         if missing: fail('Missing desired edge models: ' + ', '.join(sorted(missing)))
+        rows = []
         for alias, spec in (self.models.items() if all_models else self.selected()):
             try:
                 result = self.request(spec, 'Reply with the word READY. Do not explain.', tokens=256)
                 if 'ready' not in result['text'].lower(): fail(f'{alias}: response did not contain READY.')
+                rows.append(dict(result, alias=alias, passed=True))
                 say('PASS ' + alias + ' ' + json.dumps({k:v for k,v in result.items() if k != 'text'}))
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                rows.append(dict(alias=alias, passed=False, error=str(exc)))
+                say(f'FAIL {alias}: {exc}')
+                if self.runtime == 'geniex' and ('-100301' in str(exc) or 'Plugin loading failed' in str(exc)):
+                    say('GenieX plugin failed; existing vendor software and cached models preserved.')
+                    try:
+                        version = run(self.cli(), '--version', check=False, capture=True)
+                        rows[-1]['runtime_version'] = (version.stdout or '') + (version.stderr or '')
+                    except (OSError, RuntimeError):
+                        pass
             finally:
                 self.unload(spec)
+        self.report('validation', rows)
+        if not all(r['passed'] for r in rows):
+            fail('One or more configured edge models failed inference; no model cleanup performed.')
         if self.runtime == 'geniex': say('Text inference verified; NPU placement not independently verified on the existing service.')
 
     def health(self):
@@ -289,6 +353,7 @@ class Edge:
         for alias,spec in self.selected():
             try:
                 for trial in range(3):
+                    say(f'BENCHMARK {alias} trial {trial+1}/3')
                     result=self.request(spec, f'Run {trial}: Explain how soil moisture sensors automate irrigation in 200 words.', tokens=256)
                     rows.append(dict(result, alias=alias, trial=trial)); say(json.dumps({k:v for k,v in rows[-1].items() if k!='text'}))
             finally: self.unload(spec)
@@ -298,7 +363,10 @@ class Edge:
         if self.a.cache_type:
             fail('Edge KV cache comparisons are not supported.')
         if self.runtime != 'ollama':
-            fail('GenieX QAIRT context is bundle-dependent; API does not prove effective allocated context. Use --benchmark; no false context recommendation.')
+            if self.a.apply:
+                fail('Cannot apply a context setting to a fixed QAIRT model bundle.')
+            say('GenieX: context is fixed for QAIRT bundles. Running inference benchmark instead; no context recommendation.')
+            return self.benchmark()
         from calibrate import meminfo, prompt_messages
         import yaml
         from manage import REPO
@@ -309,30 +377,52 @@ class Edge:
         for alias,spec in self.selected():
             best=None
             for ctx in cfg['contexts']:
+                if ctx > spec.get('target_context', max(cfg['contexts'])):
+                    break
                 passes=[]
-                for i,depth in enumerate((.1,.5,.9)):
+                for depth in (.1,.5,.9):
                     before=meminfo()
+                    r = None
                     try:
-                        # Estimate token density, then adjust using measured prompt count. Reject truncation/underfilled requests.
-                        count=max(10,int(ctx*.78/24))
-                        for attempt in range(3):
+                        count=max(10,int(ctx*.77/24))
+                        # A short answer is enough to verify retrieval; reserve room for reasoning.
+                        budget=min(512, max(128,ctx//8))
+                        for attempt in range(5):
                             messages,code=prompt_messages(count,depth,time.time_ns())
-                            r=self.request(spec,messages[0]['content'],context=ctx,tokens=128)
+                            prompt=messages[0]['content'].replace('alone on the first line, then explain in about 100 words how you found it.', 'alone. No explanation.')
+                            say(f'{alias} context={ctx} depth={depth} attempt={attempt+1}: processing {count} records')
+                            with observe_memory(meminfo) as (samples, errors):
+                                r=self.request(spec,prompt,context=ctx,tokens=budget)
                             n=r.get('prompt_tokens') or 0
-                            if ctx*.70 <= n <= ctx*.92: break
-                            if not n or n>=ctx-128: break
-                            count=max(10,int(count*ctx*.80/n))
-                        after=meminfo()
-                        passed=(ctx*.70<=n<=ctx*.92 and code in r['text'] and (r.get('context_allocated') or 0)>=ctx
-                                and r['generation_tps']>=cfg['min_generation_tps'] and after['host_free_mib']>=cfg['min_host_free_mib']
-                                and after['swapout_pages']==before['swapout_pages'] and r['seconds']<=cfg['max_request_seconds'])
-                        rows.append(dict(r,alias=alias,context=ctx,depth=depth,passed=passed,host_free_mib=after['host_free_mib']))
-                    except (RuntimeError,OSError,ValueError,KeyError) as e:
+                            say(f'  measured tokens={n}, allocated={r.get("context_allocated")}, generation={r["generation_tps"]:.2f} t/s, seconds={r["seconds"]:.1f}')
+                            worst = {'host_free_mib':min(x['host_free_mib'] for x in samples),
+                                     'swapout_pages':max(x['swapout_pages'] for x in samples)}
+                            if errors or worst['host_free_mib'] < cfg['min_host_free_mib'] or worst['swapout_pages'] > before['swapout_pages']:
+                                fail('Memory safety threshold crossed or memory sampling failed')
+                            if ctx*.70 <= n <= ctx*.85: break
+                            if not n: break
+                            # Even a truncated count near the context cap must shrink and retry.
+                            adjusted=max(1,int(count*ctx*.77/n))
+                            if adjusted==count: adjusted += 1 if n < ctx*.70 else -1
+                            count=max(1,adjusted)
+                        after=worst
+                        reasons=context_checks(r,code,ctx,cfg,before,after)
+                        passed=not reasons
+                        rows.append(dict(r,alias=alias,context=ctx,depth=depth,passed=passed,failed_checks=reasons,host_free_mib=after['host_free_mib'],memory_samples=len(samples)))
+                        if reasons: say('  Failed checks: ' + ', '.join(reasons))
+                    except (RuntimeError,OSError,ValueError,KeyError,TypeError) as e:
                         passed=False; rows.append(dict(alias=alias,context=ctx,depth=depth,passed=False,error=str(e)))
+                        say('  Error: ' + str(e))
                     finally: self.unload(spec)
                     passes.append(passed); say(f'{alias} context={ctx} depth={depth}: {"PASS" if passed else "FAIL"}')
                     if not passed: break
-                if not all(passes) or len(passes)!=3: break
+                if not all(passes) or len(passes)!=3:
+                    # A low-context retrieval failure need not prove all larger contexts fail.
+                    # Stop on explicit memory/load failure; otherwise try next context once.
+                    last=rows[-1]
+                    if last.get('error') or any(x in last.get('failed_checks',[]) for x in ('host_memory','no_swapout','request_time','allocated_context')):
+                        break
+                    continue
                 best=ctx
             rows.append({'alias':alias,'recommended_context':best}); say(f'{alias}: recommended context {best or "none"}')
         self.report('context', rows)

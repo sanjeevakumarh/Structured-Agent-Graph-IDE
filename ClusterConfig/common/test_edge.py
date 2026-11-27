@@ -47,6 +47,31 @@ class EdgeGatewayTests(unittest.TestCase):
         with patch.object(e,'ids',side_effect=[e.wanted()|{'old:1','other:1'},e.wanted()|{'other:1'}]),patch.object(e,'validate'),patch.object(e,'cli',return_value='ollama'),patch.object(edge,'run') as run:
             e.cleanup();self.assertEqual(run.call_args.args,('ollama','rm','old:1'))
             self.assertEqual(e.previous(),e.wanted())
+    def test_context_reports_individual_failure_reasons(self):
+        cfg={'min_generation_tps':3,'min_host_free_mib':512,'max_request_seconds':300}
+        before={'swapout_pages':10}; after={'host_free_mib':1024,'swapout_pages':10}
+        good={'prompt_tokens':1570,'text':'CODE','context_allocated':2048,'generation_tps':10,'seconds':50}
+        self.assertEqual(edge.context_checks(good,'CODE',2048,cfg,before,after),[])
+        bad=dict(good,prompt_tokens=200,text='wrong',context_allocated=1024,cached_prompt_tokens=199)
+        self.assertEqual(set(edge.context_checks(bad,'CODE',2048,cfg,before,after)),{'prompt_fill','retrieval','allocated_context','uncached_prompt'})
+
+    def test_disabled_geniex_model_retained_even_if_previously_adopted(self):
+        e=edge.Edge(self.cluster('ventunoq'))
+        disabled=e.spec['edge_models']['ventunoq/gemma4-e2b-q4_0']['id']
+        self.assertNotIn(disabled,e.wanted())
+        e.record(e.wanted()|{disabled})
+        with patch.object(e,'ids',return_value=e.wanted()|{disabled}),patch.object(edge,'run') as run:
+            e.cleanup(validated=True); run.assert_not_called()
+        self.assertIn(disabled,e.previous())
+
+    def test_geniex_calibrate_benchmarks_fixed_bundle(self):
+        e=edge.Edge(self.cluster('ventunoq'))
+        with patch.object(e,'benchmark') as bench:
+            e.calibrate(); bench.assert_called_once()
+        e.a.apply=True
+        with self.assertRaisesRegex(RuntimeError,'fixed QAIRT'):
+            e.calibrate()
+
     def test_gateway_skip_offline_but_test_local_embedding(self):
         c=self.cluster('macmini');c.key=lambda _: 'fake'
         local='qwen3-embedding:0.6b';alias='macmini/qwen3-embedding-0.6b-q8_0'

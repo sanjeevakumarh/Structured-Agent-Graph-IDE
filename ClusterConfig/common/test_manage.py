@@ -151,7 +151,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_explicit_model_logging_and_offload_parser(self):
         cmd = m.model_command('/bin/server', Path('/models'), [{'name':'model.gguf'}], 'z820/model', {'context':8192}, 12345)
-        self.assertEqual(cmd[-5:], ['--log-verbosity','3','--log-colors','off','--no-log-jsonl'])
+        self.assertEqual(cmd[-5:], ['--log-verbosity','4','--log-colors','off','--no-log-jsonl'])
         self.assertEqual(m.offload_counts('load_tensors: offloaded \x1b[32m25/25\x1b[0m layers to GPU'), (25,25))
         self.assertEqual(m.offload_counts('offloaded 25/25 layers to GPU\noffloaded 0/25 layers to GPU'), (0,25))
         self.assertIsNone(m.offload_counts('Available devices: CUDA0'))
@@ -173,6 +173,20 @@ class SafetyTests(unittest.TestCase):
                 self.c.check_gpu_offload('2026-11-27 00:00:00', 'gmini/qwen3-coder-next-80b-q4_k_m')
         with patch.object(m, 'run', return_value=SimpleNamespace(stdout='load_tensors: offloaded 40/40 layers to GPU')):
             self.c.check_gpu_offload('2026-11-27 00:00:00', 'gmini/qwen3-coder-next-80b-q4_k_m')
+
+    def test_native_model_log_independent_of_journal(self):
+        c=self.c
+        alias='gmini/qwen3-coder-next-80b-q4_k_m'
+        c.cfg.mkdir(parents=True,exist_ok=True)
+        c.model_log(alias).write_text('load_tensors: offloaded 49/49 layers to GPU')
+        with patch.object(m,'run') as run:
+            c.check_gpu_offload('2026-11-27 00:00:00',alias)
+            run.assert_not_called()
+        c.model_log(alias).write_text('load_tensors: offloaded 0/49 layers to GPU')
+        with patch.object(m,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'below target'):
+                c.check_gpu_offload('2026-11-27 00:00:00',alias)
+            run.assert_not_called()
 
     def test_calibration_isolation_restores_old_service_on_interrupt(self):
         from unittest.mock import MagicMock

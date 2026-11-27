@@ -33,7 +33,7 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = '0.7'
+RELEASE = '0.9'
 MARK = '.local-ai-cluster'
 SERVICE = 'local-ai-inference.service'
 LABEL = 'local.cluster.gateway'
@@ -141,7 +141,7 @@ def model_command(server, folder, records, alias, spec, port, host='127.0.0.1'):
     extra = [str(x) for x in spec.get('args', [])]
     if '--log-disable' in extra:
         fail('Model logging cannot be disabled: GPU validation needs evidence.')
-    return args + extra + ['--log-verbosity', '3', '--log-colors', 'off', '--no-log-jsonl']
+    return args + extra + ['--log-verbosity', '4', '--log-colors', 'off', '--no-log-jsonl']
 
 
 def run(*args, check=True, capture=False, env=None):
@@ -187,7 +187,7 @@ def atomic(path, data, mode=0o600):
 
 
 def get_bytes(url, headers=None):
-    req = urllib.request.Request(url, headers={'User-Agent': 'local-ai-cluster/0.6', **(headers or {})})
+    req = urllib.request.Request(url, headers={'User-Agent': 'local-ai-cluster/' + RELEASE, **(headers or {})})
     with urllib.request.urlopen(req, timeout=30) as response:
         return response.read()
 
@@ -613,7 +613,7 @@ class Cluster:
         for alias, spec in self.desired.items():
             folder, rec = self.sync_model(alias, spec)
             active.append(folder.name)
-            args = model_command(server, folder, rec, alias, spec, '${PORT}')
+            args = model_command(server, folder, rec, alias, spec, '${PORT}') + ['--log-file', str(self.model_log(alias))]
             libs = self.runtime_env().get('LD_LIBRARY_PATH')
             if libs:
                 args = ['/usr/bin/env', 'LD_LIBRARY_PATH=' + libs, *args]
@@ -661,8 +661,9 @@ class Cluster:
     def service_active(self):
         if self.role == 'edge':
             return False
-        cmd = ('launchctl', 'print', 'system/' + LABEL) if self.role == 'gateway' else ('systemctl', 'is-active', '--quiet', SERVICE)
-        return run(*cmd, check=False, capture=True).returncode == 0
+        if self.role == 'gateway':
+            return self.gateway_loaded()
+        return run('systemctl', 'is-active', '--quiet', SERVICE, check=False, capture=True).returncode == 0
 
     def legacy_exists(self):
         name = self.c.get('legacy_service')
@@ -740,13 +741,70 @@ class Cluster:
                     self.a.reclaim_first = previous
                 self.sync(install=install)
 
+    def gateway_loaded(self, privileged=False):
+        command = ['launchctl', 'print', 'system/' + LABEL]
+        if privileged:
+            command.insert(0, 'sudo')
+        return run(*command, check=False, capture=True).returncode == 0
+
+    def gateway_bootout(self):
+        """Wait for launchd to remove our job before replacing its plist."""
+        if not self.gateway_loaded(privileged=True):
+            return
+        result = run('sudo', 'launchctl', 'bootout', 'system/' + LABEL,
+                     check=False, capture=True)
+        for _ in range(20):
+            if not self.gateway_loaded(privileged=True):
+                return
+            time.sleep(0.5)
+        fail('Managed gateway remains loaded after bootout: ' + (result.stderr or result.stdout).strip())
+
+    def gateway_bootstrap(self):
+        """Bootstrap only an unloaded job; tolerate a concurrently loaded own job."""
+        self.service_owned()
+        if self.gateway_loaded(privileged=True):
+            return
+        run('plutil', '-lint', self.service_path())
+        run('sudo', 'launchctl', 'enable', 'system/' + LABEL)
+        for attempt in range(2):
+            result = run('sudo', 'launchctl', 'bootstrap', 'system', self.service_path(),
+                         check=False, capture=True)
+            if result.returncode == 0 or self.gateway_loaded(privileged=True):
+                return
+            if attempt == 0:
+                time.sleep(2)
+                if self.gateway_loaded(privileged=True):
+                    return
+        fail(f'launchd bootstrap failed ({result.returncode}): ' + (result.stderr or result.stdout).strip())
+
+    def gateway_failure_log(self, error):
+        """Preserve original failure and local diagnostics before rollback."""
+        try:
+            folder = self.root / 'benchmarks'
+            folder.mkdir(exist_ok=True)
+            path = folder / f'gateway-failure-{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}.log'
+            status = run('launchctl', 'print', 'system/' + LABEL, check=False, capture=True)
+            log = self.root / 'logs/gateway.log'
+            tail = ''
+            if log.is_file():
+                with log.open('rb') as f:
+                    f.seek(max(0, log.stat().st_size - 32768))
+                    tail = f.read(32768).decode('utf-8', errors='replace')
+            text = f'Cluster release {RELEASE}\nOriginal failure: {error}\n\n{status.stdout}\n{status.stderr}\n{tail}'
+            for name in ('gateway', 'worker'):
+                with contextlib.suppress(OSError, RuntimeError):
+                    text = text.replace(self.key(name), '[REDACTED]')
+            atomic(path, text, mode=0o600)
+            say('Gateway diagnostics (local, review before sharing): ' + str(path))
+        except Exception as e:
+            say('Could not save gateway diagnostics: ' + str(e))
+
     def stop(self):
         if self.role == 'edge':
             fail('Edge service is vendor-managed; no stop action.')
         self.service_owned()
         if self.role == 'gateway':
-            if self.service_active():
-                run('sudo', 'launchctl', 'bootout', 'system/' + LABEL)
+            self.gateway_bootout()
         elif self.service_path().exists():
             run('sudo', 'systemctl', 'stop', SERVICE)
 
@@ -778,7 +836,11 @@ class Cluster:
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / self.service_path().name
             p.write_bytes(data if isinstance(data, bytes) else data.encode())
-            run('sudo', 'install', '-m', '0644', p, self.service_path())
+            if self.role == 'gateway':
+                run('plutil', '-lint', p)
+                run('sudo', 'install', '-o', 'root', '-g', 'wheel', '-m', '0644', p, self.service_path())
+            else:
+                run('sudo', 'install', '-m', '0644', p, self.service_path())
         if self.role == 'worker':
             run('sudo', 'systemctl', 'daemon-reload')
 
@@ -794,36 +856,49 @@ class Cluster:
             fail('Endpoint changed in YAML; run --install to regenerate the service first.')
         if self.legacy_active():
             fail('Legacy GPU service became active during cutover; rerun setup to reconcile.')
-        if not self.service_active():
-            # Catch stale addresses and occupied ports without altering existing processes.
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                try:
-                    s.bind((self.c['bind'], int(self.c['port'])))
-                except OSError as e:
-                    if e.errno == 98 or e.errno == 48:
-                        # Report actual listener if ss is available; never kill unknown processes.
-                        if shutil.which('ss'):
-                            run('ss', '-ltnp', f'sport = :{self.c["port"]}', check=False)
-                        fail(f'Port {self.c["port"]} already in use on {self.c["bind"]}; not stopping an unknown listener.')
-                    raise
+        loaded = self.gateway_loaded(privileged=True) if self.role == 'gateway' else self.service_active()
+        if not loaded:
+            # A stopped launchd job can leave children briefly holding its port.
+            attempts = 15
+            for attempt in range(attempts):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    try:
+                        s.bind((self.c['bind'], int(self.c['port'])))
+                        break
+                    except OSError as e:
+                        if e.errno not in (98, 48):
+                            raise
+                        if attempt + 1 == attempts:
+                            if shutil.which('ss'):
+                                run('ss', '-ltnp', f'sport = :{self.c["port"]}', check=False)
+                            elif shutil.which('lsof'):
+                                run('lsof', '-nP', f'-iTCP:{self.c["port"]}', '-sTCP:LISTEN', check=False)
+                            fail(f'Port {self.c["port"]} already in use on {self.c["bind"]}; not stopping an unknown listener.')
+                time.sleep(1)
         if self.role == 'gateway':
-            if not self.service_active():
-                run('sudo', 'launchctl', 'bootstrap', 'system', self.service_path())
+            self.gateway_bootstrap()
         else:
             run('sudo', 'systemctl', 'enable', '--now', SERVICE)
         self.wait_ready()
 
-    def wait_ready(self):
+    def wait_ready(self, endpoint=None):
+        endpoint = endpoint or self.endpoint
         key = self.key('gateway' if self.role == 'gateway' else 'worker')
+        last_error = None
         for _ in range(30):
             try:
-                api(self.endpoint + '/v1/models', key, timeout=2)
-                say('API reachable: ' + self.endpoint + '/v1; inference validation pending.')
+                api(endpoint + '/v1/models', key, timeout=2)
+                say('API reachable: ' + endpoint + '/v1; inference validation pending.')
                 return
-            except (OSError, ValueError):
-                time.sleep(2)
-        fail('Service did not return a model list; inspect native logs.')
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    fail(f'Service authentication failed at {endpoint}: HTTP {e.code}')
+                last_error = e
+            except (OSError, ValueError) as e:
+                last_error = e
+            time.sleep(2)
+        fail(f'Service did not return a model list at {endpoint}: {last_error}; inspect native logs.')
 
     def sync(self, install=False, stage_only=False):
         self.prepare()
@@ -845,16 +920,17 @@ class Cluster:
                                  'runtimes': [self.runtime.name, self.swap.name] if self.role == 'worker' else [self.venv.name]}, indent=2)
         unchanged = (self.native.is_file() and self.native.read_text() == native_text and
                      self.active.is_file() and self.active.read_text() == state_text and self.service_path().exists())
-        was_running = self.service_active()
+        was_running = self.gateway_loaded(privileged=True) if self.role == 'gateway' else self.service_active()
         old_files = {p: p.read_bytes() for p in (self.native, self.active, self.service_path()) if p.is_file()}
         changed_service = not unchanged or (not was_running and not stage_only)
         prune = self.role == 'worker' and (self.a.prune or bool(self.obsolete()))
+        if not unchanged and was_running:
+            confirm('Restart managed inference now? Active requests will be interrupted.', self.a.yes)
         try:
             if unchanged:
                 say('KEEP configuration and service (unchanged).')
             else:
                 if was_running:
-                    confirm('Restart managed inference now? Active requests will be interrupted.', self.a.yes)
                     self.stop()
                 if self.native.exists():
                     atomic(self.native.with_suffix('.previous.yaml'), self.native.read_bytes())
@@ -866,11 +942,15 @@ class Cluster:
                 return
             if self.legacy_active():
                 fail('Legacy service became active during reconciliation; retry setup for automatic migration.')
-            if not self.service_active():
-                self.start()
             if self.role == 'gateway':
+                if not self.gateway_loaded(privileged=True):
+                    self.start()
+                else:
+                    self.wait_ready()
                 self.validate_gateway()
             else:
+                if not self.service_active():
+                    self.start()
                 if prune and not changed_service:
                     self.stop(); self.start()
                 if prune or changed_service:
@@ -879,11 +959,22 @@ class Cluster:
                     self.validate()
                 if prune:
                     self.calibrate(migration=True)
-        except BaseException:
-            if changed_service:
-                self.restore_configuration(old_files, was_running)
-            elif was_running and not self.service_active():
-                self.start()
+        except BaseException as original:
+            # Report the real apply error before rollback; a second failure must
+            # never hide the error that triggered recovery.
+            say(f'Apply failed: {type(original).__name__}: {original}')
+            if self.role == 'gateway':
+                self.gateway_failure_log(original)
+            try:
+                if changed_service:
+                    self.restore_configuration(old_files, was_running)
+                elif was_running and not self.service_active():
+                    self.start()
+            except BaseException as recovery:
+                say(f'ROLLBACK FAILED: {type(recovery).__name__}: {recovery}')
+                if isinstance(original, KeyboardInterrupt):
+                    raise original
+                raise RuntimeError(f'Original apply failure: {original}; rollback also failed: {recovery}') from original
             raise
         # Irreversible cleanup is outside rollback: never restore deleted assets.
         if self.role == 'worker':
@@ -902,12 +993,18 @@ class Cluster:
             with tempfile.TemporaryDirectory() as tmp:
                 saved = Path(tmp) / svc.name
                 saved.write_bytes(old_files[svc])
-                run('sudo', 'install', '-m', '0644', saved, svc)
+                if self.role == 'gateway':
+                    run('sudo', 'install', '-o', 'root', '-g', 'wheel', '-m', '0644', saved, svc)
+                else:
+                    run('sudo', 'install', '-m', '0644', saved, svc)
             if self.role == 'worker':
                 run('sudo', 'systemctl', 'daemon-reload')
             if was_running:
                 if self.role == 'gateway':
-                    run('sudo', 'launchctl', 'bootstrap', 'system', svc)
+                    self.gateway_bootstrap()
+                    previous = json.loads(old_files.get(self.active, b'{}')).get('endpoint')
+                    if previous:
+                        self.wait_ready(endpoint=previous)
                 else:
                     run('sudo', 'systemctl', 'start', SERVICE)
         elif svc.exists():
@@ -952,7 +1049,7 @@ class Cluster:
                         result = api(url.rstrip('/') + '/models', None if route.get('external') else self.key('worker'), timeout=4)
                         availability[url] = {m['id'] for m in result['data']}
                     except urllib.error.HTTPError as e:
-                        fail(f'Upstream HTTP failure {url}: {e.code}; check authentication/configuration.')
+                        fail(f'Upstream HTTP failure {url}: {e.code} {e.reason}; check authentication/configuration.')
                     except (OSError, TimeoutError) as e:
                         if old or route['node'] == self.a.node:
                             fail(f'Required route unavailable: {alias}: {e}')
@@ -965,7 +1062,11 @@ class Cluster:
                 if route['model'] not in ids:
                     fail(f'Upstream {url} does not advertise {route["model"]}.')
                 self.a.model = alias
-                self.validate_one(alias)
+                say(f'TEST {alias} via gateway')
+                try:
+                    self.validate_one(alias)
+                except Exception as e:
+                    fail(f'Gateway inference failed for {alias}: {e}')
                 passed.append(alias)
         finally:
             self.a.model = old
@@ -1107,6 +1208,10 @@ class Cluster:
             run('sudo', 'systemctl', 'disable', '--now', 'ollama.service')
             self.start()
 
+    def model_log(self, alias):
+        # Alias is validated; the private config directory is owned by this stack.
+        return self.cfg / (alias.replace('/', '--') + '.native.log')
+
     def check_gpu_offload(self, since, alias):
         # llama.cpp logs the actual number of layers assigned to GPU. Require
         # positive evidence before deleting legacy weights; never assume device
@@ -1114,9 +1219,13 @@ class Cluster:
         minimum = float(self.desired[alias].get('min_gpu_fraction', 1.0))
         if not 0 < minimum <= 1:
             fail('min_gpu_fraction must be in (0,1].')
-        for _ in range(3):
-            logs = run('sudo', 'journalctl', '-u', SERVICE, '--since', since,
-                       '--no-pager', '-o', 'cat', capture=True).stdout
+        for _ in range(6):
+            native = self.model_log(alias)
+            # smoke_all clears this file after stopping the service; never use stale evidence.
+            logs = native.read_text(errors='replace') if native.is_file() else ''
+            if not offload_counts(logs):
+                logs += '\n' + run('sudo', 'journalctl', '-u', SERVICE, '--since', since,
+                           '--no-pager', '-o', 'cat', capture=True).stdout
             counts = offload_counts(logs)
             if counts:
                 actual, total = counts
@@ -1125,7 +1234,7 @@ class Cluster:
                     return
                 fail(f'GPU offload below target for {alias}: {actual}/{total}; tune context or quantization.')
             time.sleep(2)
-        fail('No GPU-layer offload evidence in journal for ' + alias + '; legacy assets preserved. See saved migration diagnostics.')
+        fail('No fresh GPU-layer offload evidence in native log or journal for ' + alias + '; legacy assets preserved. See saved migration diagnostics.')
 
     def save_failure_log(self, since, error):
         """Collect bounded model startup/service diagnostics before rollback."""
@@ -1140,6 +1249,12 @@ class Cluster:
             if not isinstance(journal, str):
                 return
             text = f'Cluster release {RELEASE}\nBackend: {self.backend}\nError: {error}\n\n{journal}'
+            for alias in self.desired:
+                native = self.model_log(alias)
+                if native.is_file():
+                    with native.open('rb') as f:
+                        f.seek(max(0, native.stat().st_size - 64000))
+                        text += f'\n\n--- {alias} native log tail ---\n' + f.read().decode(errors='replace')
             # The managed key can appear in a server diagnostic. Do not publish it.
             with contextlib.suppress(OSError, RuntimeError):
                 key = self.key('worker')
@@ -1158,6 +1273,8 @@ class Cluster:
                 if self.role == 'worker':
                     # A warm model won't emit a new load log. Restart before each smoke test.
                     self.stop()
+                    # Clear only the managed alias-specific log, after stopping its writer.
+                    atomic(self.model_log(alias), '', mode=0o600)
                 since = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
                 if self.role == 'worker':
                     self.start()

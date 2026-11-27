@@ -11,16 +11,12 @@ nodes:
   nano:
     enabled: false  # dedicated route, never automatic fallback
     url: 'http://nano:11434/v1'
-    models:
-      nano/qwen3.5-4b: 'qwen3.5:4b'
   ventunoq:
     enabled: false  # enable only after verifying vendor OpenAI API compatibility
     url: 'http://ventunoq:18181/v1'
-    models: {}  # explicit server-qualified alias: vendor model ID
 local_models:
   macmini/qwen3-embedding-0.6b-q8_0: {model: 'qwen3-embedding:0.6b', embedding: true}
   # macmini/qwen2.5-coder-7b-q6_k: {model: 'qwen2.5-coder:7b-instruct-q6_K'}
 # Optional short aliases map to one explicit route. No implicit cross-server fallback.
 aliases: {}
-ollama_models: ['qwen3-embedding:0.6b']
 legacy_launch_agent: local.litellm

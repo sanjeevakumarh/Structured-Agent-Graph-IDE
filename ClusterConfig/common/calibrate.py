@@ -2,7 +2,8 @@
 """Isolated llama.cpp context calibration, invoked by setup-<node>.sh --calibrate.
 Edit calibration/model settings in the node YAML. Tests real chat prompts at
 ~90% context, measures streaming latency, retrieval, memory and GPU offload.
-Stops/restarts the managed worker; does not prune or change services/config.
+Stages missing runtime/weights, pauses known GPU services and restores them.
+Does not prune models or permanently change service configuration.
 --apply edits only tested context/cache fields; run setup again to deploy them.
 Reports and per-candidate logs remain in ~/inference/benchmarks. No daemon.
 """
@@ -303,8 +304,6 @@ def update_yaml(path, recommendations, original):
 def calibrate_cluster(c, migration=False):
     if c.role != 'worker':
         fail('Calibration requires a managed llama.cpp worker; Mac and edge vendor runtimes are not supported')
-    if c.legacy_active():
-        fail('Stop legacy GPU service before calibration; never benchmark two engines at once')
     c.prepare(); c.service_owned()
     cfg = c.c['calibration']
     if not 3 <= int(cfg['trials']) <= 9:
@@ -316,15 +315,14 @@ def calibrate_cluster(c, migration=False):
         fail('Unknown or disabled model')
     if not migration:
         confirm('Calibration temporarily stops inference and can take hours. Continue?', c.a.yes)
-    was_running = c.service_active()
     profile = REPO / 'config' / (c.a.node + '.yaml')
     original = profile.read_text()
     recommendations = {}
-    if was_running:
-        c.stop()
-    try:
-        if not migration:
-            c.install_worker()  # installs a requested backend if missing, not a new service
+    if not migration:
+        c.install_worker()
+        for alias in selected:
+            c.sync_model(alias, c.desired[alias])
+    with c.isolated_gpu():
         for alias in selected:
             spec = c.desired[alias]
             folder = c.models / model_id(spec)
@@ -381,6 +379,3 @@ def calibrate_cluster(c, migration=False):
                 confirm('Update tested context/cache fields in repository YAML? Deploy separately.', c.a.yes)
                 update_yaml(profile, recommendations, original)
                 say('YAML updated; run setup to deploy, then commit if satisfied.')
-    finally:
-        if was_running:
-            c.start()

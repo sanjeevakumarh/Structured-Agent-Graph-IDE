@@ -32,8 +32,9 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(routes['nano/qwen3.5-4b']['model'], 'qwen3.5:4b')
         self.assertEqual(routes['coder-deep']['node'], 'gmini')
         cfg['nodes']['ventunoq']['enabled'] = True
-        with self.assertRaisesRegex(RuntimeError, 'explicit model IDs'):
-            m.gateway_routes(cfg, m.REPO / 'config')
+        routes = m.gateway_routes(cfg, m.REPO / 'config')
+        self.assertEqual(routes['ventunoq/qwen3-4b-instruct-2507-w4a16']['model'], 'qualcomm/Qwen3-4B-Instruct-2507:W4A16')
+        self.assertNotIn('ventunoq/qwen2.5-vl-7b-w4a16', routes)
 
     def test_alias_safe_and_model_args(self):
         self.assertTrue(m.valid_alias('gmini/model-q4', 'gmini'))
@@ -100,7 +101,7 @@ class CalibrationTests(unittest.TestCase):
     def test_migration_calibration_failure_retains_legacy(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(m.Path,'home',return_value=Path(tmp)):
             c = m.Cluster(SimpleNamespace(node='gmini',backend=None,yes=True,reclaim_first=False,prune=False,model=None))
-            for method in ['prepare','install_worker','sync','start','stop','smoke_all','retire_files','retire_ollama','retire_runtimes','cleanup']:
+            for method in ['prepare','key','install_worker','sync','start','stop','smoke_all','retire_files','retire_ollama','retire_runtimes','cleanup']:
                 setattr(c,method,MagicMock())
             c.c['legacy_cleanup'] = {}
             c.legacy_active = MagicMock(return_value=True)

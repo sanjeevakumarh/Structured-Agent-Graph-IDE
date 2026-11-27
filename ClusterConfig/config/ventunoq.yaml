@@ -1,6 +1,14 @@
-# Arduino VENTUNO Q: preserve vendor OS, App Lab, MCU, GenieX and NPU stack.
-# No generic OS or driver installation. No automatic model download.
+# VENTUNO Q: use the existing GenieX NPU-capable server and vendor model cache.
 node: ventunoq
 role: edge
+runtime: geniex
 endpoint: http://localhost:18181
-ollama_models: []
+bind: localhost # applies only when creating a new managed GenieX service
+request_timeout: 300
+edge_models:
+  ventunoq/qwen3-4b-instruct-2507-w4a16: {id: 'qualcomm/Qwen3-4B-Instruct-2507:W4A16', think: false}
+  ventunoq/gemma4-e2b-q4_0: {id: 'google/gemma-4-E2B-it-qat-q4_0-gguf:Q4_0'}
+  # Existing optional models: enable to validate/route; never implicitly delete.
+  ventunoq/qwen2.5-vl-7b-w4a16: {id: 'qualcomm/Qwen2.5-VL-7B-Instruct:W4A16', enabled: false}
+  ventunoq/gemma4-e4b-q4_0: {id: 'google/gemma-4-E4B-it-qat-q4_0-gguf:Q4_0', enabled: false}
+retire_models: []

@@ -6,9 +6,11 @@ Run a setup-<node>.sh --help for commands. Dry-run never calls service managers
 or downloads model/runtime artifacts. The launcher may initialize uv's cache.
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import platform
 import plistlib
@@ -57,7 +59,8 @@ def gateway_routes(config, profiles):
         elif node == 'macmini':
             models = config.get('local_models', {})
         elif node in ('nano', 'ventunoq'):
-            models = {a: {'model': m} for a, m in n.get('models', {}).items()}
+            profile = yaml.safe_load((profiles / (node + '.yaml')).read_text())
+            models = {a: {'model': m['id']} for a, m in profile['edge_models'].items() if m.get('enabled', True)}
             if not models:
                 fail('Enabled edge node requires explicit model IDs: ' + node)
         else:
@@ -138,7 +141,7 @@ def atomic(path, data, mode=0o600):
 
 
 def get_bytes(url, headers=None):
-    req = urllib.request.Request(url, headers={'User-Agent': 'local-ai-cluster/0.3', **(headers or {})})
+    req = urllib.request.Request(url, headers={'User-Agent': 'local-ai-cluster/0.5', **(headers or {})})
     with urllib.request.urlopen(req, timeout=30) as response:
         return response.read()
 
@@ -157,6 +160,10 @@ def api(url, key=None, payload=None, timeout=10):
         return json.load(r)
 
 
+class DiskSpaceError(RuntimeError):
+    """Insufficient storage for an explicitly requested artifact."""
+
+
 def download(url, dest, digest, size=None, reserve=0):
     """Resume a partial file; publish only after SHA-256 and length validation."""
     if not SHA.fullmatch(digest):
@@ -167,7 +174,7 @@ def download(url, dest, digest, size=None, reserve=0):
     dest.parent.mkdir(parents=True, exist_ok=True)
     needed = max(0, (size or 0) - (part.stat().st_size if part.exists() else 0))
     if shutil.disk_usage(dest.parent).free < needed + reserve:
-        fail(f'Insufficient space for {dest.name}; clean up explicitly, then retry.')
+        raise DiskSpaceError(f'Insufficient space for {dest.name} (including configured reserve).')
     if part.is_file() and (size is None or part.stat().st_size == size) and sha(part) == digest:
         os.replace(part, dest)
         return
@@ -349,7 +356,7 @@ class Cluster:
             self.key(n)
             say('Key ready: ' + str(path))
 
-    def plan(self):
+    def plan(self, migration=False):
         say(f'{self.a.node}: {self.role}; {self.endpoint}; root={self.root}')
         if self.role == 'worker':
             say(f'Runtime: {self.v["llama_cpp"]} {self.backend}; llama-swap {self.v["llama_swap"]}')
@@ -358,15 +365,18 @@ class Cluster:
                 say(f'{"KEEP" if owned(folder) and (folder / "weights.json").exists() else "SYNC"} {alias}: {m["source"]} (ctx {m["context"]})')
             for p in self.obsolete():
                 say('PRUNE CANDIDATE ' + str(p))
-            say('Legacy service: ' + self.c.get('legacy_service', 'none') + ' (retired only by --migrate)')
+            say('Legacy service: ' + self.c.get('legacy_service', 'none') + ' (retired during initial reconciliation)')
         elif self.role == 'gateway':
             say(f'LiteLLM {self.v["litellm"]}; routes:')
             for k, v in self.c['routes'].items():
                 say(f'  {k} -> {v["url"]} / {v["model"]}')
         else:
-            say('Vendor runtime is external; optional Ollama models: ' + str(self.c['ollama_models']))
-        if getattr(self.a, 'action', '') == 'migrate':
-            say('MIGRATION: stop legacy service, validate new inference, then retire listed legacy assets.')
+            say(f'Runtime: {self.c["runtime"]}; desired models:')
+            for alias, spec in self.c['edge_models'].items():
+                if spec.get('enabled', True): say(f'  {alias}: {spec["id"]}')
+            say('Explicit legacy retirement: ' + str(self.c.get('retire_models', [])))
+        if migration or getattr(self.a, 'action', '') in ('migrate', 'install', 'models', 'start'):
+            say('IF LEGACY MIGRATION IS NEEDED: validate replacement, then retire listed assets.')
             for kind, items in self.c.get('legacy_cleanup', {}).items():
                 for item in items:
                     say(f'  {kind}: {item}')
@@ -457,7 +467,6 @@ class Cluster:
         return env
 
     def install_worker(self):
-        self.key('worker')
         if self.backend in ('cuda-native', 'rocm'):
             server = self.native_build()
         elif owned(self.runtime):
@@ -529,7 +538,7 @@ class Cluster:
                                 run('sudo', 'ln', '--', source, dest)
                             else:
                                 if shutil.disk_usage(folder).free < size + self.c.get('reserve_gib', 15) * 2**30:
-                                    fail('Not enough free disk to copy verified existing file.')
+                                    raise DiskSpaceError('Not enough free disk to copy verified existing file.')
                                 shutil.copy2(source, dest)
                         say('REUSE ' + str(source))
                         break
@@ -606,6 +615,74 @@ class Cluster:
         legacy = self.c.get('legacy_service')
         return bool(legacy and run('systemctl', 'is-active', '--quiet', legacy, check=False, capture=True).returncode == 0)
 
+    def legacy_unit(self):
+        expected = {'gmini': 'ollama.service', 'p520': 'llama-swap.service', 'z820': 'ollama.service'}[self.a.node]
+        if self.c.get('legacy_service') != expected:
+            fail('Unexpected legacy service; inspect node YAML.')
+        return expected
+
+    def migration_pending(self):
+        if self.role == 'gateway':
+            label = self.c.get('legacy_launch_agent')
+            return bool(label == 'local.litellm' and run('launchctl', 'print', f'gui/{os.getuid()}/{label}', check=False, capture=True).returncode == 0)
+        if self.role != 'worker':
+            return False
+        self.legacy_unit()
+        if self.legacy_active():
+            return True
+        if (self.cfg / 'migration-complete.json').is_file():
+            return False
+        cleanup = self.c.get('legacy_cleanup', {})
+        return self.legacy_exists() or any(Path(v).expanduser().exists() for v in cleanup.get('model_files', []) + cleanup.get('runtime_dirs', []))
+
+    @contextlib.contextmanager
+    def isolated_gpu(self):
+        """Pause known GPU services and restore their previous state, even on Ctrl-C."""
+        legacy = self.legacy_unit()
+        old = self.legacy_active()
+        managed = self.service_active()
+        try:
+            if old:
+                say('PAUSE ' + legacy)
+                run('sudo', 'systemctl', 'stop', legacy)
+            if managed:
+                say('PAUSE ' + SERVICE)
+                self.stop()
+            if self.legacy_active() or self.service_active():
+                fail('Could not isolate GPU; a known inference service is still active.')
+            yield
+        finally:
+            errors = []
+            for was_active, unit in [(managed, SERVICE), (old, legacy)]:
+                if was_active:
+                    try:
+                        say('RESTORE ' + unit)
+                        run('sudo', 'systemctl', 'start', unit)
+                    except Exception as e:
+                        errors.append(f'{unit}: {e}')
+            if errors:
+                fail('Could not restore previous inference service(s): ' + '; '.join(errors))
+
+    def reconcile(self, install=True):
+        if self.migration_pending():
+            self.migrate()
+        else:
+            self.plan()
+            confirm('Apply this configuration and retire obsolete managed models after validation?', self.a.yes)
+            try:
+                self.sync(install=install)
+            except DiskSpaceError:
+                if self.role != 'worker' or not self.obsolete():
+                    raise
+                say('Insufficient disk space; obsolete managed weights can be reclaimed.')
+                previous = self.a.reclaim_first
+                self.a.reclaim_first = True
+                try:
+                    self.cleanup()  # lists files and confirms before early removal
+                finally:
+                    self.a.reclaim_first = previous
+                self.sync(install=install)
+
     def stop(self):
         if self.role == 'edge':
             fail('Edge service is vendor-managed; no stop action.')
@@ -659,7 +736,7 @@ class Cluster:
         if state.get('endpoint') != self.endpoint:
             fail('Endpoint changed in YAML; run --install to regenerate the service first.')
         if self.legacy_active():
-            fail('Legacy GPU service still active. Review it and stop/disable it manually before cutover.')
+            fail('Legacy GPU service became active during cutover; rerun setup to reconcile.')
         if not self.service_active():
             # Catch stale addresses and occupied ports without altering existing processes.
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -676,28 +753,24 @@ class Cluster:
         for _ in range(30):
             try:
                 api(self.endpoint + '/v1/models', key, timeout=2)
-                say('READY ' + self.endpoint + '/v1 (model listing; not a generation test)')
+                say('API reachable: ' + self.endpoint + '/v1; inference validation pending.')
                 return
             except (OSError, ValueError):
                 time.sleep(2)
         fail('Service did not return a model list; inspect native logs.')
 
-    def sync(self, install=False):
+    def sync(self, install=False, stage_only=False):
         self.prepare()
         if self.role == 'edge':
-            say('Vendor software untouched. Use --models to pull optional Ollama tags on Nano.')
-            if not install:
-                self.pull_ollama()
-            return
+            from edge import Edge
+            return Edge(self).sync(prune=self.a.prune)
         self.service_owned()
         if self.role == 'gateway':
-            if not install:
-                self.pull_ollama()
-                return
+            self.pull_ollama()
             self.install_gateway()
             config, active = self.render_gateway(), []
         else:
-            if install:
+            if install or not owned(self.runtime) or not owned(self.swap):
                 self.install_worker()
             config, active = self.render_worker()
         # Stage all weights first. Do not restart unchanged configuration.
@@ -709,7 +782,7 @@ class Cluster:
         was_running = self.service_active()
         if unchanged:
             say('KEEP configuration and service (unchanged).')
-            if not was_running and not self.legacy_active():
+            if not was_running and not stage_only and not self.legacy_active():
                 self.start()
         else:
             old_files = {p: p.read_bytes() for p in (self.native, self.active, self.service_path()) if p.is_file()}
@@ -722,7 +795,7 @@ class Cluster:
                 atomic(self.native, native_text)
                 atomic(self.active, state_text)
                 self.install_service()
-                if not self.legacy_active():
+                if not stage_only and not self.legacy_active():
                     self.start()
             except Exception:
                 # Best-effort rollback of the prior configuration and native service.
@@ -754,28 +827,83 @@ class Cluster:
                     if self.role == 'worker':
                         run('sudo', 'systemctl', 'daemon-reload')
                 raise
-        if self.legacy_active():
-            say('STAGED ONLY: stop/disable legacy GPU service manually, then run --start.')
-            if self.a.prune:
-                say('Prune skipped until managed inference is running and tested.')
-        elif self.a.prune and self.role == 'worker' and getattr(self.a, 'action', '') != 'migrate':
-            # Before destructive cleanup, exercise each configured model at least once.
-            self.stop()
-            self.start()
-            self.smoke_all()
-            self.calibrate(migration=True)
-            self.cleanup()
+        if stage_only:
+            say('Staged verified runtime and configuration for automatic cutover.')
+        elif self.legacy_active():
+            fail('Legacy service became active during reconciliation; retry setup for automatic migration.')
+        elif self.role == 'gateway':
+            self.validate_gateway()
+        elif self.role == 'worker':
+            # Avoid restarting a healthy unchanged service except before cleanup.
+            prune = self.a.prune or bool(self.obsolete())
+            if prune:
+                self.stop()
+                self.start()
+            if prune or not unchanged or not was_running:
+                self.smoke_all()
+            else:
+                self.validate()
+            if prune:
+                self.calibrate(migration=True)
+            self.cleanup()  # removes only superseded owned runtimes/weights after validation
 
     def pull_ollama(self):
-        models = self.c.get('ollama_models', [])
+        # One desired catalog: derive tags from local routes, no duplicated list.
+        models = {r['model'] for r in self.c['routes'].values() if r['node'] == 'macmini'}
         if not models:
-            say('No Ollama models configured.')
             return
-        if not shutil.which('ollama'):
-            fail('Install/start vendor-supported Ollama first; existing vendor runtime is not replaced.')
-        for model in models:
-            run('ollama', 'pull', model)
-        say('Existing Ollama tags are mutable; no automatic pruning of externally managed stores.')
+        base = self.c['nodes']['macmini']['url'].rstrip('/').removesuffix('/v1')
+        try:
+            existing = {m['name'] for m in api(base + '/api/tags')['models']}
+        except (OSError, ValueError, KeyError) as e:
+            fail(f'Local Ollama unavailable: {e}. Start the installed Mac Ollama app/service.')
+        for model in sorted(models):
+            if model in existing:
+                say('KEEP local Ollama ' + model)
+            else:
+                if not shutil.which('ollama'):
+                    fail('Ollama CLI missing; install vendor Ollama.')
+                run('ollama', 'pull', model, env=dict(os.environ, OLLAMA_HOST=base))
+
+    def validate_gateway(self):
+        # Offline workers are allowed, but local routes and online routes must pass
+        # through LiteLLM itself. Auth/protocol errors are not treated as offline.
+        self.discover()
+        old = self.a.model
+        passed, skipped = [], []
+        availability = {}
+        try:
+            for alias, route in self.c['routes'].items():
+                if old and alias != old:
+                    continue
+                url = route['url']
+                if url not in availability:
+                    try:
+                        result = api(url.rstrip('/') + '/models', None if route.get('external') else self.key('worker'), timeout=4)
+                        availability[url] = {m['id'] for m in result['data']}
+                    except urllib.error.HTTPError as e:
+                        fail(f'Upstream HTTP failure {url}: {e.code}; check authentication/configuration.')
+                    except (OSError, TimeoutError) as e:
+                        if old or route['node'] == 'macmini':
+                            fail(f'Required route unavailable: {alias}: {e}')
+                        availability[url] = None
+                        say(f'Worker unavailable: {route["node"]}: {e}')
+                ids = availability[url]
+                if ids is None:
+                    skipped.append(alias)
+                    continue
+                if route['model'] not in ids:
+                    fail(f'Upstream {url} does not advertise {route["model"]}.')
+                self.a.model = alias
+                self.validate_one(alias)
+                passed.append(alias)
+        finally:
+            self.a.model = old
+        if not passed:
+            fail('No gateway routes passed actual inference.')
+        say(f'Gateway inference: {len(passed)} PASS, {len(skipped)} SKIPPED (offline/unreachable, not validated).')
+        for alias in skipped:
+            say('SKIP ' + alias)
 
     def cleanup(self):
         self.host_check()
@@ -944,28 +1072,13 @@ class Cluster:
     def migrate(self):
         """Install first, smoke test, then delete explicitly listed legacy assets."""
         self.prepare()
-        self.plan()
+        self.plan(migration=True)
         if self.role == 'edge':
-            say('Edge vendor stack preserved. No destructive migration.')
-            return
+            from edge import Edge
+            return Edge(self).sync(prune=True)
         confirm('Clean migration: retire the listed old services/models/runtimes after validation?', self.a.yes)
         if self.role == 'gateway':
             self.sync(install=True)
-            # Offline workers are allowed; a reachable worker must pass through the gateway.
-            old = self.a.model
-            try:
-                for alias, route in self.c['routes'].items():
-                    try:
-                        api(route['url'].rstrip('/') + '/models', None if route.get('external') else self.key('worker'), timeout=4)
-                    except (OSError, ValueError) as e:
-                        if route['node'] == 'macmini':
-                            fail(f'Local gateway dependency unavailable: {alias}: {e}')
-                        say(f'SKIP gateway route {alias}: worker unavailable ({e})')
-                        continue
-                    self.a.model = alias
-                    self.validate()
-            finally:
-                self.a.model = old
             label = self.c.get('legacy_launch_agent')
             if label:
                 if label != 'local.litellm':
@@ -976,19 +1089,17 @@ class Cluster:
                 run('launchctl', 'disable', domain + '/' + label)
                 say('Old gateway disabled; its files retained for rollback. Test remote routes when workers are online.')
             return
-        legacy = self.c.get('legacy_service')
-        expected = {'gmini': 'ollama.service', 'p520': 'llama-swap.service', 'z820': 'ollama.service'}[self.a.node]
-        if legacy != expected:
-            fail('Unexpected legacy service; inspect node YAML.')
+        legacy = self.legacy_unit()
         cleanup = self.c.get('legacy_cleanup', {})
         names = {str(name).lower() for name in self.c.get('migration_hostnames', [self.a.node])}
-        if socket.gethostname().split('.')[0].lower() not in names:
+        if names and socket.gethostname().split('.')[0].lower() not in names:
             fail('Migration hostname not allowed. Review legacy_cleanup and migration_hostnames in the node YAML, or use --install on a fresh host.')
         # Verify all destructive paths before making any changes.
         for value in cleanup.get('model_files', []) + cleanup.get('reclaim_first', []):
             self.legacy_path(value)
         for value in cleanup.get('runtime_dirs', []):
             self.legacy_path(value, runtime=True)
+        self.key('worker')
         self.install_worker()  # require working binary and visible GPU BEFORE deleting anything
         if self.a.reclaim_first:
             reclaim = cleanup.get('reclaim_first', [])
@@ -998,8 +1109,20 @@ class Cluster:
                 confirm('Delete listed oversized models before new inference is validated? No automatic recovery.', self.a.yes)
                 self.retire_files(reclaim)
         was_active = self.legacy_active()
-        # Stage verified model weights while the previous service is still available.
-        self.sync(install=True)
+        managed_was_active = self.service_active()
+        prior = {p: p.read_bytes() for p in (self.native, self.active, self.service_path()) if p.is_file()}
+        # Stage verified weights before cutover; reclaim only explicitly approved paths on disk pressure.
+        try:
+            self.sync(install=True, stage_only=True)
+        except DiskSpaceError:
+            reclaim = [v for v in cleanup.get('reclaim_first', []) if Path(v).expanduser().is_file()]
+            if not reclaim:
+                raise
+            for v in reclaim:
+                say('EARLY REMOVE ' + v)
+            confirm('Insufficient disk space. Delete listed obsolete weights now and retry? No automatic recovery.', self.a.yes)
+            self.retire_files(reclaim)
+            self.sync(install=True, stage_only=True)
         try:
             if was_active:
                 run('sudo', 'systemctl', 'stop', legacy)
@@ -1009,10 +1132,23 @@ class Cluster:
             self.smoke_all()
             # Validate real long prompts at the deployed settings before irreversible cleanup.
             self.calibrate(migration=True)
-        except Exception:
+        except BaseException:
             say('New inference failed; legacy assets retained (except explicit early reclaim).')
             if self.service_active():
                 self.stop()
+            if managed_was_active and self.native in prior and self.active in prior:
+                for p in (self.native, self.active):
+                    atomic(p, prior[p])
+                svc = self.service_path()
+                if svc in prior:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        saved = Path(tmp) / svc.name
+                        saved.write_bytes(prior[svc])
+                        run('sudo', 'install', '-m', '0644', saved, svc)
+                    run('sudo', 'systemctl', 'daemon-reload')
+                run('sudo', 'systemctl', 'start', SERVICE)
+            else:
+                run('sudo', 'systemctl', 'disable', SERVICE, check=False)
             if was_active:
                 run('sudo', 'systemctl', 'start', legacy)
             raise
@@ -1026,6 +1162,7 @@ class Cluster:
         self.cleanup()
         self.wait_ready()
         run('df', '-h', Path.home())
+        atomic(self.cfg / 'migration-complete.json', json.dumps({'legacy_service': legacy, 'completed': time.strftime('%Y-%m-%dT%H:%M:%S')}, indent=2))
         say('Clean migration complete. Legacy service definitions and system GPU libraries retained.')
 
     def reset(self, purge=False, uninstall=False):
@@ -1053,7 +1190,7 @@ class Cluster:
                 if owned(p):
                     remove_owned(p)
         if not (uninstall or purge):
-            self.sync(install=True)
+            self.reconcile(install=True)
         else:
             say('Managed runtime removed. Cache, keys, benchmarks and all external stores preserved.')
 
@@ -1080,16 +1217,9 @@ class Cluster:
                 except (OSError, ValueError, RuntimeError) as e:
                     status = f'API unavailable or incompatible ({e})'
                 say(f'{node}: {status}; routing={profile.get("enabled", False)}')
-        self.validate()
+        self.discover()
 
-    def validate(self):
-        if self.role == 'edge':
-            try:
-                data = api(self.endpoint + '/v1/models')
-                say('Advertised models: ' + str([m['id'] for m in data.get('data', [])]))
-            except (OSError, ValueError) as e:
-                fail(f'Edge model-list API unavailable ({e}); verify vendor service locally.')
-            return
+    def discover(self):
         key = self.key('gateway' if self.role == 'gateway' else 'worker')
         data = api(self.endpoint + '/v1/models', key)
         ids = {m['id'] for m in data.get('data', [])}
@@ -1097,39 +1227,45 @@ class Cluster:
         say('Advertised models: ' + ', '.join(sorted(ids)))
         if not expected.issubset(ids):
             fail('Missing advertised models: ' + str(expected - ids))
-        if self.a.model:
-            alias = self.a.model
-            if alias not in ids:
-                fail('Unknown model alias.')
-            if self.role == 'gateway' and self.c['routes'][alias].get('embedding'):
-                result = api(self.endpoint + '/v1/embeddings', key, {'model': alias, 'input': 'local cluster smoke test'}, 600)
-                if not result.get('data') or not result['data'][0].get('embedding'):
-                    fail('Empty embedding response.')
-                say('Embedding dimensions: ' + str(len(result['data'][0]['embedding'])))
-            else:
-                result = api(self.endpoint + '/v1/chat/completions', key, {'model': alias, 'messages': [{'role': 'user', 'content': 'Reply with one word: ready.'}], 'max_tokens': 512, 'stream': False}, 600)
-                if not result.get('choices') or not result['choices'][0].get('message', {}).get('content'):
-                    fail('Empty completion response.')
-                say('Completion smoke test: ' + json.dumps(result['choices'][0], ensure_ascii=False))
-                say('Usage: ' + str(result.get('usage')))
+        return ids
+
+    def validate_one(self, alias):
+        key = self.key('gateway' if self.role == 'gateway' else 'worker')
+        if self.role == 'gateway' and self.c['routes'][alias].get('embedding'):
+            result = api(self.endpoint + '/v1/embeddings', key, {'model': alias, 'input': 'local cluster smoke test'}, 600)
+            vector = (result.get('data') or [{}])[0].get('embedding')
+            if not isinstance(vector, list) or not vector or not all(isinstance(x, (float, int)) and math.isfinite(x) for x in vector) or not any(vector):
+                fail(f'{alias}: invalid embedding response.')
+            say(f'PASS {alias}: embedding dimensions={len(vector)}')
         else:
-            say('API discovery passed. Use --validate --model ALIAS to actually run inference.')
+            result = api(self.endpoint + '/v1/chat/completions', key, {'model': alias, 'messages': [{'role': 'user', 'content': 'Reply with one word: READY.'}], 'max_tokens': 512, 'stream': False}, 600)
+            text = (result.get('choices') or [{}])[0].get('message', {}).get('content')
+            if not isinstance(text, str) or not text.strip() or 'ready' not in text.lower():
+                fail(f'{alias}: missing expected completion.')
+            say(f'PASS {alias}: completion; usage={result.get("usage")}')
+
+    def validate(self):
+        if self.role == 'gateway':
+            if self.a.model and self.a.model not in self.c['routes']:
+                fail('Unknown model alias.')
+            return self.validate_gateway()
+        ids = self.discover()
+        aliases = [self.a.model] if self.a.model else list(self.desired)
+        for alias in aliases:
+            if alias not in ids or alias not in self.desired:
+                fail('Unknown model alias: ' + alias)
+            self.validate_one(alias)
 
     def benchmark(self):
         if self.role != 'worker' or self.a.model not in self.desired:
             fail('Use --benchmark --model ALIAS on a primary worker.')
         self.host_check()
-        if self.legacy_active():
-            fail('Stop legacy GPU service before benchmarking.')
-        folder = self.models / model_id(self.desired[self.a.model])
-        records = json.loads((folder / 'weights.json').read_text())
+        confirm('Stage benchmark runtime/model if missing and temporarily pause inference?', self.a.yes)
+        self.prepare(); self.service_owned(); self.install_worker()
+        folder, records = self.sync_model(self.a.model, self.desired[self.a.model])
         weight = folder / next(x['name'] for x in records if 'mmproj' not in x['name'].lower())
         bench = self.locate(self.runtime, 'llama-bench')
-        confirm('Stop managed inference temporarily and run benchmark?', self.a.yes)
-        was_running = self.service_active()
-        if was_running:
-            self.stop()
-        try:
+        with self.isolated_gpu():
             out = self.root / 'benchmarks' / f'{self.a.node}-{self.backend}-{self.a.model.replace(chr(47), chr(45))}-{time.strftime("%Y%m%d-%H%M%S")}.txt'
             out.parent.mkdir(exist_ok=True)
             command = [str(bench), '-m', str(weight), '-ngl', '999', '-p', '512,8192', '-n', '128', '-r', '3']
@@ -1137,16 +1273,20 @@ class Cluster:
                 f.write(json.dumps({'command': command, 'version': self.v['llama_cpp'], 'weights': records, 'kernel': platform.release()}, indent=2) + '\n')
                 f.flush()
                 p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=self.runtime_env())
-                for line in p.stdout:
-                    print(line, end='', flush=True)
-                    f.write(line)
-                if p.wait():
-                    fail('Benchmark failed; see ' + str(out))
+                try:
+                    for line in p.stdout:
+                        print(line, end='', flush=True)
+                        f.write(line)
+                    if p.wait():
+                        fail('Benchmark failed; see ' + str(out))
+                finally:
+                    if p.poll() is None:
+                        p.terminate()
+                        try:
+                            p.wait(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            p.kill(); p.wait()
             say('Benchmark: ' + str(out))
-        finally:
-            if was_running:
-                self.start()
-
 
     def calibrate(self, migration=False):
         from calibrate import calibrate_cluster
@@ -1157,7 +1297,7 @@ def main():
     parser = argparse.ArgumentParser(description='Local AI cluster: one profile, native services, pinned artifacts.')
     parser.add_argument('node', choices=['macmini', 'gmini', 'p520', 'z820', 'nano', 'ventunoq'])
     group = parser.add_mutually_exclusive_group()
-    for flag, helptext in [('install', 'Install/reconcile runtime, model files and service (default)'), ('migrate', 'Clean migration: validate then retire inventoried legacy assets'), ('models', 'Sync model list; worker re-renders and reloads managed service'), ('cleanup', 'Remove obsolete managed model directories'), ('reset', 'Rebuild managed runtime; preserve models/cache'), ('uninstall', 'Remove managed runtime/service; preserve weights'), ('purge', 'Remove managed runtime and owned weights; preserve keys/cache'), ('start', 'Start managed service'), ('stop', 'Stop managed service'), ('health', 'Read-only system/API health'), ('validate', 'Check API; --model enables a real inference smoke test'), ('benchmark', 'Run llama-bench; --model required'), ('calibrate', 'Measure real long-context prompts; optionally select --model'), ('init-keys', 'Create local gateway and worker keys on Mac')]:
+    for flag, helptext in [('install', 'Reconcile runtime and models; automatically migrate known legacy assets (default)'), ('migrate', 'Clean migration: validate then retire inventoried legacy assets'), ('models', 'Sync desired models and prune obsolete managed weights after validation'), ('cleanup', 'Remove obsolete managed model directories'), ('reset', 'Rebuild managed runtime; preserve models/cache'), ('uninstall', 'Remove managed runtime/service; preserve weights'), ('purge', 'Remove managed runtime and owned weights; preserve keys/cache'), ('start', 'Start managed service'), ('stop', 'Stop managed service'), ('health', 'Read-only system/API health'), ('validate', 'Execute inference on configured models; optionally select --model'), ('benchmark', 'Benchmark inference; --model required on primary workers'), ('calibrate', 'Measure real long-context prompts; optionally select --model'), ('init-keys', 'Create local gateway and worker keys on Mac')]:
         group.add_argument('--' + flag, dest='action', action='store_const', const=flag, help=helptext)
     parser.add_argument('--dry-run', action='store_true', help='Print desired state only; no managed changes')
     parser.add_argument('--yes', action='store_true', help='Approve listed managed operations noninteractively')
@@ -1171,13 +1311,17 @@ def main():
     a.action = a.action or 'install'
     if (a.apply or a.cache_type) and a.action != 'calibrate':
         parser.error('--apply and --cache-type require --calibrate')
-    if a.reclaim_first and a.action not in ('cleanup', 'migrate'):
-        parser.error('--reclaim-first requires --cleanup or --migrate')
+    if a.reclaim_first and a.action not in ('cleanup', 'migrate', 'install', 'models'):
+        parser.error('--reclaim-first requires --cleanup, --migrate, --install or --models')
     try:
         c = Cluster(a)
         if a.dry_run:
             c.plan()
             say('Requested action: ' + a.action)
+            return
+        if c.role == 'edge' and a.action in ('health', 'validate'):
+            from edge import Edge
+            Edge(c).dispatch()
             return
         if a.action in ('health', 'validate'):
             (c.health if a.action == 'health' else c.validate)()
@@ -1190,20 +1334,24 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 fail('Another deployment action is already running on this node.')
-            if a.action == 'init-keys':
+            if c.role == 'edge':
+                from edge import Edge
+                Edge(c).dispatch()
+            elif a.action == 'init-keys':
                 c.init_keys()
             elif a.action == 'migrate':
                 c.migrate()
             elif a.action in ('install', 'models'):
-                c.plan()
-                confirm('Apply this configuration (may download large files and restart managed service)?', a.yes)
-                c.sync(install=a.action == 'install')
+                c.reconcile(install=a.action == 'install')
             elif a.action in ('reset', 'purge', 'uninstall'):
                 c.reset(purge=a.action == 'purge', uninstall=a.action == 'uninstall')
             elif a.action == 'cleanup':
                 c.cleanup()
             elif a.action == 'start':
-                c.start()
+                if c.migration_pending():
+                    c.migrate()
+                else:
+                    c.start()
             elif a.action == 'stop':
                 c.host_check(); c.service_owned(); c.stop()
             elif a.action == 'health':
@@ -1214,6 +1362,9 @@ def main():
                 c.benchmark()
             elif a.action == 'calibrate':
                 c.calibrate()
+    except KeyboardInterrupt:
+        print('Interrupted; see service restoration messages above.', file=sys.stderr)
+        sys.exit(130)
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as e:
         print('ERROR:', e, file=sys.stderr)
         sys.exit(1)

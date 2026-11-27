@@ -5,7 +5,7 @@ backend: vulkan                       # rocm = native build against installed RO
 bind: localhost                       # set to a trusted LAN/tailnet interface before remote use
 port: 8081                            # staging; 8080 SearXNG, 11434 legacy Ollama
 legacy_service: ollama.service
-migration_hostnames: [gmini, gmkmini]   # exact short hostnames allowed for destructive migration
+migration_hostnames: []  # optional exact hostname allowlist; empty permits any matching hardware
 reserve_gib: 15
 ollama_store: /usr/share/ollama/.ollama/models
 # The exact manifest digests below came from the reference inventory. Reuses the raw GGUF

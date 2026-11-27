@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# setup-nano.sh — reconcile the nano profile in config/nano.yaml.
-# Edit that YAML for models, endpoints and backend; versions in config/versions.yaml.
-# Run with --help for actions; --dry-run previews; --models syncs; --cleanup prunes
-# obsolete owned artifacts; --reset rebuilds runtime without deleting weights.
-# Run as normal login user, not root. Sudo is only used for managed Linux services.
-# --migrate retires inventory-listed legacy assets only after smoke tests.
-# OS drivers, partitions, unrelated files and edge vendor services are preserved.
+# setup-nano.sh — reconcile Ollama on JetPack using config/nano.yaml.
+# Default/--models installs missing runtime/models and validates real inference.
+# --models --prune / --cleanup removes obsolete adopted or listed tags.
+# --validate, --benchmark and --health test the existing runtime.
+# Run as normal login user; --help lists options. Vendor drivers stay intact.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 exec bash "$HERE/common/setup.sh" nano "$@"

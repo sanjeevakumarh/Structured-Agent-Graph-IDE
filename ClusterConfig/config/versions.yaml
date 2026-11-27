@@ -16,3 +16,6 @@ assets:
   sycl:
     - file: llama-b12777-bin-ubuntu-sycl-fp16-x64.tar.gz
       sha256: 7b81a58e1e6bd148a10ba57971b909a6aa360f320edc0427e9fd644235673cdc
+# Only used when edge CLI is missing; existing compatible vendor installs are reused.
+ollama: '0.40.16'
+geniex: v0.9.3

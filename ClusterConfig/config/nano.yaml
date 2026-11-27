@@ -1,6 +1,18 @@
-# Orin Nano Super, L4T 36.4.7 / CUDA 12.6 / TensorRT 10.3.
-# Keep JetPack and vendor drivers. This profile manages only an optional Ollama model list.
+# Jetson Orin Nano: reuse JetPack/CUDA and the native Ollama service.
 node: nano
 role: edge
+runtime: ollama
 endpoint: http://localhost:11434
-ollama_models: ['qwen3.5:4b']
+bind: localhost # change only for a trusted network
+context: 4096
+request_timeout: 300
+edge_models:
+  nano/qwen3.5-4b: {id: 'qwen3.5:4b', context: 4096, think: false}
+  nano/gemma4-e2b-q4_k_m: {id: 'gemma4:e2b-it-q4_K_M', context: 4096}
+# Explicit legacy tags eligible for cleanup; previously adopted tags also qualify.
+retire_models: []
+calibration:
+  contexts: [2048, 4096, 8192, 16384, 32768]
+  min_host_free_mib: 512
+  min_generation_tps: 3
+  max_request_seconds: 300

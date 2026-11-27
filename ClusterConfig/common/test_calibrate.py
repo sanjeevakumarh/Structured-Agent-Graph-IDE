@@ -68,6 +68,24 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(rec['context'],65536)
         self.assertEqual(rec['cache_type_k'],'f16')
 
+    def test_precision_meets_target_before_extra_context(self):
+        def r(ctx,k):
+            return dict(context=ctx,cache_type_k=k,cache_type_v=k,flash_attention='auto',passed=True)
+        self.assertEqual(cal.choose([r(262144,'q8_0'),r(131072,'f16')],131072)['cache_type_k'],'f16')
+        self.assertEqual(cal.choose([r(65536,'f16'),r(131072,'q8_0')],262144)['context'],131072)
+
+    def test_intel_device_memory_csv(self):
+        self.assertEqual(cal.intel_memory_used('Timestamp, DeviceId, GPU Memory Used (MiB)\n2026,0,1024\n'),1024)
+        self.assertIsNone(cal.intel_memory_used('Timestamp, DeviceId, GPU Utilization (%)\n2026,0,90\n'))
+        self.assertIsNone(cal.intel_memory_used('Timestamp, DeviceId, TileId, GPU Memory Used (MiB)\n2026,0,0,1024\n'))
+
+    def test_flash_attention_yaml_boolean_and_slots(self):
+        self.assertEqual(m.flash_mode(True),'on')
+        self.assertEqual(m.flash_mode(False),'off')
+        self.assertEqual(m.slot_count({'parallel':2}),2)
+        with self.assertRaises(RuntimeError):
+            m.flash_mode('True')
+
     def test_apply_preserves_comments_and_quotes_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)/'profile.yaml'
@@ -97,6 +115,32 @@ class CalibrationTests(unittest.TestCase):
             with patch.object(cal,'meminfo',return_value={'host_free_mib':32768}),patch.object(cal,'gpu_free',return_value=None),patch.object(cal.subprocess,'Popen') as popen:
                 res = cal.candidate(c,'p520/model',{'context':8192},8192,'f16','f16','auto',self.cfg,p,[{'name':'model.gguf'}],p)
             self.assertFalse(res['passed']); popen.assert_not_called()
+
+    def test_amd_probe_skips_incomplete_and_nonmatching_devices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'card0/device').mkdir(parents=True)  # unreadable/incomplete entry
+            (root/'card1-DP-1/device').mkdir(parents=True)  # connector, not a GPU
+            (root/'card1/device').mkdir(parents=True)
+            d = root/'card1/device'
+            for k,v in {'vendor':'0x1002', 'device':'0x1586', 'mem_info_gtt_total':str(120259084288), 'mem_info_gtt_used':str(18661376)}.items():
+                (d/k).write_text(v)
+            hw = {'vendor':'0x1002', 'pci_device':'0x1586'}
+            self.assertAlmostEqual(cal.drm_memory_free(hw, 'gtt', root), (120259084288-18661376)/cal.MIB)
+            self.assertIsNone(cal.drm_memory_free(dict(hw, pci_device='0x0000'), 'gtt', root))
+            (d/'mem_info_gtt_used').write_text(str(120259084289))
+            self.assertIsNone(cal.drm_memory_free(hw, 'gtt', root))
+
+    def test_baseline_error_reports_host_and_gpu_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            c = SimpleNamespace(a=SimpleNamespace(node='gmini'),runtime=p,locate=lambda *a:p/'server',runtime_env=lambda:{})
+            for free, host, expected in ((None, 32768, 'GPU telemetry unavailable'), (500, 32768, 'Insufficient GPU/GTT headroom'), (32768, 500, 'Insufficient host memory headroom')):
+                with patch.object(cal,'meminfo',return_value={'host_free_mib':host}),patch.object(cal,'gpu_free',return_value=free),patch.object(cal.subprocess,'Popen') as popen:
+                    res = cal.candidate(c,'gmini/model',{'context':8192},8192,'f16','f16','auto',self.cfg,p,[{'name':'model.gguf'}],p)
+                self.assertIn(expected,res['error'])
+                self.assertEqual(res['baseline']['gpu_free_mib'],free)
+                popen.assert_not_called()
 
     def test_migration_calibration_failure_retains_legacy(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(m.Path,'home',return_value=Path(tmp)):

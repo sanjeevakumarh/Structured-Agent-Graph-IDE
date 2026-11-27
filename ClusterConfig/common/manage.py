@@ -7,6 +7,7 @@ or downloads model/runtime artifacts. The launcher may initialize uv's cache.
 """
 import argparse
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
@@ -32,6 +33,7 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
+RELEASE = '0.7'
 MARK = '.local-ai-cluster'
 SERVICE = 'local-ai-inference.service'
 LABEL = 'local.cluster.gateway'
@@ -53,13 +55,14 @@ def gateway_routes(config, profiles):
         url = n['url'].rstrip('/')
         if not url.endswith('/v1'):
             fail('Route URL must end in /v1: ' + node)
-        if node in ('gmini', 'p520', 'z820'):
-            profile = yaml.safe_load((profiles / (node + '.yaml')).read_text())
+        if not SAFE.fullmatch(node):
+            fail('Invalid node name: ' + node)
+        profile = config if node == config['node'] else yaml.safe_load((profiles / (node + '.yaml')).read_text())
+        if profile['role'] == 'worker':
             models = {a: {'model': a} for a, m in profile['models'].items() if m.get('enabled', True)}
-        elif node == 'macmini':
+        elif profile['role'] == 'gateway':
             models = config.get('local_models', {})
-        elif node in ('nano', 'ventunoq'):
-            profile = yaml.safe_load((profiles / (node + '.yaml')).read_text())
+        elif profile['role'] == 'edge':
             models = {a: {'model': m['id']} for a, m in profile['edge_models'].items() if m.get('enabled', True)}
             if not models:
                 fail('Enabled edge node requires explicit model IDs: ' + node)
@@ -68,7 +71,7 @@ def gateway_routes(config, profiles):
         for alias, model in models.items():
             if not valid_alias(alias, node):
                 fail('Invalid server-qualified route: ' + alias)
-            routes[alias] = dict(model, url=url, node=node, external=node in ('macmini', 'nano', 'ventunoq'))
+            routes[alias] = dict(model, url=url, node=node, external=profile['role'] != 'worker')
     for alias, target in config.get('aliases', {}).items():
         if not SAFE.fullmatch(alias) or target not in routes or alias in routes:
             fail('Invalid optional alias: ' + alias)
@@ -76,6 +79,44 @@ def gateway_routes(config, profiles):
     if not routes:
         fail('No gateway routes enabled.')
     return routes
+
+
+def flash_mode(value):
+    # PyYAML 1.1 parses bare on/off as booleans.
+    if isinstance(value, bool):
+        return 'on' if value else 'off'
+    if value not in ('on', 'off', 'auto'):
+        fail('flash_attention must be on, off or auto')
+    return value
+
+
+def slot_count(spec):
+    value = spec.get('parallel', 1)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 8:
+        fail('parallel must be an integer 1–8')
+    return value
+
+
+def model_groups(desired, groups):
+    """Native llama-swap groups: co-resident members, exclusive across groups."""
+    result, seen = {}, set()
+    for i, members in enumerate(groups):
+        if not isinstance(members, list) or len(members) < 2 or len(set(members)) != len(members):
+            fail('resident_groups requires lists of distinct enabled aliases')
+        if not set(members) <= set(desired) or seen.intersection(members):
+            fail('Unknown or duplicate resident group model')
+        seen.update(members)
+        result[f'resident-{i}'] = {'swap': False, 'exclusive': True, 'members': members}
+    for i, alias in enumerate(sorted(set(desired) - seen)):
+        result[f'single-{i}'] = {'swap': True, 'exclusive': True, 'members': [alias]}
+    return result
+
+
+def offload_counts(logs):
+    """Parse actual llama.cpp layer assignment, stripping terminal escape codes."""
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', logs)
+    hits = re.findall(r'offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+GPU', text, re.I)
+    return tuple(map(int, hits[-1])) if hits else None
 
 
 def model_command(server, folder, records, alias, spec, port, host='127.0.0.1'):
@@ -88,14 +129,19 @@ def model_command(server, folder, records, alias, spec, port, host='127.0.0.1'):
         if not match or main != [f'{match[1]}-{i:05d}-of-{match[2]}.gguf' for i in range(1, int(match[2]) + 1)]:
             fail('Incomplete or unordered split GGUF: ' + alias)
     args = [str(server), '--model', str(folder / main[0]), '--host', host, '--port', str(port),
-            '--alias', alias, '--n-gpu-layers', '999', '--ctx-size', str(int(spec['context'])),
-            '--parallel', '1', '--jinja', '--flash-attn', str(spec.get('flash_attention', 'auto')),
+            '--alias', alias, '--n-gpu-layers', '999', '--ctx-size', str(int(spec['context']) * slot_count(spec)),
+            '--parallel', str(slot_count(spec)), '--kv-unified', '--kv-unified-per-slot', str(int(spec['context'])),
+            '--jinja', '--flash-attn', flash_mode(spec.get('flash_attention', 'auto')),
             '--no-context-shift', '--fit', 'off',
             '--cache-type-k', spec.get('cache_type_k', 'f16'), '--cache-type-v', spec.get('cache_type_v', 'f16')]
     proj = [r['name'] for r in records if 'mmproj' in r['name'].lower()]
     if proj:
         args += ['--mmproj', str(folder / proj[0])]
-    return args + [str(x) for x in spec.get('args', [])]
+    # Keep validation evidence visible even with inherited logging defaults.
+    extra = [str(x) for x in spec.get('args', [])]
+    if '--log-disable' in extra:
+        fail('Model logging cannot be disabled: GPU validation needs evidence.')
+    return args + extra + ['--log-verbosity', '3', '--log-colors', 'off', '--no-log-jsonl']
 
 
 def run(*args, check=True, capture=False, env=None):
@@ -141,7 +187,7 @@ def atomic(path, data, mode=0o600):
 
 
 def get_bytes(url, headers=None):
-    req = urllib.request.Request(url, headers={'User-Agent': 'local-ai-cluster/0.5', **(headers or {})})
+    req = urllib.request.Request(url, headers={'User-Agent': 'local-ai-cluster/0.6', **(headers or {})})
     with urllib.request.urlopen(req, timeout=30) as response:
         return response.read()
 
@@ -150,14 +196,30 @@ def get_json(url, headers=None):
     return json.loads(get_bytes(url, headers))
 
 
+def http_error_detail(error, key=None):
+    """Preserve HTTP status and a bounded server error, never the bearer key."""
+    try:
+        body = error.read(4096).decode('utf-8', errors='replace')
+    except (OSError, ValueError):
+        body = ''
+    if key:
+        body = body.replace(key, '[REDACTED]')
+    return f'{error.reason}: {body}' if body else str(error.reason)
+
+
 def api(url, key=None, payload=None, timeout=10):
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
     req = urllib.request.Request(url, headers=headers,
                                  data=json.dumps(payload).encode() if payload is not None else None)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = http_error_detail(e, key)
+        # Keep status available to gateway offline/authentication handling.
+        raise urllib.error.HTTPError(e.url, e.code, detail, e.headers, None) from None
 
 
 class DiskSpaceError(RuntimeError):
@@ -211,28 +273,7 @@ def model_sources(spec, store):
     """Return exact file names, sizes, hashes, URLs and local reuse candidates."""
     src = spec['source']
     if 'ollama' in src:
-        # Only standard library tags are supported. OCI digest is pinned to inventory.
-        name, tag = src['ollama'].split(':', 1)
-        if not SAFE.fullmatch(name) or not SAFE.fullmatch(tag) or not SHA.fullmatch(src['digest']):
-            fail('Ollama source requires library-name:tag and a pinned manifest digest.')
-        base = f'https://registry.ollama.ai/v2/library/{name}'
-        local = store / 'manifests/registry.ollama.ai/library' / name / tag
-        raw = local.read_bytes() if local.is_file() else None
-        if raw is None or hashlib.sha256(raw).hexdigest() != src['digest']:
-            headers = {'Accept': 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'}
-            try:
-                raw = get_bytes(base + '/manifests/sha256:' + src['digest'], headers)
-            except urllib.error.HTTPError:
-                raw = get_bytes(base + '/manifests/' + tag, headers)
-        if hashlib.sha256(raw).hexdigest() != src['digest']:
-            fail('Ollama tag changed; review the digest in YAML (no silent upgrade).')
-        layers = [x for x in json.loads(raw)['layers'] if x['mediaType'] == 'application/vnd.ollama.image.model']
-        if len(layers) != 1:
-            fail('Ollama import requires one GGUF model layer; use pinned HF files for split/other formats.')
-        layer = layers[0]
-        dg = layer['digest'].removeprefix('sha256:')
-        return [(name + '-' + tag + '.gguf', int(layer['size']), dg,
-                 base + '/blobs/sha256:' + dg, [store / 'blobs' / ('sha256-' + dg)])]
+        fail('Worker models require pinned upstream Hugging Face GGUFs; raw Ollama layers are unsupported.')
     repo, rev = src['repo'], src['revision']
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not re.fullmatch(r'[0-9a-f]{40}', rev):
         fail('Hugging Face source requires owner/repo and full commit hash.')
@@ -249,7 +290,7 @@ def model_sources(spec, store):
         dg, size = meta.get('sha256'), meta.get('size')
         if not dg or not size or not SHA.fullmatch(dg):
             fail('No pinned LFS hash/size for ' + filename)
-        candidates = [store / 'blobs' / ('sha256-' + dg)]
+        candidates = [store / 'blobs' / ('sha256-' + dg)] if store else []
         if src.get('reuse'):
             candidates.insert(0, Path(src['reuse']).expanduser() / filename)
         result.append((filename, int(size), dg,
@@ -283,7 +324,7 @@ class Cluster:
         self.active = self.cfg / 'active.json'
         self.native = self.cfg / ('litellm.yaml' if self.role == 'gateway' else 'llama-swap.yaml')
         self.desired = {k: v for k, v in self.c.get('models', {}).items() if v.get('enabled', True)}
-        self.store = Path(self.c.get('ollama_store', '/usr/share/ollama/.ollama/models')).expanduser()
+        self.store = Path(self.c['ollama_store']).expanduser() if self.c.get('ollama_store') else None
         if self.c['node'] != args.node:
             fail('Profile node mismatch.')
         if any(not valid_alias(k, args.node) for k in self.c.get('models', {})):
@@ -292,12 +333,22 @@ class Cluster:
             self.c['routes'] = gateway_routes(self.c, REPO / 'config')
         if self.role == 'worker' and self.backend not in ('vulkan', 'cuda', 'cuda-native', 'rocm', 'sycl'):
             fail('Unsupported backend: ' + self.backend)
-        allowed = {'gmini': ('vulkan', 'rocm'), 'p520': ('vulkan', 'sycl'), 'z820': ('cuda', 'cuda-native')}
-        if self.role == 'worker' and self.backend not in allowed[args.node]:
+        if self.role == 'worker' and self.backend not in self.c['hardware']['backends']:
             fail('Backend not supported by this node profile.')
+        if self.role == 'worker':
+            model_groups(self.desired, self.c.get('resident_groups', []))
+            for spec in self.desired.values():
+                slot_count(spec); flash_mode(spec.get('flash_attention', 'auto'))
         if self.role == 'worker' and not self.desired:
             fail('Enable at least one worker model.')
         if self.role != 'edge':
+            if self.c['bind'] == 'tailnet':
+                cli = shutil.which('tailscale') or '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+                ip = run(cli, 'ip', '-4', capture=True).stdout.strip()
+                import ipaddress
+                if not ipaddress.ip_address(ip).is_private and ipaddress.ip_address(ip) not in ipaddress.ip_network('100.64.0.0/10'):
+                    fail('Unexpected tailnet IPv4 address')
+                self.c['bind'] = ip
             self.endpoint = f'http://{self.c["bind"]}:{self.c["port"]}'
         else:
             self.endpoint = self.c['endpoint']
@@ -313,7 +364,7 @@ class Cluster:
             fail('This worker profile requires x86_64.')
         # Guard against running a hardware profile on the wrong workstation.
         if self.role == 'worker':
-            vendor = {'gmini': '0x1002', 'p520': '0x8086', 'z820': '0x10de'}[self.a.node]
+            vendor = self.c['hardware']['vendor']
             cards = list(Path('/sys/class/drm').glob('card*/device/vendor'))
             if not any(x.read_text().strip() == vendor for x in cards):
                 fail(f'Expected GPU vendor {vendor} not visible; install/verify vendor driver first.')
@@ -385,7 +436,7 @@ class Cluster:
         say('No partition, boot, driver or unrelated application changes.')
 
     def obsolete(self):
-        keep = {model_id(m) for m in self.desired.values()}
+        keep = {model_id(m) for m in self.c.get('models', {}).values()}
         return sorted(p for p in self.models.glob('*') if owned(p) and p.name not in keep)
 
     def locate(self, folder, binary):
@@ -411,7 +462,8 @@ class Cluster:
             stage.mkdir()
             for a in archives:
                 with tarfile.open(a, 'r:*') as tf:
-                    # Python >=3.12 data filter blocks path traversal and unsafe links.
+                    if not hasattr(tarfile, 'data_filter'):
+                        fail('Python lacks safe tar extraction; update Python or use uv Python 3.12.')
                     tf.extractall(stage, filter='data')
             self.locate(stage, binary)
             atomic(stage / MARK, 'local-ai-cluster\n')
@@ -430,12 +482,12 @@ class Cluster:
             nvcc = shutil.which('nvcc') or '/usr/local/cuda/bin/nvcc'
             if not Path(nvcc).is_file():
                 fail('CUDA toolkit nvcc missing. Install a compatible vendor CUDA toolkit (not driver bundle).')
-            flags = ['-DGGML_CUDA=ON', '-DCMAKE_CUDA_ARCHITECTURES=86', '-DCMAKE_CUDA_COMPILER=' + nvcc]
+            flags = ['-DGGML_CUDA=ON', '-DCMAKE_CUDA_ARCHITECTURES=' + str(self.c['hardware']['cuda_arch']), '-DCMAKE_CUDA_COMPILER=' + nvcc]
         else:
             hip = Path('/opt/rocm/bin/hipcc')
             if not hip.is_file():
                 fail('ROCm toolkit missing; install vendor-supported ROCm for gfx1151 first.')
-            flags = ['-DGGML_HIP=ON', '-DGPU_TARGETS=gfx1151', '-DCMAKE_PREFIX_PATH=/opt/rocm',
+            flags = ['-DGGML_HIP=ON', '-DGPU_TARGETS=' + self.c['hardware']['rocm_target'], '-DCMAKE_PREFIX_PATH=/opt/rocm',
                      '-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++']
         with tempfile.TemporaryDirectory(prefix='.build-', dir=self.cache) as tmp:
             source = Path(tmp) / 'src'
@@ -480,7 +532,7 @@ class Cluster:
             r = run(server, '--list-devices', capture=True, env=self.runtime_env())
             say(r.stdout + r.stderr)
             # CPU-only detection is not acceptable for a GPU profile.
-            expect = {'gmini': r'AMD|Radeon|gfx1151', 'p520': r'Intel|BMG|Arc', 'z820': r'A4500|NVIDIA'}[self.a.node]
+            expect = self.c['hardware']['device_regex']
             if not re.search(expect, r.stdout + r.stderr, re.I):
                 fail('Expected GPU missing from llama.cpp device list.')
         except (subprocess.CalledProcessError, OSError) as e:
@@ -515,6 +567,8 @@ class Cluster:
                                (folder / r['name']).stat().st_mtime_ns == r['mtime'] for r in records):
                 say('KEEP ' + alias)
                 return folder, records
+        if self.store and self.store.exists() and not os.access(self.store / 'blobs', os.R_OK | os.X_OK):
+            say('WARNING: legacy blob store unreadable; exact-hash reuse unavailable; new downloads may be large.')
         sources = model_sources(spec, self.store)
         if not folder.exists():
             folder.mkdir()
@@ -527,19 +581,19 @@ class Cluster:
                 if dest.exists():
                     fail('Managed file differs from manifest; inspect/remove it explicitly: ' + str(dest))
                 for source in candidates:
-                    if source.is_file() and source.stat().st_size == size and sha(source) == digest:
+                    try:
+                        matches = source.is_file() and source.stat().st_size == size and sha(source) == digest
+                    except PermissionError:
+                        say('WARNING: cannot read reuse candidate ' + str(source))
+                        matches = False
+                    if matches:
                         check_gguf(source)
                         try:
                             os.link(source, dest)
                         except OSError:
-                            # Never symlink to an Ollama blob: removing the old tag could break inference.
-                            if source.is_relative_to(self.store) and source.stat().st_dev == folder.stat().st_dev:
-                                say('Hardlinking verified Ollama blob using sudo (no duplicate disk allocation).')
-                                run('sudo', 'ln', '--', source, dest)
-                            else:
-                                if shutil.disk_usage(folder).free < size + self.c.get('reserve_gib', 15) * 2**30:
-                                    raise DiskSpaceError('Not enough free disk to copy verified existing file.')
-                                shutil.copy2(source, dest)
+                            if shutil.disk_usage(folder).free < size + self.c.get('reserve_gib', 15) * 2**30:
+                                raise DiskSpaceError('Not enough free disk to copy verified existing file.')
+                            shutil.copy2(source, dest)
                         say('REUSE ' + str(source))
                         break
                 else:
@@ -552,7 +606,9 @@ class Cluster:
     def render_worker(self):
         server = self.locate(self.runtime, 'llama-server')
         key = self.key('worker')
-        config = {'healthCheckTimeout': 600, 'apiKeys': [key], 'startPort': 18081, 'models': {}}
+        # v277 defaults to proxy-only logging: GPU offload evidence lives upstream.
+        config = {'healthCheckTimeout': 600, 'logLevel': 'info', 'logToStdout': 'both',
+                  'captureBuffer': 0, 'apiKeys': [key], 'startPort': 18081, 'models': {}}
         active = []
         for alias, spec in self.desired.items():
             folder, rec = self.sync_model(alias, spec)
@@ -563,7 +619,8 @@ class Cluster:
                 args = ['/usr/bin/env', 'LD_LIBRARY_PATH=' + libs, *args]
             config['models'][alias] = {'cmd': shlex.join(args).replace("'${PORT}'", '${PORT}'),
                                        'ttl': int(spec.get('ttl', 600)), 'checkEndpoint': '/health'}
-        # Default llama-swap group policy swaps one model at a time.
+        if self.c.get('resident_groups'):
+            config['routing'] = {'router': {'use': 'group', 'settings': {'groups': model_groups(self.desired, self.c['resident_groups'])}}}
         return config, active
 
     def install_gateway(self):
@@ -580,7 +637,7 @@ class Cluster:
         atomic(self.venv / MARK, 'local-ai-cluster\n')
         try:
             run('uv', 'pip', 'install', '--python', self.venv / 'bin/python', f'litellm[proxy]=={self.v["litellm"]}')
-        except Exception:
+        except BaseException:
             remove_owned(self.venv)
             raise
 
@@ -616,9 +673,9 @@ class Cluster:
         return bool(legacy and run('systemctl', 'is-active', '--quiet', legacy, check=False, capture=True).returncode == 0)
 
     def legacy_unit(self):
-        expected = {'gmini': 'ollama.service', 'p520': 'llama-swap.service', 'z820': 'ollama.service'}[self.a.node]
-        if self.c.get('legacy_service') != expected:
-            fail('Unexpected legacy service; inspect node YAML.')
+        expected = self.c.get('legacy_service')
+        if expected and (not SAFE.fullmatch(expected) or not expected.endswith('.service') or expected == SERVICE):
+            fail('Invalid legacy service; inspect node YAML.')
         return expected
 
     def migration_pending(self):
@@ -717,7 +774,7 @@ class Cluster:
                 fail('Unsupported special character in systemd command path.')
             cmd = ' '.join('"' + x + '"' for x in command)
             user = run('id', '-un', capture=True).stdout.strip()
-            data = f'''# local-ai-cluster\n[Unit]\nDescription=Local AI inference (llama-swap)\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nUser={user}\nWorkingDirectory={self.root}\nExecStart={cmd}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=120\n\n[Install]\nWantedBy=multi-user.target\n'''
+            data = f'''# local-ai-cluster\n[Unit]\nDescription=Local AI inference (llama-swap)\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nUser={user}\nWorkingDirectory={self.root}\nExecStart={cmd}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=120\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nReadWritePaths="{self.root}"\nEnvironment="XDG_CACHE_HOME={self.cache}"\n\n[Install]\nWantedBy=multi-user.target\n'''
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / self.service_path().name
             p.write_bytes(data if isinstance(data, bytes) else data.encode())
@@ -740,7 +797,16 @@ class Cluster:
         if not self.service_active():
             # Catch stale addresses and occupied ports without altering existing processes.
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((self.c['bind'], int(self.c['port'])))
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind((self.c['bind'], int(self.c['port'])))
+                except OSError as e:
+                    if e.errno == 98 or e.errno == 48:
+                        # Report actual listener if ss is available; never kill unknown processes.
+                        if shutil.which('ss'):
+                            run('ss', '-ltnp', f'sport = :{self.c["port"]}', check=False)
+                        fail(f'Port {self.c["port"]} already in use on {self.c["bind"]}; not stopping an unknown listener.')
+                    raise
         if self.role == 'gateway':
             if not self.service_active():
                 run('sudo', 'launchctl', 'bootstrap', 'system', self.service_path())
@@ -775,84 +841,88 @@ class Cluster:
             config, active = self.render_worker()
         # Stage all weights first. Do not restart unchanged configuration.
         native_text = yaml.safe_dump(config, sort_keys=False)
-        state_text = json.dumps({'models': active, 'backend': self.backend, 'endpoint': self.endpoint,
+        state_text = json.dumps({'service_schema': 7, 'models': active, 'backend': self.backend, 'endpoint': self.endpoint,
                                  'runtimes': [self.runtime.name, self.swap.name] if self.role == 'worker' else [self.venv.name]}, indent=2)
         unchanged = (self.native.is_file() and self.native.read_text() == native_text and
                      self.active.is_file() and self.active.read_text() == state_text and self.service_path().exists())
         was_running = self.service_active()
-        if unchanged:
-            say('KEEP configuration and service (unchanged).')
-            if not was_running and not stage_only and not self.legacy_active():
-                self.start()
-        else:
-            old_files = {p: p.read_bytes() for p in (self.native, self.active, self.service_path()) if p.is_file()}
-            if was_running:
-                confirm('Restart managed inference now? Active requests will be interrupted.', self.a.yes)
-                self.stop()
-            try:
+        old_files = {p: p.read_bytes() for p in (self.native, self.active, self.service_path()) if p.is_file()}
+        changed_service = not unchanged or (not was_running and not stage_only)
+        prune = self.role == 'worker' and (self.a.prune or bool(self.obsolete()))
+        try:
+            if unchanged:
+                say('KEEP configuration and service (unchanged).')
+            else:
+                if was_running:
+                    confirm('Restart managed inference now? Active requests will be interrupted.', self.a.yes)
+                    self.stop()
                 if self.native.exists():
                     atomic(self.native.with_suffix('.previous.yaml'), self.native.read_bytes())
                 atomic(self.native, native_text)
                 atomic(self.active, state_text)
                 self.install_service()
-                if not stage_only and not self.legacy_active():
-                    self.start()
-            except Exception:
-                # Best-effort rollback of the prior configuration and native service.
-                say('Apply failed; restoring previous configuration where available.')
-                self.stop()
-                for p in (self.native, self.active):
-                    if p in old_files:
-                        atomic(p, old_files[p])
-                    else:
-                        p.unlink(missing_ok=True)
-                svc = self.service_path()
-                if svc in old_files:
-                    with tempfile.TemporaryDirectory() as tmp:
-                        saved = Path(tmp) / svc.name
-                        saved.write_bytes(old_files[svc])
-                        run('sudo', 'install', '-m', '0644', saved, svc)
-                    if self.role == 'worker':
-                        run('sudo', 'systemctl', 'daemon-reload')
-                    if was_running:
-                        # Restore via native manager: prior endpoint may differ from current YAML.
-                        if self.role == 'gateway':
-                            run('sudo', 'launchctl', 'bootstrap', 'system', svc)
-                        else:
-                            run('sudo', 'systemctl', 'start', SERVICE)
-                elif svc.exists():
-                    if self.role == 'worker':
-                        run('sudo', 'systemctl', 'disable', SERVICE, check=False)
-                    run('sudo', 'rm', '--', svc)
-                    if self.role == 'worker':
-                        run('sudo', 'systemctl', 'daemon-reload')
-                raise
-        if stage_only:
-            say('Staged verified runtime and configuration for automatic cutover.')
-        elif self.legacy_active():
-            fail('Legacy service became active during reconciliation; retry setup for automatic migration.')
-        elif self.role == 'gateway':
-            self.validate_gateway()
-        elif self.role == 'worker':
-            # Avoid restarting a healthy unchanged service except before cleanup.
-            prune = self.a.prune or bool(self.obsolete())
-            if prune:
-                self.stop()
+            if stage_only:
+                say('Staged verified runtime and configuration for automatic cutover.')
+                return
+            if self.legacy_active():
+                fail('Legacy service became active during reconciliation; retry setup for automatic migration.')
+            if not self.service_active():
                 self.start()
-            if prune or not unchanged or not was_running:
-                self.smoke_all()
+            if self.role == 'gateway':
+                self.validate_gateway()
             else:
-                self.validate()
-            if prune:
-                self.calibrate(migration=True)
-            self.cleanup()  # removes only superseded owned runtimes/weights after validation
+                if prune and not changed_service:
+                    self.stop(); self.start()
+                if prune or changed_service:
+                    self.smoke_all()
+                else:
+                    self.validate()
+                if prune:
+                    self.calibrate(migration=True)
+        except BaseException:
+            if changed_service:
+                self.restore_configuration(old_files, was_running)
+            elif was_running and not self.service_active():
+                self.start()
+            raise
+        # Irreversible cleanup is outside rollback: never restore deleted assets.
+        if self.role == 'worker':
+            self.cleanup()
+
+    def restore_configuration(self, old_files, was_running):
+        say('Apply failed; restoring previous configuration where available.')
+        self.stop()
+        for p in (self.native, self.active):
+            if p in old_files:
+                atomic(p, old_files[p])
+            else:
+                p.unlink(missing_ok=True)
+        svc = self.service_path()
+        if svc in old_files:
+            with tempfile.TemporaryDirectory() as tmp:
+                saved = Path(tmp) / svc.name
+                saved.write_bytes(old_files[svc])
+                run('sudo', 'install', '-m', '0644', saved, svc)
+            if self.role == 'worker':
+                run('sudo', 'systemctl', 'daemon-reload')
+            if was_running:
+                if self.role == 'gateway':
+                    run('sudo', 'launchctl', 'bootstrap', 'system', svc)
+                else:
+                    run('sudo', 'systemctl', 'start', SERVICE)
+        elif svc.exists():
+            if self.role == 'worker':
+                run('sudo', 'systemctl', 'disable', SERVICE, check=False)
+            run('sudo', 'rm', '--', svc)
+            if self.role == 'worker':
+                run('sudo', 'systemctl', 'daemon-reload')
 
     def pull_ollama(self):
         # One desired catalog: derive tags from local routes, no duplicated list.
-        models = {r['model'] for r in self.c['routes'].values() if r['node'] == 'macmini'}
+        models = {r['model'] for r in self.c['routes'].values() if r['node'] == self.a.node}
         if not models:
             return
-        base = self.c['nodes']['macmini']['url'].rstrip('/').removesuffix('/v1')
+        base = self.c['nodes'][self.a.node]['url'].rstrip('/').removesuffix('/v1')
         try:
             existing = {m['name'] for m in api(base + '/api/tags')['models']}
         except (OSError, ValueError, KeyError) as e:
@@ -884,7 +954,7 @@ class Cluster:
                     except urllib.error.HTTPError as e:
                         fail(f'Upstream HTTP failure {url}: {e.code}; check authentication/configuration.')
                     except (OSError, TimeoutError) as e:
-                        if old or route['node'] == 'macmini':
+                        if old or route['node'] == self.a.node:
                             fail(f'Required route unavailable: {alias}: {e}')
                         availability[url] = None
                         say(f'Worker unavailable: {route["node"]}: {e}')
@@ -950,8 +1020,8 @@ class Cluster:
         if path.resolve() != path or any(x.is_symlink() for x in [path, *path.parents] if x.is_relative_to(home)):
             fail('Refusing symlink or ambiguous legacy path: ' + str(path))
         if runtime:
-            allowed = {'gmini': {'llama-rocm', 'llama-vulkan-gmini'}, 'p520': {'llama-vulkan'}, 'z820': set()}
-            if path.parent != home or path.name not in allowed.get(self.a.node, set()):
+            allowed = {Path(v).expanduser() for v in self.c.get('legacy_cleanup', {}).get('runtime_dirs', [])}
+            if path.parent != home or path not in allowed:
                 fail('Runtime not in inventoried directory allowlist: ' + str(path))
         elif not path.is_relative_to(home / 'models') or path.suffix != '.gguf':
             fail('Only exact GGUF files under ~/models may be retired: ' + str(path))
@@ -1047,25 +1117,58 @@ class Cluster:
         for _ in range(3):
             logs = run('sudo', 'journalctl', '-u', SERVICE, '--since', since,
                        '--no-pager', '-o', 'cat', capture=True).stdout
-            hits = re.findall(r'offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+GPU', logs, re.I)
-            if hits:
-                actual, total = map(int, hits[-1])
-                if total and actual / total >= minimum:
+            counts = offload_counts(logs)
+            if counts:
+                actual, total = counts
+                if total and 0 < actual <= total and actual / total >= minimum:
                     say(f'GPU offload {alias}: {actual}/{total} layers')
                     return
                 fail(f'GPU offload below target for {alias}: {actual}/{total}; tune context or quantization.')
             time.sleep(2)
-        fail('No GPU-layer offload evidence in journal for ' + alias + '; legacy assets preserved. Inspect logs and runtime compatibility.')
+        fail('No GPU-layer offload evidence in journal for ' + alias + '; legacy assets preserved. See saved migration diagnostics.')
+
+    def save_failure_log(self, since, error):
+        """Collect bounded model startup/service diagnostics before rollback."""
+        if self.role != 'worker':
+            return
+        try:
+            folder = self.root / 'benchmarks'
+            folder.mkdir(exist_ok=True)
+            path = folder / f'{self.a.node}-migration-failure-{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}.log'
+            journal = run('sudo', 'journalctl', '-u', SERVICE, '--since', since,
+                          '--no-pager', '-o', 'cat', '-n', '600', check=False, capture=True).stdout
+            if not isinstance(journal, str):
+                return
+            text = f'Cluster release {RELEASE}\nBackend: {self.backend}\nError: {error}\n\n{journal}'
+            # The managed key can appear in a server diagnostic. Do not publish it.
+            with contextlib.suppress(OSError, RuntimeError):
+                key = self.key('worker')
+                if key:
+                    text = text.replace(key, '[REDACTED]')
+            atomic(path, text, mode=0o600)
+            say('Failure diagnostics: ' + str(path))
+        except Exception as e:
+            say('Could not save failure diagnostics: ' + str(e))
 
     def smoke_all(self):
         old = self.a.model
         try:
             for alias in self.desired if self.role == 'worker' else self.c['routes']:
                 self.a.model = alias
-                since = time.strftime('%Y-%m-%d %H:%M:%S')
-                self.validate()
                 if self.role == 'worker':
-                    self.check_gpu_offload(since, alias)
+                    # A warm model won't emit a new load log. Restart before each smoke test.
+                    self.stop()
+                since = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+                if self.role == 'worker':
+                    self.start()
+                try:
+                    self.validate()
+                    if self.role == 'worker':
+                        self.check_gpu_offload(since, alias)
+                except BaseException as e:
+                    say('Validation failed for ' + alias + ': ' + str(e))
+                    self.save_failure_log(since, e)
+                    raise
         finally:
             self.a.model = old
 
@@ -1099,6 +1202,8 @@ class Cluster:
             self.legacy_path(value)
         for value in cleanup.get('runtime_dirs', []):
             self.legacy_path(value, runtime=True)
+        if self.c.get('resident_groups'):
+            fail('Migrate with resident_groups empty first; enable groups after combined memory testing.')
         self.key('worker')
         self.install_worker()  # require working binary and visible GPU BEFORE deleting anything
         if self.a.reclaim_first:
@@ -1123,6 +1228,7 @@ class Cluster:
             confirm('Insufficient disk space. Delete listed obsolete weights now and retry? No automatic recovery.', self.a.yes)
             self.retire_files(reclaim)
             self.sync(install=True, stage_only=True)
+        cutover_since = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
         try:
             if was_active:
                 run('sudo', 'systemctl', 'stop', legacy)
@@ -1132,7 +1238,8 @@ class Cluster:
             self.smoke_all()
             # Validate real long prompts at the deployed settings before irreversible cleanup.
             self.calibrate(migration=True)
-        except BaseException:
+        except BaseException as e:
+            self.save_failure_log(cutover_since, e)
             say('New inference failed; legacy assets retained (except explicit early reclaim).')
             if self.service_active():
                 self.stop()
@@ -1212,8 +1319,13 @@ class Cluster:
             say('Managed gateway loaded: ' + str(self.service_active()))
             for node, profile in self.c['nodes'].items():
                 try:
-                    data = api(profile['url'].rstrip('/') + '/models', self.key('worker') if node in ('gmini','p520','z820') else None, timeout=3)
-                    status = f'API reachable ({len(data.get("data", []))} models)'
+                    expected = {r['model'] for r in self.c['routes'].values() if r['node'] == node}
+                    node_cfg = self.c if node == self.a.node else yaml.safe_load((REPO / 'config' / (node + '.yaml')).read_text())
+                    data = api(profile['url'].rstrip('/') + '/models', self.key('worker') if node_cfg['role'] == 'worker' else None, timeout=3)
+                    advertised = {m['id'] for m in data['data']}
+                    status = f'API reachable; advertised={sorted(advertised)}; missing={sorted(expected-advertised)}; extra/unrouted={sorted(advertised-expected)}'
+                    if profile.get('enabled') and expected - advertised:
+                        status = 'CATALOG DRIFT: ' + status
                 except (OSError, ValueError, RuntimeError) as e:
                     status = f'API unavailable or incompatible ({e})'
                 say(f'{node}: {status}; routing={profile.get("enabled", False)}')
@@ -1238,11 +1350,27 @@ class Cluster:
                 fail(f'{alias}: invalid embedding response.')
             say(f'PASS {alias}: embedding dimensions={len(vector)}')
         else:
-            result = api(self.endpoint + '/v1/chat/completions', key, {'model': alias, 'messages': [{'role': 'user', 'content': 'Reply with one word: READY.'}], 'max_tokens': 512, 'stream': False}, 600)
+            result = api(self.endpoint + '/v1/chat/completions', key, {'model': alias, 'messages': [{'role': 'user', 'content': 'Reply with one word: READY.'}], 'max_tokens': 4096, 'stream': False, **(self.desired[alias].get('test_request', {}) if self.role == 'worker' else {})}, 600)
             text = (result.get('choices') or [{}])[0].get('message', {}).get('content')
             if not isinstance(text, str) or not text.strip() or 'ready' not in text.lower():
                 fail(f'{alias}: missing expected completion.')
             say(f'PASS {alias}: completion; usage={result.get("usage")}')
+            if self.role == 'worker' and self.desired[alias].get('tool_test'):
+                self.validate_tool(alias, key)
+
+    def validate_tool(self, alias, key):
+        # No tool executes: verify the model's Jinja template and structured arguments.
+        token = 'cluster-' + secrets.token_hex(4)
+        tool = {'type': 'function', 'function': {'name': 'cluster_echo', 'description': 'Echo a supplied token', 'parameters': {'type': 'object', 'properties': {'token': {'type': 'string'}}, 'required': ['token']}}}
+        payload = {'model': alias, 'messages': [{'role': 'user', 'content': 'Call cluster_echo with token ' + token + '. Do not answer in text.'}], 'tools': [tool], 'max_tokens': 4096, 'stream': False, 'temperature': 0, **self.desired[alias].get('test_request', {})}
+        result = api(self.endpoint + '/v1/chat/completions', key, payload, 600)
+        calls = (result.get('choices') or [{}])[0].get('message', {}).get('tool_calls') or []
+        for call in calls:
+            function = call.get('function', {})
+            if function.get('name') == 'cluster_echo' and json.loads(function.get('arguments', '{}')).get('token') == token:
+                say('PASS structured tool call ' + alias)
+                return
+        fail('Structured tool call failed: ' + alias)
 
     def validate(self):
         if self.role == 'gateway':
@@ -1295,7 +1423,8 @@ class Cluster:
 
 def main():
     parser = argparse.ArgumentParser(description='Local AI cluster: one profile, native services, pinned artifacts.')
-    parser.add_argument('node', choices=['macmini', 'gmini', 'p520', 'z820', 'nano', 'ventunoq'])
+    parser.add_argument('--version', action='version', version='local-ai-cluster ' + RELEASE)
+    parser.add_argument('node', choices=sorted(p.stem for p in (REPO / 'config').glob('*.yaml') if p.stem != 'versions'))
     group = parser.add_mutually_exclusive_group()
     for flag, helptext in [('install', 'Reconcile runtime and models; automatically migrate known legacy assets (default)'), ('migrate', 'Clean migration: validate then retire inventoried legacy assets'), ('models', 'Sync desired models and prune obsolete managed weights after validation'), ('cleanup', 'Remove obsolete managed model directories'), ('reset', 'Rebuild managed runtime; preserve models/cache'), ('uninstall', 'Remove managed runtime/service; preserve weights'), ('purge', 'Remove managed runtime and owned weights; preserve keys/cache'), ('start', 'Start managed service'), ('stop', 'Stop managed service'), ('health', 'Read-only system/API health'), ('validate', 'Execute inference on configured models; optionally select --model'), ('benchmark', 'Benchmark inference; --model required on primary workers'), ('calibrate', 'Measure real long-context prompts; optionally select --model'), ('init-keys', 'Create local gateway and worker keys on Mac')]:
         group.add_argument('--' + flag, dest='action', action='store_const', const=flag, help=helptext)
@@ -1308,12 +1437,15 @@ def main():
     parser.add_argument('--apply', action='store_true', help='Apply measured context/cache recommendation to source YAML; deploy separately')
     parser.add_argument('--cache-type', choices=['f16','q8_0','q4_0'], help='Test only this KV cache type during calibration')
     a = parser.parse_args()
+    say('local-ai-cluster v' + RELEASE)
     a.action = a.action or 'install'
     if (a.apply or a.cache_type) and a.action != 'calibrate':
         parser.error('--apply and --cache-type require --calibrate')
     if a.reclaim_first and a.action not in ('cleanup', 'migrate', 'install', 'models'):
         parser.error('--reclaim-first requires --cleanup, --migrate, --install or --models')
     try:
+        if not hasattr(tarfile, 'data_filter'):
+            fail('Python lacks safe tar extraction; upgrade Python or use uv Python 3.12.')
         c = Cluster(a)
         if a.dry_run:
             c.plan()

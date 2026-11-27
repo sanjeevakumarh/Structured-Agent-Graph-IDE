@@ -35,25 +35,43 @@ class SafetyTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 c.plan()
 
-    def test_ollama_manifest_local_and_hardlink_reuse(self):
+    def test_exact_upstream_hash_and_hardlink_reuse(self):
         blob = b'GGUF' + b'fixture'
         digest = hashlib.sha256(blob).hexdigest()
         store = self.home / 'ollama'
         source = store / 'blobs' / ('sha256-' + digest)
         source.parent.mkdir(parents=True)
         source.write_bytes(blob)
-        manifest = store / 'manifests/registry.ollama.ai/library/demo/tag'
-        manifest.parent.mkdir(parents=True)
-        manifest.write_text(json.dumps({'layers': [{'mediaType': 'application/vnd.ollama.image.model', 'digest': 'sha256:' + digest, 'size': len(blob)}]}))
-        spec = {'source': {'ollama': 'demo:tag', 'digest': m.sha(manifest)}, 'context': 1024}
+        rev = 'a' * 40
+        spec = {'source': {'repo': 'demo/model', 'revision': rev, 'files': ['model.gguf']}, 'context': 1024}
         self.c.store = store
-        with patch.object(m, 'get_bytes', side_effect=AssertionError('unexpected network')):
+        meta = {'sha': rev, 'siblings': [{'rfilename': 'model.gguf', 'lfs': {'sha256': digest, 'size': len(blob)}}]}
+        with patch.object(m, 'get_json', return_value=meta):
             directory, records = self.c.sync_model('demo', spec)
             self.assertEqual((directory / records[0]['name']).stat().st_ino, source.stat().st_ino)
             with patch.object(m, 'model_sources', side_effect=AssertionError('unexpected metadata refresh')):
                 self.assertEqual(self.c.sync_model('demo', spec)[0], directory)
         source.unlink()
         self.assertEqual((directory / records[0]['name']).read_bytes(), blob)
+        with self.assertRaisesRegex(RuntimeError, 'raw Ollama layers'):
+            m.model_sources({'source': {'ollama': 'demo:tag', 'digest': digest}}, store)
+
+    def test_render_worker_forwards_upstream_logs(self):
+        from unittest.mock import MagicMock
+        c = self.c
+        c.locate = MagicMock(return_value=Path('/bin/llama-server'))
+        c.key = MagicMock(return_value='sk-test')
+        c.sync_model = MagicMock(return_value=(Path('/models'), [{'name': 'model.gguf'}]))
+        c.runtime_env = MagicMock(return_value={})
+        config, _ = c.render_worker()
+        self.assertEqual(config['logToStdout'], 'both')
+        self.assertEqual(config['captureBuffer'], 0)
+
+    def test_disabled_model_cache_is_preserved(self):
+        disabled = next(v for v in self.c.c['models'].values() if not v.get('enabled', True))
+        path = self.c.models / m.model_id(disabled)
+        path.mkdir(); m.atomic(path / m.MARK, 'local-ai-cluster\n')
+        self.assertNotIn(path, self.c.obsolete())
 
     def test_cleanup_refuses_active_and_preserves_unowned(self):
         old = self.c.models / 'old-managed'
@@ -130,6 +148,23 @@ class SafetyTests(unittest.TestCase):
                 c.migrate()
             run.assert_any_call('sudo', 'systemctl', 'start', 'ollama.service')
         c.retire_files.assert_not_called(); c.retire_ollama.assert_not_called(); c.retire_runtimes.assert_not_called()
+
+    def test_explicit_model_logging_and_offload_parser(self):
+        cmd = m.model_command('/bin/server', Path('/models'), [{'name':'model.gguf'}], 'z820/model', {'context':8192}, 12345)
+        self.assertEqual(cmd[-5:], ['--log-verbosity','3','--log-colors','off','--no-log-jsonl'])
+        self.assertEqual(m.offload_counts('load_tensors: offloaded \x1b[32m25/25\x1b[0m layers to GPU'), (25,25))
+        self.assertEqual(m.offload_counts('offloaded 25/25 layers to GPU\noffloaded 0/25 layers to GPU'), (0,25))
+        self.assertIsNone(m.offload_counts('Available devices: CUDA0'))
+
+    def test_http_error_preserves_status_and_redacts_key(self):
+        key = 'sk-test-secret'
+        e = m.urllib.error.HTTPError('http://localhost/v1/chat/completions', 500, 'Internal Server Error', {}, io.BytesIO(('bad tensor ' + key).encode()))
+        with patch.object(m.urllib.request,'urlopen',side_effect=e):
+            with self.assertRaises(m.urllib.error.HTTPError) as caught:
+                m.api('http://localhost/v1/chat/completions',key,{})
+        self.assertEqual(caught.exception.code,500)
+        self.assertIn('bad tensor [REDACTED]',str(caught.exception))
+        self.assertNotIn(key,str(caught.exception))
 
     def test_full_gpu_offload_required(self):
         from types import SimpleNamespace

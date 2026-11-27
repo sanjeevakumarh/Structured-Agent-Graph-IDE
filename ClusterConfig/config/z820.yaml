@@ -1,8 +1,15 @@
 # RTX A4500 20 GiB; Sandy Bridge Xeons have AVX but NO AVX2.
 node: z820
 role: worker
+hardware:
+  vendor: "0x10de"
+  device_regex: "A4500|NVIDIA"
+  backends: [cuda, cuda-native]
+  telemetry: nvidia_smi
+  cuda_arch: 86
+  gpu_name_regex: A4500
 backend: cuda                         # cuda-native = build with local CUDA toolkit, native CPU flags
-bind: localhost                       # set to a trusted LAN/tailnet interface before remote use
+bind: localhost                       # use tailnet for encrypted remote access (or local-only)
 port: 8081
 legacy_service: ollama.service
 migration_hostnames: []  # optional exact hostname allowlist; empty permits any matching hardware
@@ -11,22 +18,27 @@ ollama_store: /usr/share/ollama/.ollama/models
 # Context is the deployable starting value; --calibrate --apply updates it.
 calibration:
   contexts: [8192, 16384, 32768, 65536, 131072, 262144]
-  cache_types: [q8_0, f16, q4_0]  # q4_0 only when explicitly requested or q8/f16 cannot reach goal
+  cache_types: [f16, q8_0, q4_0]  # highest precision meeting target wins
   min_host_free_gib: 6
   min_gpu_free_mib: 1024
   min_generation_tps: 5
   max_ttft_seconds: 300
   request_timeout_seconds: 1800
   trials: 3
-  # On Intel, specify the correct xpu-smi device index if needed.
+# context is per request slot; total KV pool = context × parallel.
+resident_groups: []  # optional lists of model IDs; validate combined memory before using
 models:
   z820/gpt-oss-20b-mxfp4:
     source:
-      ollama: gpt-oss:20b
-      digest: f38aa0c53da5f8c49d08c43a99df24ff53167fe68e24664a7777288e7656fdfe
+      repo: ggml-org/gpt-oss-20b-GGUF
+      revision: 15dcfc7e7c608c6161507211ed43c5b590801b4b
+      files: [gpt-oss-20b-MXFP4.gguf]
+    parallel: 1
+    tool_test: true
+    test_request: {reasoning_effort: low}
     context: 16384
     target_context: 65536  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
   z820/qwen3.8-27b-ud-iq4_xs:
@@ -34,9 +46,12 @@ models:
       repo: unsloth/Qwen3.8-27B-GGUF
       revision: db81afd1e1f5d6cca1988c9fe5c8fe0844b1cad7
       files: [Qwen3.8-27B-UD-IQ4_XS.gguf]
+    parallel: 1
+    tool_test: true
+    test_request: {chat_template_kwargs: {enable_thinking: false}}
     context: 8192                    # increase only after VRAM measurement
     target_context: 32768  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
 

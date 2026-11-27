@@ -1,68 +1,91 @@
 # EVO-X2 / gfx1151 / 112 GiB GTT. Keep OS, ROCm 7.2.1 and GTT settings intact.
 node: gmini
 role: worker
+hardware:
+  vendor: "0x1002"
+  pci_device: "0x1586"  # Ryzen AI MAX+ 395 integrated graphics; adjust if hardware changes
+  device_regex: "AMD|Radeon|gfx1151"
+  backends: [vulkan, rocm]
+  telemetry: amd_gtt
+  rocm_target: gfx1151
 backend: vulkan                       # rocm = native build against installed ROCm
-bind: localhost                       # set to a trusted LAN/tailnet interface before remote use
+bind: localhost                       # use tailnet for encrypted remote access (or local-only)
 port: 8081                            # staging; 8080 SearXNG, 11434 legacy Ollama
 legacy_service: ollama.service
 migration_hostnames: []  # optional exact hostname allowlist; empty permits any matching hardware
 reserve_gib: 15
 ollama_store: /usr/share/ollama/.ollama/models
-# The exact manifest digests below came from the reference inventory. Reuses the raw GGUF
-# layer, not Ollama's chat template; validate tool calling before cutover.
+# Pinned upstream GGUFs; only byte-identical local files can be reused.
 # Context is the deployable starting value; --calibrate --apply updates it.
 calibration:
   contexts: [8192, 16384, 32768, 65536, 131072, 262144]
-  cache_types: [q8_0, f16, q4_0]  # q4_0 only when explicitly requested or q8/f16 cannot reach goal
+  cache_types: [f16, q8_0, q4_0]  # highest precision meeting target wins
   min_host_free_gib: 6
   min_gpu_free_mib: 1024
   min_generation_tps: 5
   max_ttft_seconds: 300
   request_timeout_seconds: 1800
   trials: 3
-  # On Intel, specify the correct xpu-smi device index if needed.
+# context is per request slot; total KV pool = context × parallel.
+resident_groups: []  # optional lists of model IDs; validate combined memory before using
 models:
   gmini/qwen3-coder-next-80b-q4_k_m:
     source:
-      ollama: qwen3-coder-next:q4_K_M
-      digest: ca06e9e4087c714d44355bf954099187890e63084b4a632b8e9956c4b9492074
+      repo: unsloth/Qwen3-Coder-Next-GGUF
+      revision: 3c43105b7199f5005fd64c4d5426c0da88e91335
+      files: [Qwen3-Coder-Next-Q4_K_M.gguf]
+    parallel: 2
+    tool_test: true
+    test_request: {}
     context: 32768
     target_context: 131072  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
   gmini/gpt-oss-120b-mxfp4:
     source:
-      ollama: gpt-oss:120b
-      digest: 714d86958b6e870a9320e78126ac1ce3477727a1cd9bf7194b8ace0d84c62fd8
+      repo: ggml-org/gpt-oss-120b-GGUF
+      revision: 7200b74bea78b0a2964ef9f3897eefa401e890ff
+      files: [gpt-oss-120b-MXFP4.gguf]
+    parallel: 1
+    tool_test: true
+    test_request: {reasoning_effort: low}
     context: 32768
     target_context: 65536  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
-  gmini/qwen3.6-35b-a3b-q4_k_m:
+  gmini/qwen3.6-35b-a3b-ud-q4_k_m:
     source:
-      ollama: qwen3.6:35b-a3b
-      digest: a7eb95c53bcf96b4bdd008d0fab4a5dac88047d9c1a7a9ab88ed453423fbd87c
+      repo: unsloth/Qwen3.6-35B-A3B-GGUF
+      revision: 4a3a39659678d382ccdb388bced90e5a711cd5ea
+      files: [Qwen3.6-35B-A3B-UD-Q4_K_M.gguf]
+    parallel: 2
+    tool_test: true
+    test_request: {chat_template_kwargs: {enable_thinking: false}}
     context: 32768
     target_context: 131072  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
   gmini/qwen3.5-122b-a10b-q4_k_m:
     source:
-      ollama: qwen3.5:122b-a10b
-      digest: 8b9d11d807c57feb1e2ecb0d6cbf40334c37dcc3523bed5540af4f927f112a37
+      repo: unsloth/Qwen3.5-122B-A10B-GGUF
+      revision: c0e1cc9eb3fa27fdcd731aebd1ea50b2e9f139ae
+      files: [Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf, Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00002-of-00003.gguf, Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00003-of-00003.gguf]
+    parallel: 1
+    tool_test: true
+    test_request: {chat_template_kwargs: {enable_thinking: false}}
     context: 32768
     target_context: 65536  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
     enabled: false                    # enable after benchmarking / storage review
 
 # --migrate: remove only these explicitly listed legacy files AFTER smoke tests.
 legacy_cleanup:
-  ollama_tags: ['laguna-s-2.1:q4_K_M', 'gpt-oss:120b', 'qwen3-coder-next:q4_K_M', 'qwen3-coder-next:latest', 'qwen3.5:122b-a10b', 'qwen3.6:35b-a3b']
+  ollama_tags: ['laguna-s-2.1:q4_K_M', 'gpt-oss:120b', 'qwen3-coder-next:q4_K_M', 'qwen3-coder-next:latest', 'qwen3.6:35b-a3b']
   runtime_dirs: [~/llama-rocm, ~/llama-vulkan-gmini]
   model_files:
     - ~/models/inkling-small/mmproj-F16.gguf

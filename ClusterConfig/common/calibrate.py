@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Isolated llama.cpp context calibration, invoked by setup-<node>.sh --calibrate.
 Edit calibration/model settings in the node YAML. Tests real chat prompts at
-~90% context, measures streaming latency, retrieval, memory and GPU offload.
+~75–90% per-slot context (room for reasoning), concurrent configured slots, measures streaming latency, retrieval, memory and GPU offload.
 Stages missing runtime/weights, pauses known GPU services and restores them.
 Does not prune models or permanently change service configuration.
 --apply edits only tested context/cache fields; run setup again to deploy them.
 Reports and per-candidate logs remain in ~/inference/benchmarks. No daemon.
 """
 import contextlib
+import concurrent.futures
+import csv
+import io
 import hashlib
 import json
 import os
@@ -19,11 +22,12 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 import yaml
-from manage import api, atomic, confirm, fail, model_command, model_id, owned, say, REPO
+from manage import api, atomic, confirm, fail, model_command, model_id, owned, say, REPO, flash_mode, slot_count, offload_counts, http_error_detail
 
 MIB = 2**20
 
@@ -36,27 +40,81 @@ def meminfo():
             'swapout_pages': int(vm['pswpout'])}
 
 
+def intel_memory_used(output):
+    """Parse device-level metric 18 from xpu-smi dump (not utilization %)."""
+    for i, line in enumerate(output.splitlines()):
+        if 'GPU Memory Used (MiB)' not in line:
+            continue
+        rows = list(csv.DictReader(io.StringIO('\n'.join(output.splitlines()[i:]))))
+        values = []
+        for row in rows:
+            row = {k.strip(): (v or '').strip() for k, v in row.items() if k is not None}
+            if 'TileId' in row and row['TileId'] not in ('', '-1', 'N/A'):
+                # Do not mistake a single tile's usage for device-wide free memory.
+                continue
+            if row.get('GPU Memory Used (MiB)'):
+                values.append(float(row['GPU Memory Used (MiB)']))
+        if len(values) == 1:
+            return values[0]
+    return None
+
+
+def drm_memory_free(hw, region, root=Path('/sys/class/drm')):
+    """Read only real DRM cards; skip connectors and incomplete device entries."""
+    values = {}
+    for card in sorted(root.glob('card*')):
+        if not re.fullmatch(r'card\d+', card.name):
+            continue
+        device = card / 'device'
+        try:
+            if (device / 'vendor').read_text().strip() != hw['vendor']:
+                continue
+            if hw.get('pci_device') and (device / 'device').read_text().strip() != hw['pci_device']:
+                continue
+            total = int((device / f'mem_info_{region}_total').read_text())
+            used = int((device / f'mem_info_{region}_used').read_text())
+            if total > 0 and 0 <= used <= total:
+                values[str(device.resolve())] = (total - used) / MIB
+        except (OSError, ValueError, KeyError):
+            continue
+    # Conservative if more than one matching device is present.
+    return min(values.values()) if values else None
+
+
 def gpu_free(node, cfg):
-    """Return actual observed free MiB; never substitute advertised capacity."""
+    """Observed device-wide free MiB; fail closed on unavailable telemetry.
+    Hardware settings come from YAML. Per-process DRM fdinfo is not global free VRAM.
+    """
+    hw = cfg.get('hardware', {})
+    mode = hw.get('telemetry')
     try:
-        if node == 'gmini':
-            for card in Path('/sys/class/drm').glob('card*/device'):
-                if (card / 'vendor').read_text().strip() == '0x1002':
-                    return (int((card / 'mem_info_gtt_total').read_text()) - int((card / 'mem_info_gtt_used').read_text())) / MIB
-        if node == 'z820':
+        if mode in ('amd_gtt', 'intel_xpu'):
+            region = 'gtt' if mode == 'amd_gtt' else 'vram'
+            free = drm_memory_free(hw, region)
+            if free is not None:
+                return free
+        if mode == 'nvidia_smi':
             cmd = ['nvidia-smi', '--query-gpu=name,memory.free', '--format=csv,noheader,nounits']
             out = subprocess.check_output(cmd, text=True, timeout=5)
-            rows = [float(r.rsplit(',', 1)[1]) for r in out.splitlines() if 'A4500' in r]
+            rows = [float(r.rsplit(',', 1)[1]) for r in out.splitlines() if re.search(hw['gpu_name_regex'], r.rsplit(',', 1)[0], re.I)]
             return min(rows) if rows else None
-        if node == 'p520':
-            device = str(cfg.get('intel_device', 0))
-            cmd = ['xpu-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits']
-            out = subprocess.check_output(cmd, text=True, timeout=5, stderr=subprocess.DEVNULL)
-            for line in out.splitlines():
-                fields = [f.strip() for f in line.split(',')]
-                if len(fields) == 2 and fields[0] == device:
-                    return float(fields[1])
-    except (OSError, ValueError, subprocess.SubprocessError):
+        if mode == 'intel_xpu':
+            device = str(hw.get('intel_device', 0))
+            # Query actual board size once; do not use marketed capacity as a measurement.
+            total = cfg.get('_intel_total_mib')
+            if total is None:
+                out = subprocess.check_output(['xpu-smi', 'discovery', '-d', device], text=True, timeout=10, stderr=subprocess.DEVNULL)
+                if not re.search(hw['device_regex'], out, re.I):
+                    return None
+                match = re.search(r'Memory Physical Size\s*[:|]\s*([\d.]+)\s*MiB', out, re.I)
+                if not match:
+                    return None
+                total = cfg['_intel_total_mib'] = float(match[1])
+            out = subprocess.check_output(['xpu-smi', 'dump', '-d', device, '-m', '18', '-n', '1'], text=True, timeout=10, stderr=subprocess.DEVNULL)
+            used = intel_memory_used(out)
+            if used is not None and 0 <= used <= total:
+                return total - used
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError):
         pass
     return None
 
@@ -113,21 +171,31 @@ def prompt_messages(count, fraction, seed):
     return [{'role': 'user', 'content': text}], code
 
 
-def sized_prompt(base, key, ctx, fraction, seed):
-    target = int(ctx * .90)
+def output_budget(ctx):
+    # Reserve reasoning/output capacity without filling the whole window.
+    return min(4096, max(512, ctx // 4 - 128))
+
+
+def prompt_target(ctx, budget):
+    return min(int(ctx * .90), ctx - budget - 128)
+
+
+def sized_prompt(base, key, ctx, fraction, seed, budget=None, test_request=None):
+    budget = output_budget(ctx) if budget is None else budget
+    target = prompt_target(ctx, budget)
     count = max(10, target // 25)
     for _ in range(5):
         messages, code = prompt_messages(count, fraction, seed)
-        prompt = api(base + '/apply-template', key, {'messages': messages}, 60)['prompt']
+        prompt = api(base + '/apply-template', key, {'messages': messages, **(test_request or {})}, 60)['prompt']
         n = len(api(base + '/tokenize', key, {'content': prompt, 'add_special': True, 'parse_special': True}, 60)['tokens'])
-        if target * .97 <= n <= target * 1.02 and n + 512 < ctx:
+        if target * .97 <= n <= target * 1.02 and n + budget < ctx:
             return messages, code, n
         count = max(1, int(count * target / max(n, 1)))
     fail('Could not create a correctly sized prompt.')
 
 
-def stream_chat(base, key, alias, messages, timeout):
-    req = urllib.request.Request(base + '/v1/chat/completions', headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}, data=json.dumps({'model': alias, 'messages': messages, 'max_tokens': 512, 'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}, 'cache_prompt': False}).encode())
+def stream_chat(base, key, alias, messages, timeout, budget=4096, test_request=None):
+    req = urllib.request.Request(base + '/v1/chat/completions', headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}, data=json.dumps({'model': alias, 'messages': messages, 'max_tokens': budget, 'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}, 'cache_prompt': False, **(test_request or {})}).encode())
     start = time.monotonic()
     first = None
     content, timings, usage = [], {}, {}
@@ -149,7 +217,7 @@ def stream_chat(base, key, alias, messages, timeout):
             usage = d.get('usage') or usage
             for c in d.get('choices', []):
                 delta = c.get('delta', {})
-                if delta.get('content') or delta.get('reasoning_content'):
+                if delta.get('content'):
                     if first is None:
                         first = time.monotonic() - start
                     content.append(delta.get('content') or '')
@@ -159,7 +227,8 @@ def stream_chat(base, key, alias, messages, timeout):
 
 
 def trial_pass(trial, ctx, cfg):
-    return (trial['correct'] and .85 * ctx <= trial['prompt_tokens'] <= .95 * ctx
+    target = trial.get('target_tokens', int(ctx * .90))
+    return (trial['correct'] and .95 * target <= trial['prompt_tokens'] <= min(.95 * ctx, 1.05 * target)
             and trial['prompt_tokens'] + trial['completion_tokens'] <= ctx
             and trial['processed_tokens'] >= .95 * trial['prompt_tokens']
             and trial['completion_tokens'] >= 16 and trial['generation_tps'] >= cfg['min_generation_tps']
@@ -169,23 +238,29 @@ def trial_pass(trial, ctx, cfg):
 def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, records, reportdir):
     label = f'{ctx}-{cache_k}-{cache_v}-{flash}'
     log = reportdir / (label + '.log')
+    native_log = reportdir / (label + '-native.log')
     result = {'context': ctx, 'cache_type_k': cache_k, 'cache_type_v': cache_v, 'flash_attention': flash,
-              'passed': False, 'trials': [], 'log': log.name}
+              'passed': False, 'trials': [], 'log': log.name, 'native_log': native_log.name, 'parallel': slot_count(spec)}
     # Reserve an ephemeral loopback port; API key protects the brief test server.
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]
     key = 'sk-' + secrets.token_urlsafe(32)
     server = cluster.locate(cluster.runtime, 'llama-server')
     tuned = dict(spec, context=ctx, cache_type_k=cache_k, cache_type_v=cache_v, flash_attention=flash)
-    cmd = model_command(server, folder, records, alias, tuned, port)
+    cmd = model_command(server, folder, records, alias, tuned, port) + ['--log-file', str(native_log)]
     # Pass key via environment, not report or process arguments.
     env = dict(cluster.runtime_env(), LLAMA_API_KEY=key)
     base = f'http://127.0.0.1:{port}'
     say(f'CALIBRATE {alias} {ctx} {cache_k}/{cache_v}')
     baseline = meminfo()
     free = gpu_free(cluster.a.node, cfg)
+    result['baseline'] = dict(baseline, gpu_free_mib=free, telemetry=cfg.get('hardware', {}).get('telemetry'))
+    say(f'BASELINE: host available={baseline["host_free_mib"]:.0f} MiB; GPU/GTT free={free} MiB; telemetry={result["baseline"]["telemetry"]}')
     if free is None or free < cfg['min_gpu_free_mib'] or baseline['host_free_mib'] < cfg['min_host_free_gib'] * 1024:
-        result['error'] = 'Missing GPU telemetry or insufficient baseline memory headroom; no load attempted'
+        result['error'] = ('GPU telemetry unavailable' if free is None else 'Insufficient GPU/GTT headroom' if free < cfg['min_gpu_free_mib'] else 'Insufficient host memory headroom') + '; no load attempted'
+        if free is None and cfg.get('hardware', {}).get('telemetry') == 'amd_gtt':
+            result['telemetry_paths'] = [str(p) for p in Path('/sys/class/drm').glob('card*/device/mem_info_gtt_*')]
+            say('AMD GTT paths: ' + str(result['telemetry_paths']))
         say('FAIL: ' + result['error'])
         return result
     with log.open('w') as f:
@@ -211,42 +286,81 @@ def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, r
             if ctx > native:
                 fail('Candidate exceeds model native context')
             props = api(base + '/props', key, timeout=10)
-            actual_ctx = int(props['default_generation_settings']['n_ctx'])
-            result['actual_context'] = actual_ctx
-            if actual_ctx != ctx:
-                fail(f'Actual context {actual_ctx} differs from requested {ctx}')
-            logtext = log.read_text(errors='replace')
-            hits = re.findall(r'offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+GPU', logtext, re.I)
-            if not hits:
-                fail('No GPU offload evidence')
-            off, total = map(int, hits[-1]); result['gpu_layers'] = [off, total]
-            if not total or off / total < float(spec.get('min_gpu_fraction', 1.0)):
+            slots = api(base + '/slots', key, timeout=10)
+            parallel = slot_count(spec)
+            actual_contexts = [int(slot['n_ctx']) for slot in slots]
+            result['actual_contexts'] = actual_contexts
+            if len(slots) != parallel or any(n != ctx for n in actual_contexts):
+                fail(f'Actual slot contexts {actual_contexts} differ from requested {parallel} × {ctx}')
+            # Native logging is asynchronous; wait briefly for startup messages to flush.
+            for _ in range(10):
+                logtext = (native_log.read_text(errors='replace') if native_log.is_file() else '') + '\n' + log.read_text(errors='replace')
+                counts = offload_counts(logtext)
+                if counts:
+                    break
+                if proc.poll() is not None or mon.error:
+                    break
+                time.sleep(.5)
+            if not counts:
+                fail('No GPU offload evidence in ' + str(log))
+            off, total = counts; result['gpu_layers'] = [off, total]
+            if not 0 < off <= total or off / total < float(spec.get('min_gpu_fraction', 1.0)):
                 fail('GPU offload below profile threshold')
             # Verify the cache precision was actually used (not silently overridden).
             cache_hits = re.findall(r'\b([KV])\s*\(([^)]+)\)', logtext)
             result['cache_log_types'] = cache_hits
             if ('K', cache_k) not in cache_hits or ('V', cache_v) not in cache_hits:
                 fail('Requested KV cache precision not confirmed by runtime log')
+            budget = output_budget(ctx)
+            test_request = spec.get('test_request', {})
+            result['output_budget'] = budget
+            result['target_tokens'] = prompt_target(ctx, budget)
+            result['test_request'] = test_request
+            # Fill every configured slot concurrently, with independent needles.
+            # Monitor /slots so sequential queueing cannot masquerade as parallel success.
             for i in range(int(cfg['trials'])):
                 if mon.error:
                     fail(mon.error)
-                fraction = (.1, .5, .9)[i % 3]
-                messages, code, expected_n = sized_prompt(base, key, ctx, fraction, 1024 + i + ctx)
-                content, timing, usage, ttft = stream_chat(base, key, alias, messages, cfg['request_timeout_seconds'])
-                trial = {'position': fraction, 'correct': content.strip().split('\n', 1)[0].strip() == code,
-                         'tokenizer_count': expected_n, 'prompt_tokens': int(usage['prompt_tokens']),
-                         'completion_tokens': int(usage['completion_tokens']), 'processed_tokens': int(timing['prompt_n']),
-                         'prompt_tps': float(timing['prompt_per_second']), 'generation_tps': float(timing['predicted_per_second']),
-                         'ttft_seconds': round(ttft, 3)}
-                trial['passed'] = trial_pass(trial, ctx, cfg)
-                result['trials'].append(trial)
-                say(str(trial))
+                batch = []
+                for j in range(parallel):
+                    fraction = (.1, .5, .9)[(i + j) % 3]
+                    messages, code, expected_n = sized_prompt(base, key, ctx, fraction, 1024 + i * parallel + j + ctx, budget, test_request)
+                    batch.append((fraction, messages, code, expected_n))
+                def execute(item):
+                    fraction, messages, code, expected_n = item
+                    content, timing, usage, ttft = stream_chat(base, key, alias, messages, cfg['request_timeout_seconds'], budget, test_request)
+                    trial = {'position': fraction, 'correct': content.strip().split('\n', 1)[0].strip() == code,
+                             'tokenizer_count': expected_n, 'target_tokens': prompt_target(ctx, budget), 'prompt_tokens': int(usage['prompt_tokens']),
+                             'completion_tokens': int(usage['completion_tokens']), 'processed_tokens': int(timing['prompt_n']),
+                             'prompt_tps': float(timing['prompt_per_second']), 'generation_tps': float(timing['predicted_per_second']),
+                             'ttft_seconds': round(ttft, 3)}
+                    trial['passed'] = trial_pass(trial, ctx, cfg)
+                    return trial
+                with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
+                    futures = [pool.submit(execute, item) for item in batch]
+                    peak = 0
+                    while not all(f.done() for f in futures):
+                        if parallel > 1:
+                            try:
+                                states = api(base + '/slots', key, timeout=3)
+                                peak = max(peak, sum(bool(slot['is_processing']) for slot in states))
+                            except (OSError, ValueError, KeyError):
+                                pass
+                        time.sleep(.2)
+                    for f in futures:
+                        trial = f.result()
+                        result['trials'].append(trial)
+                        say(str(trial))
+                    if parallel > 1 and peak < parallel:
+                        fail(f'Observed only {peak}/{parallel} concurrent slots; no parallel recommendation')
             if not all(t['passed'] for t in result['trials']):
                 fail('Retrieval, context fill, latency or throughput threshold not met')
+        except urllib.error.HTTPError as e:
+            result['error'] = f'HTTP {e.code}: {http_error_detail(e, key)}'
         except (RuntimeError, OSError, ValueError, KeyError, IndexError, TypeError) as e:
             result['error'] = str(e)
         finally:
-            mon.done.set(); mon.thread.join(timeout=7)
+            mon.done.set(); mon.thread.join(timeout=25)
             result['memory'] = mon.summary()
             if proc.poll() is None:
                 proc.terminate()
@@ -262,17 +376,30 @@ def candidate(cluster, alias, spec, ctx, cache_k, cache_v, flash, cfg, folder, r
                 result['error'] = 'Memory safety threshold not met'
             else:
                 result['passed'] = True
+    if not result['passed']:
+        # Keep the full per-candidate log on disk and surface a short bounded tail.
+        if log.exists():
+            text = (native_log.read_text(errors='replace') if native_log.is_file() else '') + '\n' + log.read_text(errors='replace')
+            lines = text.replace(key, '[REDACTED]').splitlines()
+            result['log_tail'] = '\n'.join(lines[-20:])[-5000:]
+            say('Model log: ' + str(log))
+            if result['log_tail']:
+                say(result['log_tail'])
     say('PASS' if result['passed'] else 'FAIL: ' + result.get('error', 'unknown'))
     return result
 
 
-def choose(results):
-    """Largest passing context; prefer higher precision at equal capacity."""
+def choose(results, target=None):
+    """Prefer highest precision meeting target; otherwise largest passing context."""
     precision = {'f16': 3, 'q8_0': 2, 'q4_0': 1}
     good = [r for r in results if r['passed']]
     if not good:
         return None
-    r = max(good, key=lambda x: (x['context'], precision.get(x['cache_type_k'], 0)))
+    reached = [r for r in good if target is not None and r['context'] >= target]
+    if reached:
+        r = max(reached, key=lambda x: (min(precision.get(x['cache_type_k'], 0), precision.get(x['cache_type_v'], 0)), -x['context']))
+    else:
+        r = max(good, key=lambda x: (x['context'], min(precision.get(x['cache_type_k'], 0), precision.get(x['cache_type_v'], 0))))
     return {k: r[k] for k in ('context', 'cache_type_k', 'cache_type_v', 'flash_attention')}
 
 
@@ -305,7 +432,7 @@ def calibrate_cluster(c, migration=False):
     if c.role != 'worker':
         fail('Calibration requires a managed llama.cpp worker; Mac and edge vendor runtimes are not supported')
     c.prepare(); c.service_owned()
-    cfg = c.c['calibration']
+    cfg = dict(c.c['calibration'], hardware=c.c['hardware'])
     if not 3 <= int(cfg['trials']) <= 9:
         fail('Calibration trials must be 3–9')
     if cfg['min_host_free_gib'] < 2 or cfg['min_gpu_free_mib'] < 256:
@@ -340,18 +467,18 @@ def calibrate_cluster(c, migration=False):
                 atomic(reportdir / 'report.json', json.dumps(report, indent=2))
                 return r
             if migration:
-                r = test(int(spec['context']), spec.get('cache_type_k', 'f16'), spec.get('cache_type_v', 'f16'), spec.get('flash_attention', 'auto'))
+                r = test(int(spec['context']), spec.get('cache_type_k', 'f16'), spec.get('cache_type_v', 'f16'), flash_mode(spec.get('flash_attention', 'auto')))
                 if not r['passed']:
                     fail('Migration context check failed; old assets retained. Report: ' + str(reportdir))
             else:
                 native = None
                 goal = int(spec.get('target_context', spec['context']))
-                contexts = sorted(set(map(int, cfg['contexts'])) | {int(spec['context']), goal})
+                contexts = sorted(x for x in set(map(int, cfg['contexts'])) | {int(spec['context']), goal} if x <= goal)
                 types = [c.a.cache_type] if c.a.cache_type else cfg['cache_types']
-                # Test Q8 first; F16 for comparison or fallback, Q4 only if goal not met.
+                # Stop at target. Try precision in descending order, then fall back.
                 for cache in types:
-                    if cache == 'q4_0' and not c.a.cache_type and any(r['passed'] and r['context'] >= goal for r in results):
-                        continue
+                    if not c.a.cache_type and any(r['passed'] and r['context'] >= goal for r in results):
+                        break
                     for ctx in contexts:
                         if ctx < 4096 or (native is not None and ctx > native):
                             continue
@@ -360,7 +487,7 @@ def calibrate_cluster(c, migration=False):
                         if not r['passed']:
                             # Do not stress larger contexts after memory, load or quality failure.
                             break
-                rec = choose(results)
+                rec = choose(results, goal)
                 if rec:
                     recommendations[alias] = rec
                     report['recommendation'] = rec

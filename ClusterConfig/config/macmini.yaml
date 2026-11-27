@@ -1,7 +1,7 @@
 # M4 / 16 GB. Gateway routes are derived from enabled worker profiles.
 node: macmini
 role: gateway
-bind: localhost  # set to a trusted LAN/tailnet interface for remote access
+bind: tailnet  # encrypted cluster traffic
 port: 4001
 nodes:
   gmini: {enabled: true, url: 'http://gmini:8081/v1'}
@@ -20,3 +20,5 @@ local_models:
 # Optional short aliases map to one explicit route. No implicit cross-server fallback.
 aliases: {}
 legacy_launch_agent: local.litellm
+
+prune_native_models: true

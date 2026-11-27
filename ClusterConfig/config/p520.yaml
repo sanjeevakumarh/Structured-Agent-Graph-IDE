@@ -3,12 +3,13 @@ node: p520
 role: worker
 hardware:
   vendor: "0x8086"
+  pci_device: "0xe223"
   device_regex: "Intel|BMG|Arc"
   backends: [vulkan, sycl]
   telemetry: intel_xpu
   intel_device: 0
 backend: vulkan                       # sycl = benchmark candidate; requires compatible oneAPI libs
-bind: localhost                       # use tailnet for encrypted remote access (or local-only)
+bind: tailnet                       # encrypted cluster traffic
 port: 8081
 legacy_service: llama-swap.service
 migration_hostnames: []  # optional exact hostname allowlist; empty permits any matching hardware
@@ -54,28 +55,14 @@ models:
     cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
-  p520/gemma-4-26b-a4b-ud-q4_k_xl:
-    # Optional: verify projector compatibility and exact file at the pinned revision.
-    source:
-      repo: unsloth/gemma-4-26B-A4B-it-GGUF
-      revision: 4778d63c081b7500e303153d00883d5109ca12c0
-      files: [gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf, mmproj-F16.gguf]
-      reuse: ~/models/gemma-4-26B-A4B-it-GGUF
-    parallel: 1
-    tool_test: true
-    test_request: {}
-    context: 16384
-    target_context: 32768  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # safe starting value; calibrate to tune
-    cache_type_v: f16
-    flash_attention: auto
-    enabled: false
 
-# Preserve optional vision weights/projectors; retire superseded text models.
+# Seed cleanup: dedicated inventoried inference paths, never OS drivers.
 legacy_cleanup:
-  runtime_dirs: [~/llama-vulkan]
-  model_files:
-    - ~/models/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
-    - ~/models/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf
-    - ~/models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
-    - ~/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q5_K_M.gguf
+  services: [ollama.service, llama-swap.service]
+  directories:
+    - ~/models
+    - ~/llama-vulkan
+    - /usr/share/ollama/.ollama/models
+    - /usr/local/lib/ollama
+  files: [/usr/local/bin/ollama, /usr/local/bin/llama-swap, ~/llama-swap.yaml]
+disable_swap_monitor: true  # v277 chooses NVIDIA monitor on this Intel node

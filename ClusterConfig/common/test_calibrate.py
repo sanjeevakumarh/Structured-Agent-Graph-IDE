@@ -135,7 +135,7 @@ class CalibrationTests(unittest.TestCase):
     def test_missing_telemetry_prevents_load(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
-            c = SimpleNamespace(a=SimpleNamespace(node='p520'),runtime=p,locate=lambda *a:p/'server',runtime_env=lambda:{})
+            c = SimpleNamespace(a=SimpleNamespace(dry_run=True,node='p520'),runtime=p,locate=lambda *a:p/'server',runtime_env=lambda:{})
             with patch.object(cal,'meminfo',return_value={'host_free_mib':32768}),patch.object(cal,'gpu_free',return_value=None),patch.object(cal.subprocess,'Popen') as popen:
                 res = cal.candidate(c,'p520/model',{'context':8192},8192,'f16','f16','auto',self.cfg,p,[{'name':'model.gguf'}],p)
             self.assertFalse(res['passed']); popen.assert_not_called()
@@ -158,7 +158,7 @@ class CalibrationTests(unittest.TestCase):
     def test_baseline_error_reports_host_and_gpu_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
-            c = SimpleNamespace(a=SimpleNamespace(node='gmini'),runtime=p,locate=lambda *a:p/'server',runtime_env=lambda:{})
+            c = SimpleNamespace(a=SimpleNamespace(dry_run=True,node='gmini'),runtime=p,locate=lambda *a:p/'server',runtime_env=lambda:{})
             for free, host, expected in ((None, 32768, 'GPU telemetry unavailable'), (500, 32768, 'Insufficient GPU/GTT headroom'), (32768, 500, 'Insufficient host memory headroom')):
                 with patch.object(cal,'meminfo',return_value={'host_free_mib':host}),patch.object(cal,'gpu_free',return_value=free),patch.object(cal.subprocess,'Popen') as popen:
                     res = cal.candidate(c,'gmini/model',{'context':8192},8192,'f16','f16','auto',self.cfg,p,[{'name':'model.gguf'}],p)
@@ -166,20 +166,8 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual(res['baseline']['gpu_free_mib'],free)
                 popen.assert_not_called()
 
-    def test_migration_calibration_failure_retains_legacy(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(m.Path,'home',return_value=Path(tmp)):
-            c = m.Cluster(SimpleNamespace(node='gmini',backend=None,yes=True,reclaim_first=False,prune=False,model=None))
-            for method in ['prepare','key','install_worker','sync','start','stop','smoke_all','retire_files','retire_ollama','retire_runtimes','cleanup']:
-                setattr(c,method,MagicMock())
-            c.c['legacy_cleanup'] = {}
-            c.legacy_active = MagicMock(return_value=True)
-            c.service_active = MagicMock(return_value=True)
-            c.calibrate = MagicMock(side_effect=RuntimeError('context failed'))
-            with patch.object(m.socket,'gethostname',return_value='gmini'),patch.object(m,'run') as run,contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaisesRegex(RuntimeError,'context failed'):
-                    c.migrate()
-                run.assert_any_call('sudo','systemctl','start','ollama.service')
-            c.retire_files.assert_not_called(); c.retire_ollama.assert_not_called(); c.retire_runtimes.assert_not_called()
+    def test_context_calibration_never_recommends_failed_candidate(self):
+        self.assertIsNone(cal.choose([{'context':32768,'cache_type_k':'f16','cache_type_v':'f16','passed':False}],32768))
 
 
 if __name__ == '__main__':

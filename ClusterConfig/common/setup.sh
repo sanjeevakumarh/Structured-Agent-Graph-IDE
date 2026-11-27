@@ -3,6 +3,7 @@
 # No GPU packages or application services are installed by this launcher.
 # If neither option is present, install a current Python + PyYAML (Linux) or uv.
 set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 [[ $(id -u) != 0 ]] || { echo 'Run as your normal login user, not root.' >&2; exit 1; }
 if command -v python3 >/dev/null && python3 -c 'import yaml, tarfile; assert hasattr(tarfile, "data_filter")' >/dev/null 2>&1; then

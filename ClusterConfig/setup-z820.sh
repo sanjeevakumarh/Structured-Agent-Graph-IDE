@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# setup-z820.sh — reconcile the z820 profile in config/z820.yaml.
-# Edit that YAML for models, endpoints and backend; versions in config/versions.yaml.
-# Run with --help for actions; --dry-run previews; --models syncs; --cleanup prunes
-# obsolete owned artifacts; --reset rebuilds runtime without deleting weights.
-# Run as normal login user, not root. Sudo is only used for managed Linux services.
-# --calibrate measures context/cache; --apply edits YAML; deploy separately.
-# Setup auto-migrates legacy services; listed old assets retire after inference tests.
-# Calibration/benchmark temporarily pause known GPU services and restore them.
-# OS drivers, partitions, unrelated files and edge vendor services are preserved.
+# Seed/reconcile z820 using config/z820.yaml and config/versions.yaml.
+# Default: delete old inference assets, deploy the YAML catalog and validate.
+# --dry-run previews; --models syncs; --health/--validate check inference.
+# --calibrate/--benchmark measure performance; --help lists available actions.
+# No rollback. Run as normal login user. OS drivers and unrelated files stay.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 exec bash "$HERE/common/setup.sh" z820 "$@"

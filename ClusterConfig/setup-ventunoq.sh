@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# setup-ventunoq.sh — reconcile GenieX on vendor Linux using config/ventunoq.yaml.
-# Default/--models installs missing runtime/models and validates real inference.
-# --models --prune / --cleanup removes obsolete adopted or listed tags.
-# --validate, --benchmark and --health test the existing runtime.
-# Run as normal login user; --help lists options. Vendor drivers stay intact.
+# Seed/reconcile ventunoq using config/ventunoq.yaml and config/versions.yaml.
+# Default: delete old inference assets, deploy the YAML catalog and validate.
+# --dry-run previews; --models syncs; --health/--validate check inference.
+# --calibrate/--benchmark measure performance; --help lists available actions.
+# No rollback. Run as normal login user. OS drivers and unrelated files stay.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 exec bash "$HERE/common/setup.sh" ventunoq "$@"

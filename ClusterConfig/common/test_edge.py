@@ -17,7 +17,7 @@ class EdgeGatewayTests(unittest.TestCase):
     def tearDown(self):
         self.p.stop();self.tmp.cleanup()
     def cluster(self,node):
-        c=m.Cluster(SimpleNamespace(node=node,backend=None,yes=True,model=None,action='install',prune=False,apply=False,cache_type=None))
+        c=m.Cluster(SimpleNamespace(dry_run=True,node=node,backend=None,yes=True,model=None,action='install',prune=False,apply=False,cache_type=None))
         c.host_check=lambda:None
         c.prepare();return c
     def test_nano_requires_generation_and_gpu(self):
@@ -45,7 +45,7 @@ class EdgeGatewayTests(unittest.TestCase):
 
     def test_session_releases_previous_model_before_request(self):
         e=edge.Edge(self.cluster('nano'));spec=next(iter(e.models.values()))
-        old=e.spec['edge_models']['nano/gemma4-e2b-q4_k_m']['id']
+        old='gemma4:e2b-it-q4_K_M';e.record({old})
         order=[]
         def unload(m): order.append(('unload',m['id']))
         with patch.object(e,'loaded_ids',side_effect=[{old},set()]),patch.object(e,'unload',side_effect=unload):
@@ -65,12 +65,11 @@ class EdgeGatewayTests(unittest.TestCase):
                 with e.model_session(spec): self.fail('should not enter session')
             unload.assert_not_called()
 
-    def test_disabled_nano_model_retains_weights(self):
-        e=edge.Edge(self.cluster('nano'));gemma=e.spec['edge_models']['nano/gemma4-e2b-q4_k_m']['id']
-        self.assertNotIn(gemma,e.wanted()); e.record(e.wanted()|{gemma})
-        with patch.object(e,'ids',return_value=e.wanted()|{gemma}),patch.object(edge,'run') as run:
-            e.cleanup(validated=True); run.assert_not_called()
-        self.assertIn(gemma,e.previous())
+    def test_seed_removes_unused_nano_weights(self):
+        e=edge.Edge(self.cluster('nano'));gemma='gemma4:e2b-it-q4_K_M'
+        with patch.object(e,'ids',side_effect=[e.wanted()|{gemma},e.wanted()]),patch.object(e,'unload') as unload,patch.object(e,'cli',return_value='ollama'),patch.object(edge,'run') as run:
+            e.cleanup(validated=True);unload.assert_called_once_with({'id':gemma});self.assertEqual(run.call_args.args,('ollama','rm',gemma))
+        self.assertNotIn(gemma,e.previous())
 
     def test_geniex_completion_not_listing(self):
         e=edge.Edge(self.cluster('ventunoq')); spec=next(iter(e.models.values()))
@@ -79,16 +78,17 @@ class EdgeGatewayTests(unittest.TestCase):
             self.assertTrue(api.call_args.args[0].endswith('/v1/chat/completions'))
         with patch.object(edge,'api',return_value={'data':[{'id':spec['id']}]}):
             with self.assertRaisesRegex(RuntimeError,'no completion'):e.request(spec,'test')
-    def test_edge_setup_validates_before_prune(self):
+    def test_edge_seed_prunes_before_validation(self):
         e=edge.Edge(self.cluster('nano'))
         with patch.object(e,'install_missing'),patch.object(e,'configure_ollama'),patch.object(e,'wait'),patch.object(e,'ids',return_value=e.wanted()),patch.object(e,'validate',side_effect=RuntimeError('failed inference')),patch.object(e,'cleanup') as cleanup:
             with self.assertRaisesRegex(RuntimeError,'failed inference'):e.sync(prune=True)
-            cleanup.assert_not_called()
-    def test_cleanup_only_adopted_or_explicit_tags(self):
+            cleanup.assert_called_once_with(validated=True)
+
+    def test_cleanup_removes_all_unconfigured_native_tags(self):
         e=edge.Edge(self.cluster('nano'));e.record(e.wanted()|{'old:1'})
-        with patch.object(e,'ids',side_effect=[e.wanted()|{'old:1','other:1'},e.wanted()|{'other:1'}]),patch.object(e,'validate'),patch.object(e,'cli',return_value='ollama'),patch.object(edge,'run') as run:
-            e.cleanup();self.assertEqual(run.call_args.args,('ollama','rm','old:1'))
-            self.assertEqual(e.previous(),e.wanted())
+        with patch.object(e,'ids',side_effect=[e.wanted()|{'old:1','other:1'},e.wanted()]),patch.object(e,'unload'),patch.object(e,'cli',return_value='ollama'),patch.object(edge,'run') as run:
+            e.cleanup();self.assertEqual({x.args[-1] for x in run.call_args_list},{'old:1','other:1'});self.assertEqual(e.previous(),e.wanted())
+
     def test_context_reports_individual_failure_reasons(self):
         cfg={'min_generation_tps':3,'min_host_free_mib':512,'max_request_seconds':300}
         before={'swapout_pages':10}; after={'host_free_mib':1024,'swapout_pages':10}
@@ -97,14 +97,11 @@ class EdgeGatewayTests(unittest.TestCase):
         bad=dict(good,prompt_tokens=200,text='wrong',context_allocated=1024,cached_prompt_tokens=199)
         self.assertEqual(set(edge.context_checks(bad,'CODE',2048,cfg,before,after)),{'prompt_fill','retrieval','allocated_context','uncached_prompt'})
 
-    def test_disabled_geniex_model_retained_even_if_previously_adopted(self):
-        e=edge.Edge(self.cluster('ventunoq'))
-        disabled=e.spec['edge_models']['ventunoq/gemma4-e2b-q4_0']['id']
-        self.assertNotIn(disabled,e.wanted())
-        e.record(e.wanted()|{disabled})
-        with patch.object(e,'ids',return_value=e.wanted()|{disabled}),patch.object(edge,'run') as run:
-            e.cleanup(validated=True); run.assert_not_called()
-        self.assertIn(disabled,e.previous())
+    def test_seed_removes_unused_geniex_model(self):
+        e=edge.Edge(self.cluster('ventunoq'));old='google/gemma-4-E2B-it-qat-q4_0-gguf:Q4_0';e.record(e.wanted()|{old})
+        with patch.object(e,'ids',side_effect=[e.wanted()|{old},e.wanted()]),patch.object(e,'cli',return_value='geniex'),patch.object(edge,'run') as run:
+            e.cleanup(validated=True);self.assertEqual(run.call_args.args,('geniex','remove',old))
+        self.assertNotIn(old,e.previous())
 
     def test_geniex_calibrate_benchmarks_fixed_bundle(self):
         e=edge.Edge(self.cluster('ventunoq'))

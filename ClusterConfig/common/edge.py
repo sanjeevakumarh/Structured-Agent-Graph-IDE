@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Manage edge inference with native Ollama or GenieX, not a new daemon.
-Edit config/nano.yaml or config/ventunoq.yaml. Setup syncs and tests desired
-models; --cleanup / --models --prune retire previously adopted or explicitly
-listed models after validation. Existing vendor services are reused. Reports
-are local. Nano validation, benchmarks and calibration isolate model sessions,
-wait for native unload, and preserve disabled models. Edit the YAML to enable
-optional models after checking runtime compatibility.
+"""Manage edge inference with native Ollama or GenieX.
+Edit the node YAML. Seed deletes unconfigured model tags via native CLI, then
+validates inference. Vendor drivers/runtime remain. No legacy rollback.
+Nano tests isolate runner sessions and wait for native unload. Reports are local.
 """
 import json
 import os
@@ -210,6 +207,8 @@ class Edge:
         self.install_missing()
         (self.configure_ollama if self.runtime == 'ollama' else self.configure_geniex)()
         self.wait()
+        if self.spec.get('prune_native_models'):
+            self.cleanup(validated=True)
         existing = self.ids()
         for alias, spec in self.models.items():
             model = spec['id']
@@ -220,10 +219,10 @@ class Edge:
         if missing:
             fail(f'Models not advertised after pull: {sorted(missing)}. CLI and server may use different stores.')
         self.validate(all_models=True)
-        if prune:
+        if prune and not self.spec.get('prune_native_models'):
             self.cleanup(validated=True)
         else:
-            self.record(self.previous() | self.wanted())
+            self.record(self.wanted())
         say('Edge setup complete: configured models passed actual inference.')
 
     def wanted(self):
@@ -239,18 +238,18 @@ class Edge:
         # Only explicitly adopted or listed legacy tags; never rm arbitrary directories.
         retained = {m['id'] for m in self.spec['edge_models'].values()}
         explicit = set(self.spec.get('retire_models', [])) - self.wanted()
-        old = (((self.previous() - retained) | explicit) & self.ids())
+        old = (self.ids() - self.wanted()) if self.spec.get('prune_native_models') else (((self.previous() - retained) | explicit) & self.ids())
         if not old:
             if validated:
-                self.record(self.previous() | self.wanted())
+                self.record(self.wanted() if self.spec.get('prune_native_models') else self.previous() | self.wanted())
             say('No obsolete adopted or explicitly listed edge models.'); return
-        if not validated:
+        if not validated and not self.spec.get('prune_native_models'):
             self.validate(all_models=True)
         say('REMOVE ' + ', '.join(sorted(old)))
-        confirm('Remove these obsolete model tags using the native runtime?', self.a.yes)
+        if not validated: confirm('Remove these obsolete model tags using the native runtime?', self.a.yes)
         for model in sorted(old):
             if self.runtime == 'ollama':
-                run(self.cli(), 'stop', model, check=False, env=self.env)
+                self.unload({'id':model})
                 run(self.cli(), 'rm', model, env=self.env)
             else:
                 run(self.cli(), 'remove', model, env=self.env)
@@ -368,7 +367,7 @@ class Edge:
                         pass
         self.report('validation', rows)
         if not all(r['passed'] for r in rows):
-            fail('One or more configured edge models failed inference; no model cleanup performed.')
+            fail('One or more configured edge models failed inference; seed incomplete; no rollback.')
         if self.runtime == 'geniex': say('Text inference verified; NPU placement not independently verified on the existing service.')
 
     def health(self):
@@ -431,6 +430,7 @@ class Edge:
                             count=max(10,int(ctx*.77/24))
                             # A short answer is enough to verify retrieval; reserve room for reasoning.
                             budget=min(512, max(128,ctx//8))
+                            previous_tokens = None
                             for attempt in range(5):
                                 messages,code=prompt_messages(count,depth,time.time_ns())
                                 prompt=messages[0]['content'].replace('alone on the first line, then explain in about 100 words how you found it.', 'alone. No explanation.')
@@ -441,10 +441,15 @@ class Edge:
                                 say(f'  measured tokens={n}, allocated={r.get("context_allocated")}, generation={r["generation_tps"]:.2f} t/s, seconds={r["seconds"]:.1f}')
                                 worst = {'host_free_mib':min(x['host_free_mib'] for x in samples),
                                          'swapout_pages':max(x['swapout_pages'] for x in samples)}
-                                if errors or worst['host_free_mib'] < cfg['min_host_free_mib'] or worst['swapout_pages'] > before['swapout_pages']:
-                                    fail('Memory safety threshold crossed or memory sampling failed')
+                                if errors: fail('Memory telemetry error: ' + '; '.join(errors))
+                                if worst['host_free_mib'] < cfg['min_host_free_mib']: fail(f'Host available memory {worst["host_free_mib"]:.0f} MiB below floor {cfg["min_host_free_mib"]} MiB')
+                                if worst['swapout_pages'] > before['swapout_pages']: fail(f'Swap-out increased by {worst["swapout_pages"]-before["swapout_pages"]} pages')
                                 if ctx*.70 <= n <= ctx*.85: break
                                 if not n: break
+                                if previous_tokens == n:
+                                    say('  Prompt token count did not increase; possible truncation/accounting limit. Rejecting this fill target.')
+                                    break
+                                previous_tokens = n
                                 # Even a truncated count near the context cap must shrink and retry.
                                 adjusted=max(1,int(count*ctx*.77/n))
                                 if adjusted==count: adjusted += 1 if n < ctx*.70 else -1
@@ -492,8 +497,8 @@ class Edge:
         elif action=='validate': self.validate()
         elif action=='benchmark': self.benchmark()
         elif action=='calibrate': self.calibrate()
-        elif action in ('install','models','migrate'):
-            self.c.plan(); confirm('Apply edge model/runtime configuration?', self.a.yes)
+        elif action in ('install','models','migrate','seed'):
+            self.c.plan(); confirm('Reconcile edge runtime and delete all unconfigured native model tags?', self.a.yes)
             self.sync(prune=True)
         elif action=='cleanup': self.cleanup()
         elif action=='start': self.start()

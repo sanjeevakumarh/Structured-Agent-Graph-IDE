@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+import seed
 import manage as m
 
 
@@ -18,7 +19,7 @@ class SafetyTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.patch = patch.object(m.Path, 'home', return_value=self.home)
         self.patch.start()
-        self.args = SimpleNamespace(node='gmini', backend=None, yes=True, reclaim_first=False, prune=False, model=None)
+        self.args = SimpleNamespace(dry_run=True,node='gmini', action='install', backend=None, yes=True, reclaim_first=False, prune=False, model=None)
         self.c = m.Cluster(self.args)
         self.c.host_check = lambda: None
         self.c.prepare()
@@ -67,11 +68,10 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(config['logToStdout'], 'both')
         self.assertEqual(config['captureBuffer'], 0)
 
-    def test_disabled_model_cache_is_preserved(self):
-        disabled = next(v for v in self.c.c['models'].values() if not v.get('enabled', True))
-        path = self.c.models / m.model_id(disabled)
-        path.mkdir(); m.atomic(path / m.MARK, 'local-ai-cluster\n')
-        self.assertNotIn(path, self.c.obsolete())
+    def test_disabled_model_cache_is_obsolete(self):
+        alias=next(iter(self.c.desired)); spec=self.c.desired.pop(alias)
+        path=self.c.models / m.model_id(spec);path.mkdir();m.atomic(path/m.MARK,'local-ai-cluster\n')
+        self.assertIn(path,self.c.obsolete())
 
     def test_cleanup_refuses_active_and_preserves_unowned(self):
         old = self.c.models / 'old-managed'
@@ -123,31 +123,26 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(before, list(self.home.rglob('*')))
 
     def test_legacy_path_rejects_symlink_and_unrelated_files(self):
-        root = self.home / 'models'; root.mkdir()
-        good = root / 'old.gguf'; good.write_bytes(b'GGUF')
-        unrelated = self.home / 'notes.txt'; unrelated.write_text('keep')
-        link = root / 'link.gguf'; link.symlink_to(unrelated)
-        for path in (unrelated, link, self.home / 'models/../notes.gguf'):
-            with self.assertRaises(RuntimeError):
-                self.c.legacy_path(str(path))
-        self.assertEqual(self.c.legacy_path(str(good)), good)
+        root=self.home/'models';root.mkdir(); unrelated=self.home/'notes';unrelated.mkdir()
+        self.c.c['legacy_cleanup']={'directories':[str(unrelated)]}
+        with self.assertRaisesRegex(RuntimeError,'allowlist'):seed.cleanup_plan(self.c)
+        root.rmdir();root.symlink_to(unrelated,target_is_directory=True)
+        self.c.c['legacy_cleanup']={'directories':[str(root)]}
+        with self.assertRaisesRegex(RuntimeError,'Unsafe'):seed.cleanup_plan(self.c)
         self.assertTrue(unrelated.exists())
 
-    def test_migration_never_retires_when_smoke_fails(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.c['legacy_cleanup'] = {'model_files': [], 'runtime_dirs': [], 'ollama_tags': []}
-        c.install_worker = MagicMock(); c.sync = MagicMock(); c.key = MagicMock()
-        c.legacy_active = MagicMock(return_value=True)
-        c.service_active = MagicMock(return_value=True)
-        c.start = MagicMock(); c.stop = MagicMock()
-        c.smoke_all = MagicMock(side_effect=RuntimeError('smoke failed'))
-        c.retire_files = MagicMock(); c.retire_ollama = MagicMock(); c.retire_runtimes = MagicMock()
-        with patch.object(m.socket, 'gethostname', return_value='gmkmini'), patch.object(m, 'run') as run:
-            with self.assertRaisesRegex(RuntimeError, 'smoke failed'):
-                c.migrate()
-            run.assert_any_call('sudo', 'systemctl', 'start', 'ollama.service')
-        c.retire_files.assert_not_called(); c.retire_ollama.assert_not_called(); c.retire_runtimes.assert_not_called()
+    def test_seed_retires_before_failure_and_never_restores(self):
+        c=self.c;old=self.home/'models';old.mkdir();(old/'old.gguf').write_bytes(b'old')
+        c.c['legacy_cleanup']={'directories':[str(old)],'services':['ollama.service']}
+        c.key=MagicMock();c.stop=MagicMock();c.service_path=lambda:self.home/'missing.service'
+        c.sync_model=MagicMock();c.sync=MagicMock(side_effect=RuntimeError('smoke failed'))
+        m.atomic(c.native,'OLD CONFIG');m.atomic(c.active,'{}')
+        with patch.object(seed,'model_sources',return_value=[]),patch.object(seed,'retire_unit') as retire,patch.object(seed,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'smoke failed'): seed.deploy(c)
+            retire.assert_called_once_with('ollama.service')
+            self.assertFalse(old.exists());self.assertFalse(c.native.exists());self.assertFalse(c.active.exists())
+            self.assertFalse((c.cfg/'seed-complete.json').exists())
+            self.assertFalse(any('start' in call.args for call in run.call_args_list))
 
     def test_explicit_model_logging_and_offload_parser(self):
         cmd = m.model_command('/bin/server', Path('/models'), [{'name':'model.gguf'}], 'z820/model', {'context':8192}, 12345)
@@ -188,96 +183,51 @@ class SafetyTests(unittest.TestCase):
                 c.check_gpu_offload('2026-11-27 00:00:00',alias)
             run.assert_not_called()
 
-    def test_calibration_isolation_restores_old_service_on_interrupt(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.legacy_active = MagicMock(side_effect=[True, False])
-        c.service_active = MagicMock(side_effect=[False, False])
-        with patch.object(m, 'run') as run:
+    def test_calibration_isolation_resumes_only_managed_on_interrupt(self):
+        c=self.c;c.legacy_active=MagicMock(return_value=False);c.service_active=MagicMock(side_effect=[True,False]);c.stop=MagicMock()
+        with patch.object(m,'run') as run:
             with self.assertRaises(KeyboardInterrupt):
-                with c.isolated_gpu():
-                    raise KeyboardInterrupt()
-            self.assertEqual([x.args for x in run.call_args_list], [
-                ('sudo', 'systemctl', 'stop', 'ollama.service'),
-                ('sudo', 'systemctl', 'start', 'ollama.service')])
+                with c.isolated_gpu():raise KeyboardInterrupt()
+            c.stop.assert_called_once();run.assert_called_once_with('sudo','systemctl','start',m.SERVICE)
 
-    def test_isolation_restores_both_services_on_success(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.legacy_active = MagicMock(side_effect=[True, False])
-        c.service_active = MagicMock(side_effect=[True, False])
-        c.stop = MagicMock()
-        with patch.object(m, 'run') as run:
-            with c.isolated_gpu():
-                c.stop.assert_called_once()
-            run.assert_any_call('sudo', 'systemctl', 'start', m.SERVICE)
-            run.assert_any_call('sudo', 'systemctl', 'start', 'ollama.service')
+    def test_isolation_resumes_managed_on_success(self):
+        c=self.c;c.legacy_active=MagicMock(return_value=False);c.service_active=MagicMock(side_effect=[True,False]);c.stop=MagicMock()
+        with patch.object(m,'run') as run:
+            with c.isolated_gpu():pass
+            c.stop.assert_called_once();run.assert_called_once_with('sudo','systemctl','start',m.SERVICE)
 
     def test_isolation_refuses_to_benchmark_if_legacy_still_active(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.legacy_active = MagicMock(return_value=True)
-        c.service_active = MagicMock(return_value=False)
-        with patch.object(m, 'run') as run:
-            with self.assertRaisesRegex(RuntimeError, 'Could not isolate'):
-                with c.isolated_gpu():
-                    self.fail('GPU test must not start')
-            run.assert_any_call('sudo', 'systemctl', 'start', 'ollama.service')
+        c=self.c;c.legacy_active=MagicMock(return_value=True)
+        with patch.object(m,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'Legacy service is active'):
+                with c.isolated_gpu():self.fail('GPU test must not start')
+            run.assert_not_called()
 
-    def test_default_reconcile_automatically_migrates(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.migration_pending = MagicMock(return_value=True)
-        c.migrate = MagicMock(); c.sync = MagicMock()
-        c.reconcile()
-        c.migrate.assert_called_once_with(); c.sync.assert_not_called()
+    def test_default_reconcile_calls_seed(self):
+        with patch.object(seed,'deploy') as deploy:
+            self.c.reconcile();deploy.assert_called_once_with(self.c)
 
-    def test_migration_receipt_skips_disabled_legacy_but_not_reactivated(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.legacy_active = MagicMock(return_value=False)
-        c.legacy_exists = MagicMock(return_value=True)
-        self.assertTrue(c.migration_pending())
-        m.atomic(c.cfg / 'migration-complete.json', '{}')
-        self.assertFalse(c.migration_pending())
-        c.legacy_active.return_value = True
+    def test_seed_receipt_requires_new_seed_if_legacy_reactivated(self):
+        c=self.c;c.legacy_active=MagicMock(return_value=False)
+        self.assertTrue(c.migration_pending());m.atomic(c.cfg/'seed-complete.json','{}')
+        self.assertFalse(c.migration_pending());c.legacy_active.return_value=True
         self.assertTrue(c.migration_pending())
 
-    def test_default_reconcile_reclaims_only_after_disk_failure(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        c.migration_pending = MagicMock(return_value=False)
-        c.sync = MagicMock(side_effect=[m.DiskSpaceError('disk'), None])
-        c.obsolete = MagicMock(return_value=[c.models/'old'])
-        c.cleanup = MagicMock(side_effect=lambda: self.assertTrue(c.a.reclaim_first))
-        c.reconcile()
-        self.assertEqual(c.sync.call_count, 2)
-        c.cleanup.assert_called_once_with()
-        self.assertFalse(c.a.reclaim_first)
+    def test_seed_preflight_failure_preserves_files_and_stops_before_deletion(self):
+        c=self.c;c.key=MagicMock();c.stop=MagicMock();c.service_path=lambda:self.home/'missing.service'
+        old=self.home/'models';old.mkdir();c.c['legacy_cleanup']={'directories':[str(old)]}
+        with patch.object(seed,'model_sources',side_effect=RuntimeError('metadata unavailable')),patch.object(seed,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'metadata unavailable'):seed.deploy(c)
+            self.assertTrue(old.exists());c.stop.assert_not_called();run.assert_not_called()
 
-    def test_migration_reclaims_listed_weights_then_validates_before_retirement(self):
-        from unittest.mock import MagicMock
-        c = self.c
-        old = self.home / 'models' / 'oversized.gguf'
-        old.parent.mkdir(); old.write_bytes(b'GGUF')
-        c.c['legacy_cleanup'] = {'reclaim_first': [str(old)], 'model_files': [], 'runtime_dirs': [], 'ollama_tags': ['old:tag']}
-        events = []
-        c.key = MagicMock(); c.install_worker = MagicMock()
-        c.sync = MagicMock(side_effect=[m.DiskSpaceError('disk'), None])
-        c.legacy_active = MagicMock(return_value=True)
-        c.service_active = MagicMock(return_value=False)
-        c.legacy_exists = MagicMock(return_value=True)
-        c.start = MagicMock(); c.stop = MagicMock()
-        c.smoke_all = MagicMock(side_effect=lambda: events.append('smoke'))
-        c.calibrate = MagicMock(side_effect=lambda **kw: events.append('context'))
-        c.retire_files = MagicMock(side_effect=lambda paths: events.append(('files', paths)))
-        c.retire_ollama = MagicMock(side_effect=lambda tags: events.append('retire'))
-        c.retire_runtimes = MagicMock(); c.cleanup = MagicMock(); c.wait_ready = MagicMock()
-        with patch.object(m, 'run'):
-            c.migrate()
-        self.assertEqual(events[:4], [('files', [str(old)]), 'smoke', 'context', 'retire'])
-        self.assertEqual(c.sync.call_count, 2)
-        self.assertTrue((c.cfg / 'migration-complete.json').is_file())
+    def test_seed_reclaims_before_download_and_validation(self):
+        c=self.c;old=self.home/'models';old.mkdir();(old/'old.gguf').write_bytes(b'old')
+        c.c['legacy_cleanup']={'directories':[str(old)]};c.key=MagicMock();c.stop=MagicMock();c.service_path=lambda:self.home/'missing.service';c.sync_model=MagicMock()
+        def install(**kw): self.assertFalse(old.exists());self.assertFalse(c._adopt_only)
+        c.sync=MagicMock(side_effect=install)
+        with patch.object(seed,'model_sources',return_value=[]),patch.object(seed,'run'):
+            seed.deploy(c)
+        self.assertTrue((c.cfg/'seed-complete.json').exists());c.sync.assert_called_once_with(install=True)
 
     def test_checksum_rejects_bad_download(self):
         target = self.c.cache / 'test.gguf'

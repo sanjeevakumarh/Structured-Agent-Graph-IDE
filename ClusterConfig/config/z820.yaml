@@ -3,13 +3,14 @@ node: z820
 role: worker
 hardware:
   vendor: "0x10de"
+  pci_device: "0x2232"
   device_regex: "A4500|NVIDIA"
   backends: [cuda, cuda-native]
   telemetry: nvidia_smi
   cuda_arch: 86
   gpu_name_regex: A4500
 backend: cuda                         # cuda-native = build with local CUDA toolkit, native CPU flags
-bind: localhost                       # use tailnet for encrypted remote access (or local-only)
+bind: tailnet                       # encrypted cluster traffic
 port: 8081
 legacy_service: ollama.service
 migration_hostnames: []  # optional exact hostname allowlist; empty permits any matching hardware
@@ -55,5 +56,11 @@ models:
     cache_type_v: f16
     flash_attention: auto
 
+
+# Seed cleanup: dedicated inventoried inference paths, never OS drivers.
 legacy_cleanup:
-  ollama_tags: ['gpt-oss:20b', 'qwen3.8:27b-q4_K_M', 'gemma4:26b-a4b-it-q4_K_M', 'nomic-embed-text:latest', 'hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ4_XS']
+  services: [ollama.service, llama-swap.service]
+  directories:
+    - /usr/share/ollama/.ollama/models
+    - /usr/local/lib/ollama
+  files: [/usr/local/bin/ollama, /usr/local/bin/llama-swap, ~/llama-swap.yaml]

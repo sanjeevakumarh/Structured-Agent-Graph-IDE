@@ -9,7 +9,7 @@ hardware:
   telemetry: amd_gtt
   rocm_target: gfx1151
 backend: vulkan                       # rocm = native build against installed ROCm
-bind: localhost                       # use tailnet for encrypted remote access (or local-only)
+bind: tailnet                       # encrypted cluster traffic
 port: 8081                            # staging; 8080 SearXNG, 11434 legacy Ollama
 legacy_service: ollama.service
 migration_hostnames: []  # optional exact hostname allowlist; empty permits any matching hardware
@@ -68,38 +68,14 @@ models:
     cache_type_k: f16  # safe starting value; calibrate to tune
     cache_type_v: f16
     flash_attention: auto
-  gmini/qwen3.5-122b-a10b-q4_k_m:
-    source:
-      repo: unsloth/Qwen3.5-122B-A10B-GGUF
-      revision: c0e1cc9eb3fa27fdcd731aebd1ea50b2e9f139ae
-      files: [Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf, Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00002-of-00003.gguf, Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00003-of-00003.gguf]
-    parallel: 1
-    tool_test: true
-    test_request: {chat_template_kwargs: {enable_thinking: false}}
-    context: 32768
-    target_context: 65536  # calibration goal, not guaranteed fit
-    cache_type_k: f16  # safe starting value; calibrate to tune
-    cache_type_v: f16
-    flash_attention: auto
-    enabled: false                    # enable after benchmarking / storage review
 
-# --migrate: remove only these explicitly listed legacy files AFTER smoke tests.
+# Seed cleanup: dedicated inventoried inference paths, never OS drivers.
 legacy_cleanup:
-  ollama_tags: ['laguna-s-2.1:q4_K_M', 'gpt-oss:120b', 'qwen3-coder-next:q4_K_M', 'qwen3-coder-next:latest', 'qwen3.6:35b-a3b']
-  runtime_dirs: [~/llama-rocm, ~/llama-vulkan-gmini]
-  model_files:
-    - ~/models/inkling-small/mmproj-F16.gguf
-    - ~/models/inkling-small/UD-IQ3_XXS/Inkling-Small-UD-IQ3_XXS-00001-of-00003.gguf
-    - ~/models/inkling-small/UD-IQ3_XXS/Inkling-Small-UD-IQ3_XXS-00002-of-00003.gguf
-    - ~/models/inkling-small/UD-IQ3_XXS/Inkling-Small-UD-IQ3_XXS-00003-of-00003.gguf
-    - ~/models/UD-Q3_K_XL/MiniMax-M2.5-UD-Q3_K_XL-00001-of-00004.gguf
-    - ~/models/UD-Q3_K_XL/MiniMax-M2.5-UD-Q3_K_XL-00002-of-00004.gguf
-    - ~/models/UD-Q3_K_XL/MiniMax-M2.5-UD-Q3_K_XL-00003-of-00004.gguf
-    - ~/models/UD-Q3_K_XL/MiniMax-M2.5-UD-Q3_K_XL-00004-of-00004.gguf
-    - ~/models/UD-Q4_K_XL/Qwen3-235B-A22B-Instruct-2507-UD-Q4_K_XL-00001-of-00003.gguf
-    - ~/models/UD-Q4_K_XL/Qwen3-235B-A22B-Instruct-2507-UD-Q4_K_XL-00002-of-00003.gguf
-    - ~/models/UD-Q4_K_XL/Qwen3-235B-A22B-Instruct-2507-UD-Q4_K_XL-00003-of-00003.gguf
-  reclaim_first:
-    - ~/models/UD-Q4_K_XL/Qwen3-235B-A22B-Instruct-2507-UD-Q4_K_XL-00001-of-00003.gguf
-    - ~/models/UD-Q4_K_XL/Qwen3-235B-A22B-Instruct-2507-UD-Q4_K_XL-00002-of-00003.gguf
-    - ~/models/UD-Q4_K_XL/Qwen3-235B-A22B-Instruct-2507-UD-Q4_K_XL-00003-of-00003.gguf
+  services: [ollama.service, llama-swap.service]
+  directories:
+    - ~/models
+    - ~/llama-rocm
+    - ~/llama-vulkan-gmini
+    - /usr/share/ollama/.ollama/models
+    - /usr/local/lib/ollama
+  files: [/usr/local/bin/ollama, /usr/local/bin/llama-swap, ~/llama-swap.yaml]

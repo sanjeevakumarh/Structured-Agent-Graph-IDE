@@ -1,0 +1,18 @@
+# Candidate releases, not hardware-certified. Change in a Git branch and benchmark.
+llama_cpp: b12777
+llama_swap: v277
+litellm: '1.111.0'
+python: '3.12'
+# Published release asset hashes; update together with llama_cpp.
+assets:
+  vulkan:
+    - file: llama-b12777-bin-ubuntu-vulkan-x64.tar.gz
+      sha256: 0be67270f29c5c6c4799aa33cb051b1827f380409f0fa6070de62fc845890f7b
+  cuda:
+    - file: llama-b12777-bin-ubuntu-cuda-12.8-x64.tar.gz
+      sha256: 391bff07688d6295bb1190cef3124483f884f4037047a4d15ead97f04cdae173
+    - file: cudart-llama-b12777-bin-ubuntu-cuda-12.8-x64.tar.gz
+      sha256: 756abf77236139746d88830646460fe9c03ae57d134ef4d630536cbccf314b05
+  sycl:
+    - file: llama-b12777-bin-ubuntu-sycl-fp16-x64.tar.gz
+      sha256: 7b81a58e1e6bd148a10ba57971b909a6aa360f320edc0427e9fd644235673cdc

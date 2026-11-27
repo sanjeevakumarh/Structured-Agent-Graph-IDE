@@ -1,0 +1,16 @@
+# Git contains recipes only, never downloaded artifacts or local secrets.
+*.gguf
+*.safetensors
+*.bin
+*.tar.gz
+*.zip
+*.key
+*.local.yaml
+.env
+.venv/
+__pycache__/
+*.pyc
+*.log
+cache/
+models/
+benchmarks/results/

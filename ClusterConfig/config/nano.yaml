@@ -1,0 +1,6 @@
+# Orin Nano Super, L4T 36.4.7 / CUDA 12.6 / TensorRT 10.3.
+# Keep JetPack and vendor drivers. This profile manages only an optional Ollama model list.
+node: nano
+role: edge
+endpoint: http://localhost:11434
+ollama_models: ['qwen3.5:4b']

@@ -1,0 +1,6 @@
+# Arduino VENTUNO Q: preserve vendor OS, App Lab, MCU, GenieX and NPU stack.
+# No generic OS or driver installation. No automatic model download.
+node: ventunoq
+role: edge
+endpoint: http://localhost:18181
+ollama_models: []

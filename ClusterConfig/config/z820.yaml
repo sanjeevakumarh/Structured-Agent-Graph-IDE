@@ -1,0 +1,44 @@
+# RTX A4500 20 GiB; Sandy Bridge Xeons have AVX but NO AVX2.
+node: z820
+role: worker
+backend: cuda                         # cuda-native = build with local CUDA toolkit, native CPU flags
+bind: localhost                       # set to a trusted LAN/tailnet interface before remote use
+port: 8081
+legacy_service: ollama.service
+migration_hostnames: [z820]   # exact short hostnames allowed for destructive migration
+reserve_gib: 15
+ollama_store: /usr/share/ollama/.ollama/models
+# Context is the deployable starting value; --calibrate --apply updates it.
+calibration:
+  contexts: [8192, 16384, 32768, 65536, 131072, 262144]
+  cache_types: [q8_0, f16, q4_0]  # q4_0 only when explicitly requested or q8/f16 cannot reach goal
+  min_host_free_gib: 6
+  min_gpu_free_mib: 1024
+  min_generation_tps: 5
+  max_ttft_seconds: 300
+  request_timeout_seconds: 1800
+  trials: 3
+  # On Intel, specify the correct xpu-smi device index if needed.
+models:
+  z820/gpt-oss-20b-mxfp4:
+    source:
+      ollama: gpt-oss:20b
+      digest: f38aa0c53da5f8c49d08c43a99df24ff53167fe68e24664a7777288e7656fdfe
+    context: 16384
+    target_context: 65536  # calibration goal, not guaranteed fit
+    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_v: f16
+    flash_attention: auto
+  z820/qwen3.8-27b-ud-iq4_xs:
+    source:
+      repo: unsloth/Qwen3.8-27B-GGUF
+      revision: db81afd1e1f5d6cca1988c9fe5c8fe0844b1cad7
+      files: [Qwen3.8-27B-UD-IQ4_XS.gguf]
+    context: 8192                    # increase only after VRAM measurement
+    target_context: 32768  # calibration goal, not guaranteed fit
+    cache_type_k: f16  # baseline; calibration tries q8_0 first
+    cache_type_v: f16
+    flash_attention: auto
+
+legacy_cleanup:
+  ollama_tags: ['gpt-oss:20b', 'qwen3.8:27b-q4_K_M', 'gemma4:26b-a4b-it-q4_K_M', 'nomic-embed-text:latest', 'hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ4_XS']

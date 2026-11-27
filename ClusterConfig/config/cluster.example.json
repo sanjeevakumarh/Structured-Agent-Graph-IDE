@@ -1,0 +1,11 @@
+{
+  "repo": "~/ClusterConfig",
+  "targets": {
+    "gmini": "gmini",
+    "p520": "p520",
+    "z820": "z820",
+    "nano": "nano",
+    "ventunoq": "ventunoq",
+    "macmini": "macmini"
+  }
+}

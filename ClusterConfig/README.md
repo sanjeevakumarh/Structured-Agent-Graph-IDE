@@ -9,7 +9,7 @@ Git contains the desired inference stack, not models, binaries or credentials. N
 Requirements: working GPU drivers, Tailscale and resolvable cluster hostnames, Python + PyYAML (or uv), curl; Mac also needs uv and Ollama. Vendor JetPack/QAIRT stacks remain installed. Run as normal login user, not root.
 
 1. Replace the old repository files with this complete package on every node. Do not merge old YAML or generated configurations.
-2. From Windows, edit SSH mappings in `cluster.ps1` if needed, then run `./cluster.ps1 setup`. It checks versions, initializes/distributes keys, runs workers and edge nodes, then Mac. Sudo may prompt. `-Yes` approves destructive actions.
+2. From Windows, copy `config/cluster.example.json` to `config/cluster.local.json`, set the SSH targets and remote checkout path, then run `./cluster.ps1 setup`. The local file is Git-ignored; keep it only on the controlling machine. It checks versions, initializes/distributes keys, runs workers and edge nodes, then Mac. Sudo may prompt. `-Yes` approves destructive actions.
 3. Alternatively run `./setup-macmini.sh --init-keys`, copy `~/inference/config/worker.key` to the three workers with mode 600, then execute each node's setup script; Mac last.
 4. Run `./cluster.ps1 health` and `./cluster.ps1 validate`. Gateway validation requires enabled workers to be reachable; edge routes are disabled by default.
 

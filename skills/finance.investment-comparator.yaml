@@ -1,0 +1,118 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: investment-comparator
+version: 1
+domain: finance
+protocol_implements: [Analyzable]
+
+description: >
+  Compares 2-5 securities side-by-side and ranks them for investment quality
+  across three time horizons: short-term (≤90 days), medium-term (180-240 days),
+  and long-term (1 year+). Produces a structured comparison matrix and
+  horizon-specific recommendations.
+
+inputs:
+  analyses:
+    type: string
+    required: true
+    description: Combined analysis sections for all tickers being compared
+  tickers:
+    type: string
+    required: true
+    description: Comma-separated list of tickers being compared
+  context:
+    type: string
+    required: false
+    description: Investment context or portfolio strategy
+
+outputs_schema:
+  type: string
+  description: >
+    Markdown comparison report with: side-by-side metrics table, scoring matrix
+    per time horizon, ranked recommendations, and portfolio allocation suggestion.
+
+capability_requirements:
+  deep_analyst:
+    needs: [deep_reasoning, financial_analysis, structured_output]
+    context_window_min: 32k
+
+parameters:
+  analyses: ""
+  tickers: ""
+  context: "General investor"
+  output_var: comparison_result
+
+implementation:
+  - name: compare
+    type: llm_per_section
+    model: "{{capability.deep_analyst}}"
+    max_sections: "1"
+    output_var: "{{parameters.output_var}}"
+    section_title: "Investment Comparison"
+    section_analysis_prompt: |
+      You are a portfolio strategist comparing securities for investment quality.
+
+      Tickers: {{parameters.tickers}}
+      Context: {{parameters.context}}
+      Today: {{today}}
+
+      ## SOURCE DATA (analyst reports for each ticker)
+      {{parameters.analyses}}
+
+      ## RULES
+      1. Use ONLY data from the analyst reports above. Do NOT fabricate numbers.
+      2. If a metric is missing for a ticker, write "N/A" — do not guess.
+      3. Every number you cite must appear in the source reports.
+      4. Do NOT repeat raw data tables — synthesize and compare.
+
+      ## OUTPUT FORMAT
+
+      ### Key Metrics Comparison
+      | Metric | {% for t in parameters.tickers | string.split ',' %}{{ t | string.strip }} | {% endfor %}
+      |--------|{% for t in parameters.tickers | string.split ',' %}--------|{% endfor %}
+      | Price | ... |
+      | P/E (TTM) | ... |
+      | Revenue Growth YoY | ... |
+      | Operating Margin | ... |
+      | FCF Yield | ... |
+      | Dividend Yield | ... |
+      | RSI (14-day) | ... |
+      | 52-Week Position | ... |
+      | Analyst Target Upside | ... |
+
+      ### Short-Term Outlook (≤90 days)
+      For each ticker: 1-2 sentence assessment based on technical momentum,
+      upcoming catalysts (earnings dates, ex-dividend), and RSI/MACD signals.
+      Then rank all tickers 1-N for short-term with one-line rationale each.
+
+      **Short-Term Ranking:**
+      | Rank | Ticker | Score (-3 to +3) | Rationale |
+      |------|--------|-------------------|-----------|
+
+      ### Medium-Term Outlook (180-240 days)
+      For each ticker: 1-2 sentence assessment based on earnings trajectory,
+      valuation gap (current P/E vs analyst target), and sector momentum.
+      Then rank all tickers 1-N for medium-term.
+
+      **Medium-Term Ranking:**
+      | Rank | Ticker | Score (-3 to +3) | Rationale |
+      |------|--------|-------------------|-----------|
+
+      ### Long-Term Outlook (1 year+)
+      For each ticker: 1-2 sentence assessment based on competitive moat,
+      revenue growth sustainability, balance sheet strength, and industry tailwinds.
+      Then rank all tickers 1-N for long-term.
+
+      **Long-Term Ranking:**
+      | Rank | Ticker | Score (-3 to +3) | Rationale |
+      |------|--------|-------------------|-----------|
+
+      ### Portfolio Allocation Suggestion
+      Given the context "{{parameters.context}}", suggest a percentage allocation
+      across these tickers for each horizon. Percentages must sum to 100%.
+
+      | Ticker | Short-Term % | Medium-Term % | Long-Term % |
+      |--------|-------------|---------------|-------------|
+
+      ### Final Verdict
+      One paragraph: which ticker(s) stand out and why, what the key differentiator is,
+      and the single most important risk across the group.

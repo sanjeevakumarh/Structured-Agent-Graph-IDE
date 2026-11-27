@@ -30,6 +30,48 @@ class EdgeGatewayTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'no GPU'): e.request(spec,'test')
         with patch.object(edge,'api',return_value={'done':True,'response':''}):
             with self.assertRaisesRegex(RuntimeError,'empty'): e.request(spec,'test')
+    def test_unload_waits_until_runner_disappears(self):
+        e=edge.Edge(self.cluster('nano')); spec=next(iter(e.models.values())); model=spec['id']
+        with patch.object(e,'loaded_ids',side_effect=[{model},{model},set()]) as loaded, patch.object(edge,'api') as api, patch.object(edge.time,'sleep') as sleep:
+            e.unload(spec)
+            self.assertEqual(loaded.call_count,3)
+            self.assertEqual(api.call_args.kwargs['payload'],{'model':model,'keep_alive':0})
+            sleep.assert_called_once_with(1)
+
+    def test_unload_timeout_blocks_next_model(self):
+        e=edge.Edge(self.cluster('nano'));spec=next(iter(e.models.values()));e.spec['unload_timeout_seconds']=0
+        with patch.object(e,'loaded_ids',return_value={spec['id']}),patch.object(edge,'api'):
+            with self.assertRaisesRegex(RuntimeError,'still resident'): e.unload(spec)
+
+    def test_session_releases_previous_model_before_request(self):
+        e=edge.Edge(self.cluster('nano'));spec=next(iter(e.models.values()))
+        old=e.spec['edge_models']['nano/gemma4-e2b-q4_k_m']['id']
+        order=[]
+        def unload(m): order.append(('unload',m['id']))
+        with patch.object(e,'loaded_ids',side_effect=[{old},set()]),patch.object(e,'unload',side_effect=unload):
+            with e.model_session(spec): order.append(('request',spec['id']))
+        self.assertEqual(order,[('unload',old),('request',spec['id']),('unload',spec['id'])])
+
+    def test_session_preserves_original_error_if_unload_fails(self):
+        e=edge.Edge(self.cluster('nano'));spec=next(iter(e.models.values()))
+        with patch.object(e,'loaded_ids',return_value=set()),patch.object(e,'unload',side_effect=RuntimeError('unload error')):
+            with self.assertRaisesRegex(RuntimeError,'original failure'):
+                with e.model_session(spec): raise RuntimeError('original failure')
+
+    def test_unrelated_loaded_model_is_not_stopped(self):
+        e=edge.Edge(self.cluster('nano'));spec=next(iter(e.models.values()))
+        with patch.object(e,'loaded_ids',return_value={'unrelated:1'}),patch.object(e,'unload') as unload:
+            with self.assertRaisesRegex(RuntimeError,'Unmanaged Ollama'):
+                with e.model_session(spec): self.fail('should not enter session')
+            unload.assert_not_called()
+
+    def test_disabled_nano_model_retains_weights(self):
+        e=edge.Edge(self.cluster('nano'));gemma=e.spec['edge_models']['nano/gemma4-e2b-q4_k_m']['id']
+        self.assertNotIn(gemma,e.wanted()); e.record(e.wanted()|{gemma})
+        with patch.object(e,'ids',return_value=e.wanted()|{gemma}),patch.object(edge,'run') as run:
+            e.cleanup(validated=True); run.assert_not_called()
+        self.assertIn(gemma,e.previous())
+
     def test_geniex_completion_not_listing(self):
         e=edge.Edge(self.cluster('ventunoq')); spec=next(iter(e.models.values()))
         with patch.object(edge,'api',return_value={'choices':[{'message':{'content':'READY'}}],'usage':{'completion_tokens':2}}) as api:

@@ -33,7 +33,7 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = '0.9'
+RELEASE = '0.10'
 MARK = '.local-ai-cluster'
 SERVICE = 'local-ai-inference.service'
 LABEL = 'local.cluster.gateway'

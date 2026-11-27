@@ -3,7 +3,9 @@
 Edit config/nano.yaml or config/ventunoq.yaml. Setup syncs and tests desired
 models; --cleanup / --models --prune retire previously adopted or explicitly
 listed models after validation. Existing vendor services are reused. Reports
-are local. Nano calibration uses measured prompt tokens and retrieval tests.
+are local. Nano validation, benchmarks and calibration isolate model sessions,
+wait for native unload, and preserve disabled models. Edit the YAML to enable
+optional models after checking runtime compatibility.
 """
 import json
 import os
@@ -294,10 +296,53 @@ class Edge:
                 'seconds':seconds, 'end_to_end_tps':usage['completion_tokens']/seconds if usage.get('completion_tokens') else None,
                 'accelerator_verified':False}
 
+    def loaded_ids(self):
+        rows = api(self.endpoint + '/api/ps')['models']
+        ids = {m.get('name') or m.get('model') for m in rows}
+        if None in ids:
+            fail('Ollama returned a loaded model without an identity.')
+        return ids
+
     def unload(self, spec):
-        if self.runtime == 'ollama':
-            # Native API, no CLI dependency, don't unload unrelated models.
-            api(self.endpoint + '/api/generate', payload={'model':spec['id'], 'keep_alive':0}, timeout=30)
+        if self.runtime != 'ollama':
+            return
+        model = spec['id']
+        if model not in self.loaded_ids():
+            return
+        say(f'UNLOAD {model}; waiting for runner release')
+        api(self.endpoint + '/api/generate', payload={'model':model, 'keep_alive':0}, timeout=30)
+        deadline = time.monotonic() + int(self.spec.get('unload_timeout_seconds', 60))
+        while model in self.loaded_ids():
+            if time.monotonic() >= deadline:
+                fail(f'{model}: runner still resident after unload timeout; not starting another model.')
+            time.sleep(1)
+        say(f'RELEASED {model}')
+
+    @contextlib.contextmanager
+    def model_session(self, spec):
+        """Cold isolated model session; do not stop unrelated runtime clients."""
+        if self.runtime != 'ollama':
+            yield
+            return
+        owned = {m['id'] for m in self.spec['edge_models'].values()} | self.previous()
+        loaded = self.loaded_ids()
+        unknown = loaded - owned
+        if unknown:
+            fail('Unmanaged Ollama models are active; refusing to interrupt: ' + ', '.join(sorted(unknown)))
+        for model in sorted(loaded):
+            self.unload({'id':model})
+        if self.loaded_ids():
+            fail('Ollama still has resident models; cannot start an isolated test.')
+        try:
+            yield
+        except BaseException:
+            try:
+                self.unload(spec)
+            except (OSError, RuntimeError, ValueError, KeyError) as cleanup:
+                say(f'Runner cleanup also failed: {cleanup}')
+            raise
+        else:
+            self.unload(spec)
 
     def validate(self, all_models=False):
         ids = self.ids()
@@ -306,8 +351,9 @@ class Edge:
         rows = []
         for alias, spec in (self.models.items() if all_models else self.selected()):
             try:
-                result = self.request(spec, 'Reply with the word READY. Do not explain.', tokens=256)
-                if 'ready' not in result['text'].lower(): fail(f'{alias}: response did not contain READY.')
+                with self.model_session(spec):
+                    result = self.request(spec, 'Reply with the word READY. Do not explain.', tokens=256)
+                    if 'ready' not in result['text'].lower(): fail(f'{alias}: response did not contain READY.')
                 rows.append(dict(result, alias=alias, passed=True))
                 say('PASS ' + alias + ' ' + json.dumps({k:v for k,v in result.items() if k != 'text'}))
             except (OSError, RuntimeError, ValueError, KeyError) as exc:
@@ -320,8 +366,6 @@ class Edge:
                         rows[-1]['runtime_version'] = (version.stdout or '') + (version.stderr or '')
                     except (OSError, RuntimeError):
                         pass
-            finally:
-                self.unload(spec)
         self.report('validation', rows)
         if not all(r['passed'] for r in rows):
             fail('One or more configured edge models failed inference; no model cleanup performed.')
@@ -351,12 +395,11 @@ class Edge:
     def benchmark(self):
         rows=[]
         for alias,spec in self.selected():
-            try:
+            with self.model_session(spec):
                 for trial in range(3):
                     say(f'BENCHMARK {alias} trial {trial+1}/3')
                     result=self.request(spec, f'Run {trial}: Explain how soil moisture sensors automate irrigation in 200 words.', tokens=256)
                     rows.append(dict(result, alias=alias, trial=trial)); say(json.dumps({k:v for k,v in rows[-1].items() if k!='text'}))
-            finally: self.unload(spec)
         self.report('benchmark', rows)
 
     def calibrate(self):
@@ -381,39 +424,39 @@ class Edge:
                     break
                 passes=[]
                 for depth in (.1,.5,.9):
-                    before=meminfo()
                     r = None
                     try:
-                        count=max(10,int(ctx*.77/24))
-                        # A short answer is enough to verify retrieval; reserve room for reasoning.
-                        budget=min(512, max(128,ctx//8))
-                        for attempt in range(5):
-                            messages,code=prompt_messages(count,depth,time.time_ns())
-                            prompt=messages[0]['content'].replace('alone on the first line, then explain in about 100 words how you found it.', 'alone. No explanation.')
-                            say(f'{alias} context={ctx} depth={depth} attempt={attempt+1}: processing {count} records')
-                            with observe_memory(meminfo) as (samples, errors):
-                                r=self.request(spec,prompt,context=ctx,tokens=budget)
-                            n=r.get('prompt_tokens') or 0
-                            say(f'  measured tokens={n}, allocated={r.get("context_allocated")}, generation={r["generation_tps"]:.2f} t/s, seconds={r["seconds"]:.1f}')
-                            worst = {'host_free_mib':min(x['host_free_mib'] for x in samples),
-                                     'swapout_pages':max(x['swapout_pages'] for x in samples)}
-                            if errors or worst['host_free_mib'] < cfg['min_host_free_mib'] or worst['swapout_pages'] > before['swapout_pages']:
-                                fail('Memory safety threshold crossed or memory sampling failed')
-                            if ctx*.70 <= n <= ctx*.85: break
-                            if not n: break
-                            # Even a truncated count near the context cap must shrink and retry.
-                            adjusted=max(1,int(count*ctx*.77/n))
-                            if adjusted==count: adjusted += 1 if n < ctx*.70 else -1
-                            count=max(1,adjusted)
-                        after=worst
-                        reasons=context_checks(r,code,ctx,cfg,before,after)
-                        passed=not reasons
+                        with self.model_session(spec):
+                            before=meminfo()
+                            count=max(10,int(ctx*.77/24))
+                            # A short answer is enough to verify retrieval; reserve room for reasoning.
+                            budget=min(512, max(128,ctx//8))
+                            for attempt in range(5):
+                                messages,code=prompt_messages(count,depth,time.time_ns())
+                                prompt=messages[0]['content'].replace('alone on the first line, then explain in about 100 words how you found it.', 'alone. No explanation.')
+                                say(f'{alias} context={ctx} depth={depth} attempt={attempt+1}: processing {count} records')
+                                with observe_memory(meminfo) as (samples, errors):
+                                    r=self.request(spec,prompt,context=ctx,tokens=budget)
+                                n=r.get('prompt_tokens') or 0
+                                say(f'  measured tokens={n}, allocated={r.get("context_allocated")}, generation={r["generation_tps"]:.2f} t/s, seconds={r["seconds"]:.1f}')
+                                worst = {'host_free_mib':min(x['host_free_mib'] for x in samples),
+                                         'swapout_pages':max(x['swapout_pages'] for x in samples)}
+                                if errors or worst['host_free_mib'] < cfg['min_host_free_mib'] or worst['swapout_pages'] > before['swapout_pages']:
+                                    fail('Memory safety threshold crossed or memory sampling failed')
+                                if ctx*.70 <= n <= ctx*.85: break
+                                if not n: break
+                                # Even a truncated count near the context cap must shrink and retry.
+                                adjusted=max(1,int(count*ctx*.77/n))
+                                if adjusted==count: adjusted += 1 if n < ctx*.70 else -1
+                                count=max(1,adjusted)
+                            after=worst
+                            reasons=context_checks(r,code,ctx,cfg,before,after)
+                            passed=not reasons
                         rows.append(dict(r,alias=alias,context=ctx,depth=depth,passed=passed,failed_checks=reasons,host_free_mib=after['host_free_mib'],memory_samples=len(samples)))
                         if reasons: say('  Failed checks: ' + ', '.join(reasons))
                     except (RuntimeError,OSError,ValueError,KeyError,TypeError) as e:
                         passed=False; rows.append(dict(alias=alias,context=ctx,depth=depth,passed=False,error=str(e)))
                         say('  Error: ' + str(e))
-                    finally: self.unload(spec)
                     passes.append(passed); say(f'{alias} context={ctx} depth={depth}: {"PASS" if passed else "FAIL"}')
                     if not passed: break
                 if not all(passes) or len(passes)!=3:

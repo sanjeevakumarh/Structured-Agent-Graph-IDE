@@ -1,4 +1,4 @@
-# Local AI Cluster — v0.9
+# Local AI Cluster — v0.10
 
 Reproducible local inference on mixed hardware. Git stores scripts and YAML only; weights, binaries and credentials stay local.
 
@@ -19,7 +19,7 @@ Use a normal login user. Linux needs Python 3 with PyYAML, curl, git and working
 # On Mac once; copy worker.key to ~/inference/config/ on the three workers (chmod 600).
 ./setup-macmini.sh --init-keys
 # On each worker or edge, using its own node name:
-./setup-gmini.sh --version    # expect v0.9
+./setup-gmini.sh --version    # expect v0.10
 ./setup-gmini.sh --dry-run
 ./setup-gmini.sh
 # Once workers are ready, on Mac:
@@ -50,7 +50,7 @@ Use the appropriate `setup-<node>.sh`:
 
 Edit the node YAML, then run setup. Disabled model entries retain weights; removed entries become cleanup candidates. Worker weights use pinned upstream GGUF revisions and verified hashes; raw Ollama blobs are not trusted as sources. Exact-hash matches can be reused. Edge and Mac native model tags are mutable.
 
-Worker calibration pauses/restores known services, tests concurrent configured slots and stops at the target context. Intel/AMD use vendor counters or fresh backend-reported memory budgets if counters are missing; unknown telemetry fails closed. Nano samples unified RAM, adjusts prompt size using measured tokens, and reports failed checks. `--apply` changes only measured settings; rerun setup to deploy. Full calibration can be lengthy. GenieX QAIRT bundle context is fixed: `--calibrate` runs a real benchmark instead of recommending an unverified context. VENTUNO Q's failing Gemma plugin is disabled by default; cached weights remain. Qwen is enabled. NPU placement is not independently verified.
+Worker calibration pauses/restores known services, tests concurrent configured slots and stops at the target context. Intel/AMD use vendor counters or fresh backend-reported memory budgets if counters are missing; unknown telemetry fails closed. Nano samples unified RAM, adjusts prompt size using measured tokens, and reports failed checks. Tests wait for Ollama runner release between models; unrelated loaded models are not interrupted. Qwen3.5 4B is enabled; Gemma4 E2B is disabled because of observed CUDA startup OOM. Its weights are retained; re-enable in YAML for controlled retesting. `--apply` changes only measured settings; rerun setup to deploy. Full calibration can be lengthy. GenieX QAIRT bundle context is fixed: `--calibrate` runs a real benchmark instead of recommending an unverified context. VENTUNO Q's failing Gemma plugin is disabled by default; cached weights remain. Qwen is enabled. NPU placement is not independently verified.
 
 ## Cleanup and recovery
 
@@ -65,4 +65,4 @@ python3 -m unittest discover -s common
 for f in setup-*.sh common/setup.sh; do bash -n "$f"; done
 ```
 
-Deployment candidate; real hardware validation still required. GPU budget readings are driver estimates, not guaranteed physical free memory. Edge memory sampling is observational. Resident groups require separate combined-memory tests. GenieX plugin repair and clean-OS GPU driver installation are outside this package. Mac model cleanup and vendor uninstall remain manual. Remove legacy migration code after cutover.
+Deployment candidate; real hardware validation still required. GPU budget readings are driver estimates, not guaranteed physical free memory. Edge memory sampling is observational. Resident groups require separate combined-memory tests. GenieX plugin repair, Ollama Gemma4 memory fixes and clean-OS GPU driver installation are outside this package. Mac model cleanup and vendor uninstall remain manual. Remove legacy migration code after cutover.

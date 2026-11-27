@@ -1,7 +1,7 @@
 # M4 / 16 GB. Gateway routes are derived from enabled worker profiles.
 node: macmini
 role: gateway
-bind: tailnet  # encrypted cluster traffic
+bind: tailnet  # local loopback + private Tailscale Serve TCP forwarding
 port: 4001
 nodes:
   gmini: {enabled: true, url: 'http://gmini:8081/v1'}

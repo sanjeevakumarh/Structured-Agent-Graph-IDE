@@ -33,7 +33,7 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = '0.11'
+RELEASE = '0.11.1'
 MARK = '.local-ai-cluster'
 SERVICE = 'local-ai-inference.service'
 LABEL = 'local.cluster.gateway'
@@ -214,7 +214,9 @@ def api(url, key=None, payload=None, timeout=10):
     req = urllib.request.Request(url, headers=headers,
                                  data=json.dumps(payload).encode() if payload is not None else None)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        # Cluster APIs are private/direct endpoints. Never send their bearer keys
+        # via an inherited HTTP proxy (macOS can also inherit system proxies).
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         detail = http_error_detail(e, key)
@@ -347,17 +349,84 @@ class Cluster:
                 slot_count(spec); flash_mode(spec.get('flash_attention', 'auto'))
         if self.role == 'worker' and not self.desired:
             fail('Enable at least one worker model.')
+        self.gateway_tailnet = self.role == 'gateway' and self.c.get('bind') == 'tailnet'
+        self.public_endpoint = None
         if self.role != 'edge':
-            if self.c['bind'] == 'tailnet' and not getattr(args, 'dry_run', False):
-                cli = shutil.which('tailscale') or '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
-                ip = run(cli, 'ip', '-4', capture=True).stdout.strip()
-                import ipaddress
-                if ipaddress.ip_address(ip) not in ipaddress.ip_network('100.64.0.0/10'):
-                    fail('Unexpected tailnet IPv4 address')
-                self.c['bind'] = ip
+            if self.c['bind'] == 'tailnet':
+                ip = 'tailnet'
+                if not getattr(args, 'dry_run', False):
+                    ip = self.tailscale('ip', '-4', capture=True).stdout.strip()
+                    import ipaddress
+                    if ipaddress.ip_address(ip) not in ipaddress.ip_network('100.64.0.0/10'):
+                        fail('Unexpected tailnet IPv4 address')
+                if self.gateway_tailnet:
+                    # macOS GUI Tailscale may not route self-addressed connections.
+                    # Serve exposes the authenticated local API only to the tailnet.
+                    self.public_endpoint = f'http://{ip}:{self.c["port"]}'
+                    self.c['bind'] = '127.0.0.1'
+                else:
+                    self.c['bind'] = ip
             self.endpoint = f'http://{self.c["bind"]}:{self.c["port"]}'
         else:
             self.endpoint = self.c['endpoint']
+
+    def tailscale(self, *args, capture=False):
+        cli = shutil.which('tailscale') or '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+        return run(cli, *args, capture=capture, env=dict(os.environ, TAILSCALE_BE_CLI='1'))
+
+    def gateway_serve_config(self):
+        data = json.loads(self.tailscale('serve', 'status', '--json', capture=True).stdout)
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            fail('Unexpected Tailscale Serve status format.')
+        return data
+
+    def gateway_forward(self, port):
+        """Check the requested port only; never replace unrelated Serve/Funnel rules."""
+        status = self.gateway_serve_config()
+        configs = [status, *(status.get('Foreground') or {}).values()]
+        target = f'127.0.0.1:{port}'
+        found = None
+        for i, config in enumerate(configs):
+            for address, enabled in (config.get('AllowFunnel') or {}).items():
+                if enabled and address.rsplit(':', 1)[-1] == str(port):
+                    fail(f'Tailscale Funnel enabled on port {port}; refusing public exposure.')
+            handler = (config.get('TCP') or {}).get(str(port))
+            if handler is None:
+                continue
+            if i or handler != {'TCPForward': target}:
+                # Zero/default optional fields can appear in status JSON.
+                if i or handler.get('TCPForward') != target or any(v for k,v in handler.items() if k != 'TCPForward'):
+                    fail(f'Tailscale Serve port {port} already has a different handler.')
+            found = handler
+        return found
+
+    def configure_gateway_serve(self):
+        if not self.gateway_tailnet:
+            return
+        port = int(self.c['port'])
+        marker = self.cfg / 'gateway-serve.json'
+        existing = self.gateway_forward(port)
+        # Record the managed port before making a change, so failure cleanup
+        # can remove a partially installed forward without touching other ports.
+        atomic(marker, json.dumps({'port':port}))
+        if not existing:
+            self.tailscale('serve', '--bg', f'--tcp={port}', f'tcp://127.0.0.1:{port}')
+        if not self.gateway_forward(port):
+            fail('Tailscale Serve did not install the expected private TCP forward.')
+        say('Tailnet gateway configured: ' + self.public_endpoint + '/v1 (remote reachability requires a peer test).')
+
+    def remove_gateway_serve(self):
+        marker = self.cfg / 'gateway-serve.json'
+        if not marker.is_file():
+            return
+        port = int(json.loads(marker.read_text())['port'])
+        if not 1 <= port <= 65535:
+            fail('Invalid managed Tailscale Serve port.')
+        if self.gateway_forward(port):
+            self.tailscale('serve', f'--tcp={port}', 'off')
+        marker.unlink()
 
     def host_check(self):
         if os.geteuid() == 0:
@@ -416,6 +485,8 @@ class Cluster:
 
     def plan(self, migration=False):
         say(f'{self.a.node}: {self.role}; {self.endpoint}; root={self.root}')
+        if self.public_endpoint:
+            say('Tailnet exposure: ' + self.public_endpoint + '/v1 via Tailscale Serve')
         if self.role == 'worker':
             say(f'Runtime: {self.v["llama_cpp"]} {self.backend}; llama-swap {self.v["llama_swap"]}')
             for alias, m in self.desired.items():
@@ -779,6 +850,7 @@ class Cluster:
         self.service_owned()
         if self.role == 'gateway':
             self.gateway_bootout()
+            self.remove_gateway_serve()
         elif self.service_path().exists():
             run('sudo', 'systemctl', 'stop', SERVICE)
 
@@ -795,7 +867,8 @@ class Cluster:
             logs.mkdir(exist_ok=True)
             plist = {'Label': LABEL, 'ProgramArguments': command, 'UserName': os.environ.get('USER') or run('id', '-un', capture=True).stdout.strip(),
                      'WorkingDirectory': str(self.root), 'RunAtLoad': True, 'KeepAlive': True,
-                     'EnvironmentVariables': {'HOME': str(Path.home()), 'PATH': '/opt/homebrew/bin:/usr/bin:/bin'},
+                     'EnvironmentVariables': {'HOME': str(Path.home()), 'PATH': '/opt/homebrew/bin:/usr/bin:/bin',
+                                              'NO_PROXY': '*', 'no_proxy': '*'},
                      'StandardOutPath': str(logs / 'gateway.log'), 'StandardErrorPath': str(logs / 'gateway.log'),
                      'ProcessType': 'Background', 'ThrottleInterval': 10, 'Comment': 'local-ai-cluster'}
             data = plistlib.dumps(plist)
@@ -893,7 +966,9 @@ class Cluster:
             atomic(self.native, native_text); atomic(self.active, state_text)
             self.install_service(); self.start()
             if self.role == 'worker': self.smoke_all()
-            else: self.validate_gateway()
+            else:
+                self.validate_gateway()
+                self.configure_gateway_serve()
         except BaseException as error:
             say('Deployment FAILED (no rollback): ' + str(error))
             if self.role == 'gateway': self.gateway_failure_log(error)
@@ -1147,6 +1222,10 @@ class Cluster:
         elif self.role == 'gateway':
             unreachable = []
             say('Managed gateway loaded: ' + str(self.service_active()))
+            if self.gateway_tailnet:
+                if not self.gateway_forward(int(self.c['port'])):
+                    fail('Gateway Tailscale Serve forwarding missing; rerun setup.')
+                say('Tailnet gateway: ' + self.public_endpoint + '/v1 (forward configured; remote peer test required)')
             for node, profile in self.c['nodes'].items():
                 try:
                     expected = {r['model'] for r in self.c['routes'].values() if r['node'] == node}

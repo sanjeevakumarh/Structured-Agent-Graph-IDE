@@ -154,9 +154,11 @@ class SafetyTests(unittest.TestCase):
     def test_http_error_preserves_status_and_redacts_key(self):
         key = 'sk-test-secret'
         e = m.urllib.error.HTTPError('http://localhost/v1/chat/completions', 500, 'Internal Server Error', {}, io.BytesIO(('bad tensor ' + key).encode()))
-        with patch.object(m.urllib.request,'urlopen',side_effect=e):
+        with patch.object(m.urllib.request,'build_opener') as opener:
+            opener.return_value.open.side_effect = e
             with self.assertRaises(m.urllib.error.HTTPError) as caught:
                 m.api('http://localhost/v1/chat/completions',key,{})
+        self.assertEqual(opener.call_args.args[0].proxies, {})
         self.assertEqual(caught.exception.code,500)
         self.assertIn('bad tensor [REDACTED]',str(caught.exception))
         self.assertNotIn(key,str(caught.exception))

@@ -27,6 +27,7 @@ class GatewayLifecycleTests(unittest.TestCase):
         c.service_path = lambda: home / 'gateway.plist'
         c.service_path().write_text('local-ai-cluster')
         c.key = lambda name: 'sk-' + name + 'x'*40
+        c.configure_gateway_serve = MagicMock()
 
     def test_bootstrap_loaded_is_noop(self):
         with patch.object(self.c, 'gateway_loaded', return_value=True), patch.object(m, 'run') as run:
@@ -82,3 +83,38 @@ class GatewayLifecycleTests(unittest.TestCase):
         with patch.object(seed,'confirm',side_effect=RuntimeError('Not approved')):
             with self.assertRaisesRegex(RuntimeError,'Not approved'):seed.deploy(c)
         c.stop.assert_not_called();c.sync.assert_not_called()
+
+    def test_gateway_tailnet_uses_loopback(self):
+        self.assertEqual(self.c.endpoint, 'http://127.0.0.1:4001')
+        self.assertTrue(self.c.gateway_tailnet)
+
+    def test_private_serve_config(self):
+        c=self.c
+        with patch.object(c,'gateway_serve_config',return_value={'TCP':{'4001':{'TCPForward':'127.0.0.1:4001'}}}):
+            self.assertTrue(c.gateway_forward(4001))
+        with patch.object(c,'gateway_serve_config',return_value={'TCP':{'4001':{'HTTP':True}}}):
+            with self.assertRaisesRegex(RuntimeError,'different handler'): c.gateway_forward(4001)
+        with patch.object(c,'gateway_serve_config',return_value={'AllowFunnel':{'example.ts.net:4001':True}}):
+            with self.assertRaisesRegex(RuntimeError,'Funnel'): c.gateway_forward(4001)
+
+    def test_serve_install_and_retire_owned_port(self):
+        c=self.c
+        with patch.object(c,'gateway_forward',side_effect=[None,{'TCPForward':'127.0.0.1:4001'}, {'TCPForward':'127.0.0.1:4001'}]), patch.object(c,'tailscale') as cli:
+            m.Cluster.configure_gateway_serve(c)
+            cli.assert_called_once_with('serve','--bg','--tcp=4001','tcp://127.0.0.1:4001')
+            self.assertTrue((c.cfg/'gateway-serve.json').is_file())
+            c.remove_gateway_serve()
+            cli.assert_called_with('serve','--tcp=4001','off')
+            self.assertFalse((c.cfg/'gateway-serve.json').exists())
+
+    def test_serve_idempotent_and_no_unowned_removal(self):
+        c=self.c
+        with patch.object(c,'gateway_forward',return_value={'TCPForward':'127.0.0.1:4001'}), patch.object(c,'tailscale') as cli:
+            c.remove_gateway_serve()  # no marker
+            m.Cluster.configure_gateway_serve(c)
+            cli.assert_not_called()
+
+    def test_local_readiness_uses_direct_api(self):
+        with patch.object(m,'api',return_value={'data':[]}) as api:
+            self.c.wait_ready()
+            api.assert_called_once_with('http://127.0.0.1:4001/v1/models',self.c.key('gateway'),timeout=2)

@@ -36,5 +36,9 @@ while IFS=$'\t' read -r node role <&3; do
     # The worker resolves runtime and catalog from its own YAML.
     args=(general --profile "$mode" --quiesced)
   fi
-  bash common/setup.sh --modes "${args[@]}" --node "$node" --remote ${options[@]+"${options[@]}"}
+  if [[ ${#options[@]} -gt 0 ]]; then
+  bash common/setup.sh --modes "${args[@]}" --node "$node" "${options[@]}" --remote
+else
+  bash common/setup.sh --modes "${args[@]}" --node "$node" --remote
+fi
 done 3<<< "$members"

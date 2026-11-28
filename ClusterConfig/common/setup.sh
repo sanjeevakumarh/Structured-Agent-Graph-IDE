@@ -29,7 +29,11 @@ for interpreter in python3 python; do
   fi
 done
 if command -v uv >/dev/null; then
-  exec uv run ${uv_options[@]+"${uv_options[@]}"} --no-project --python 3.12 --with pyyaml==6.0.3 python "$entry" "$@"
+  if [[ ${#uv_options[@]} -gt 0 ]]; then
+  exec uv run "${uv_options[@]}" --no-project --python 3.12 --with pyyaml==6.0.3 python "$entry" "$@"
+else
+  exec uv run --no-project --python 3.12 --with pyyaml==6.0.3 python "$entry" "$@"
+fi
 fi
 echo 'Install Python with PyYAML or uv on this machine (Mac: brew install uv).' >&2
 exit 1

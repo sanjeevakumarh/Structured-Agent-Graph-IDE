@@ -6,7 +6,8 @@
 param(
     [ValidateSet('health','validate','setup','benchmark','calibrate')]
     [string]$Action = 'health',
-    [switch]$Yes
+    [switch]$Yes,
+    [string]$OnlyNode
 )
 # Read local settings relative to this script, not the current working directory.
 $ConfigPath = Join-Path $PSScriptRoot 'config/cluster.local.json'
@@ -36,7 +37,32 @@ $Repo = Quote-RemotePath $Local.repo
 
 # Logical profile names are portable; machine/user mappings are local only.
 # Keep the gateway last: the preflight distributes its key to the three workers.
-$NodeNames = @('gmini','p520','z820','nano','ventunoq','macmini')
+$SSH = @('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3')
+$InventoryScript = Join-Path $PSScriptRoot 'common/inventory.py'
+$Gateway = if (Get-Command python -ErrorAction SilentlyContinue) {
+    & python $InventoryScript 2>$null
+}
+if (-not $Gateway -and (Get-Command uv -ErrorAction SilentlyContinue)) {
+    $Gateway = & uv run --offline --no-project --with pyyaml --python 3.12 python $InventoryScript
+}
+if ($LASTEXITCODE -ne 0 -or $Gateway -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]*$') { throw 'Cannot discover gateway from local profiles (Python + PyYAML required).' }
+$MacTarget = $Local.targets.$Gateway
+if ($MacTarget -notmatch '^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*$') { throw 'Invalid gateway SSH target.' }
+$Rows = @(& ssh @SSH -T $MacTarget "cd $Repo && python3 common/modes.py inventory --roles")
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read inventory from the gateway checkout.' }
+$Roles = [ordered]@{}
+foreach ($Row in $Rows) {
+    if ($Row -notmatch '^([A-Za-z0-9][A-Za-z0-9_-]*)\t(worker|edge|gateway)$') { throw 'Invalid inventory response.' }
+    $Roles.Add($Matches[1], $Matches[2])
+}
+$Members = @($Roles.Keys)
+$NodeNames = @($Members | Where-Object { $Roles[$_] -ne 'gateway' }) + @($Members | Where-Object { $Roles[$_] -eq 'gateway' })
+if ($OnlyNode) {
+    if ($OnlyNode -notin $Members) { throw "$OnlyNode is disabled in the Mac inventory." }
+    if ($Action -eq 'setup') { throw 'Use a node setup script for individual provisioning.' }
+    $NodeNames = @($OnlyNode)
+}
+if (-not $NodeNames.Count) { Write-Host 'No enabled nodes.'; return }
 $Nodes = foreach ($Name in $NodeNames) {
     $Target = $Local.targets.$Name
     if ($Target -isnot [string] -or $Target -notmatch '^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*$') {
@@ -44,40 +70,39 @@ $Nodes = foreach ($Name in $NodeNames) {
     }
     @{Name=$Name; Target=$Target}
 }
-$SSH = @('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3')
 $RemoteEnv = 'export LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_PAGER=cat; '
 $Option = if ($Action -eq 'setup') { '--install' } else { "--$Action" }
 if ($Yes -and $Action -in @('setup','calibrate','benchmark')) { $Option += ' --yes' }
 if ($Action -eq 'setup') {
     # Verify every checkout before destructive changes on any node.
     foreach ($Node in $Nodes) {
-        $Version = & ssh @SSH -T $Node.Target "$RemoteEnv cd $Repo && bash setup-$($Node.Name).sh --version"
+        $Version = & ssh @SSH -T $Node.Target "$RemoteEnv cd $Repo && bash common/setup.sh $($Node.Name) --version"
         if ($LASTEXITCODE -ne 0 -or (($Version -join ' ') -notmatch 'local-ai-cluster\s+v?0\.11\b')) {
             throw "Setup aborted: $($Node.Name) does not have v0.11. Update its checkout first."
         }
     }
     # Preserve existing gateway keys and distribute the worker key privately.
-    & ssh @SSH -T $Nodes[-1].Target "$RemoteEnv cd $Repo && bash setup-macmini.sh --init-keys"
+    & ssh @SSH -T $MacTarget "$RemoteEnv cd $Repo && bash common/setup.sh $Gateway --init-keys"
     if ($LASTEXITCODE -ne 0) { throw 'Gateway key initialization failed.' }
-    $WorkerKey = & ssh @SSH -T $Nodes[-1].Target 'cat ~/inference/config/worker.key'
+    $WorkerKey = & ssh @SSH -T $MacTarget 'cat ~/inference/config/worker.key'
     if ($LASTEXITCODE -ne 0 -or ($WorkerKey -join '') -notmatch '^sk-[A-Za-z0-9_-]{32,}$') { throw 'Could not read valid worker key.' }
     try {
-        foreach ($Node in $Nodes[0..2]) {
+        foreach ($Node in @($Nodes | Where-Object { $Roles[$_.Name] -eq 'worker' })) {
             $WorkerKey | & ssh @SSH -T $Node.Target 'umask 077; mkdir -p ~/inference/config && chmod 700 ~/inference/config && cat > ~/inference/config/worker.key && chmod 600 ~/inference/config/worker.key'
             if ($LASTEXITCODE -ne 0) { throw "Key distribution failed: $($Node.Name)" }
         }
     } finally { Remove-Variable WorkerKey -ErrorAction SilentlyContinue }
 }
 $Results = foreach ($Node in $Nodes) {
-    if ($Node.Name -eq 'macmini' -and $Action -in @('benchmark','calibrate')) {
+    if ($Roles[$Node.Name] -eq 'gateway' -and $Action -in @('benchmark','calibrate')) {
         [pscustomobject]@{Node=$Node.Name; Status='N/A'; ExitCode=0}; continue
     }
     Write-Host "`n=== $($Node.Name): $Action ===" -ForegroundColor Cyan
-    $Command = "$RemoteEnv cd $Repo && bash setup-$($Node.Name).sh $Option"
+    $Command = "$RemoteEnv cd $Repo && bash common/setup.sh $($Node.Name) $Option"
     $TTY = if ($Action -in @('setup','benchmark','calibrate')) { '-tt' } else { '-T' }
     & ssh @SSH $TTY $Node.Target $Command | Out-Host
     $Code = $LASTEXITCODE
-    [pscustomobject]@{Node=$Node.Name; Status=if ($Code -eq 0) {'PASS'} elseif ($Action -eq 'health' -and $Node.Name -eq 'macmini' -and $Code -eq 3) {'DEGRADED'} else {'FAIL'}; ExitCode=$Code}
+    [pscustomobject]@{Node=$Node.Name; Status=if ($Code -eq 0) {'PASS'} elseif ($Action -eq 'health' -and $Roles[$Node.Name] -eq 'gateway' -and $Code -eq 3) {'DEGRADED'} else {'FAIL'}; ExitCode=$Code}
 }
 $Results | Format-Table -AutoSize
 if ($Results.Status -contains 'FAIL') { exit 1 }

@@ -2,7 +2,7 @@
 """Manage edge inference with native Ollama or GenieX.
 Edit the node YAML. Seed deletes unconfigured model tags via native CLI, then
 validates inference. Vendor drivers/runtime remain. No legacy rollback.
-Nano tests isolate runner sessions and wait for native unload. Reports are local.
+Ollama tests isolate runner sessions and wait for native unload. Reports are local.
 """
 import json
 import os

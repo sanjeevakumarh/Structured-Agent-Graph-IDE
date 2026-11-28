@@ -1,6 +1,7 @@
 # RTX A4500 20 GiB; Sandy Bridge Xeons have AVX but NO AVX2.
 node: z820
 role: worker
+media_backend: cuda
 hardware:
   vendor: "0x10de"
   pci_device: "0x2232"

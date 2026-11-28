@@ -32,7 +32,9 @@ def cleanup_plan(c):
     """Only explicitly inventoried inference-only roots; not arbitrary home paths."""
     home = Path.home().resolve()
     rules = c.c.get('legacy_cleanup', {})
-    allowed = {home / n for n in ('models','llama-rocm','llama-vulkan-gmini','llama-vulkan')}
+    allowed = {home / n for n in ('models','llama-rocm','llama-vulkan')}
+    if c.c.get('node') and re.fullmatch(r'[A-Za-z0-9_-]+', c.c['node']):
+        allowed.add(home / ('llama-vulkan-' + c.c['node']))
     allowed |= {Path('/usr/share/ollama/.ollama/models'), Path('/usr/local/lib/ollama')}
     dirs = [Path(x).expanduser() for x in rules.get('directories', [])]
     files = [Path(x).expanduser() for x in rules.get('files', [])]

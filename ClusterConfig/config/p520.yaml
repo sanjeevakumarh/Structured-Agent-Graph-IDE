@@ -1,6 +1,7 @@
 # Arc Pro B70 / 64 GB system RAM. Xe driver/Level Zero already installed; don't replace drivers.
 node: p520
 role: worker
+media_backend: xpu
 hardware:
   vendor: "0x8086"
   pci_device: "0xe223"

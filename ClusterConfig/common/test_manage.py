@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tempfile
+import profile_fixtures as fixtures
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ class SafetyTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.patch = patch.object(m.Path, 'home', return_value=self.home)
         self.patch.start()
-        self.args = SimpleNamespace(dry_run=True,node='gmini', action='install', backend=None, yes=True, reclaim_first=False, prune=False, model=None)
+        self.args = SimpleNamespace(dry_run=True,node=fixtures.AMD, action='install', backend=None, yes=True, reclaim_first=False, prune=False, model=None)
         self.c = m.Cluster(self.args)
         self.c.host_check = lambda: None
         self.c.prepare()
@@ -29,7 +30,7 @@ class SafetyTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_all_profiles(self):
-        for node in ['macmini', 'gmini', 'p520', 'z820', 'nano', 'ventunoq']:
+        for node in fixtures.NODES:
             self.args.node = node
             c = m.Cluster(self.args)
             self.assertEqual(c.c['node'], node)
@@ -51,7 +52,7 @@ class SafetyTests(unittest.TestCase):
     def test_optional_gateway_overlay_does_not_replace_standard(self):
         import copy
         import yaml
-        config = yaml.safe_load((m.REPO / 'config/macmini.yaml').read_text())
+        config = yaml.safe_load((m.REPO / f'config/{fixtures.GATEWAY}.yaml').read_text())
         baseline = m.gateway_routes(config, m.REPO / 'config')
         extra = copy.deepcopy(config)
         extra['catalog_overlays'] = ['abliterated']
@@ -124,19 +125,19 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(external.exists())
 
     def test_source_change_changes_identity(self):
-        spec = self.c.desired['gmini/qwen3-coder-next-80b-q4_k_m']
+        spec = self.c.desired[f'{fixtures.AMD}/qwen3-coder-next-80b-q4_k_m']
         changed = {'source': dict(spec['source'], digest='0' * 64), 'context': spec['context']}
         self.assertNotEqual(m.model_id(spec), m.model_id(changed))
         self.assertEqual(m.model_id(spec), m.model_id(dict(spec, context=65536)))
 
     def test_gateway_config_secrets_and_models(self):
-        self.args.node = 'macmini'
+        self.args.node = fixtures.GATEWAY
         c = m.Cluster(self.args)
         for name in ['worker', 'gateway']:
             m.atomic(c.cfg / (name + '.key'), 'sk-' + name + 'x' * 40)
         config = c.render_gateway()
         self.assertEqual(len(config['model_list']), len(c.c['routes']))
-        embedding = next(x for x in config['model_list'] if x['model_name'] == 'macmini/qwen3-embedding-0.6b-q8_0')
+        embedding = next(x for x in config['model_list'] if x['model_name'] == f'{fixtures.GATEWAY}/qwen3-embedding-0.6b-q8_0')
         self.assertEqual(embedding['model_info']['mode'], 'embedding')
         self.assertTrue(config['general_settings']['master_key'].startswith('sk-'))
 
@@ -169,7 +170,7 @@ class SafetyTests(unittest.TestCase):
             self.assertFalse(any('start' in call.args for call in run.call_args_list))
 
     def test_explicit_model_logging_and_offload_parser(self):
-        cmd = m.model_command('/bin/server', Path('/models'), [{'name':'model.gguf'}], 'z820/model', {'context':8192}, 12345)
+        cmd = m.model_command('/bin/server', Path('/models'), [{'name':'model.gguf'}], f'{fixtures.CUDA}/model', {'context':8192}, 12345)
         self.assertEqual(cmd[-5:], ['--log-verbosity','4','--log-colors','off','--no-log-jsonl'])
         self.assertEqual(m.offload_counts('load_tensors: offloaded \x1b[32m25/25\x1b[0m layers to GPU'), (25,25))
         self.assertEqual(m.offload_counts('offloaded 25/25 layers to GPU\noffloaded 0/25 layers to GPU'), (0,25))
@@ -191,13 +192,13 @@ class SafetyTests(unittest.TestCase):
         from types import SimpleNamespace
         with patch.object(m, 'run', return_value=SimpleNamespace(stdout='load_tensors: offloaded 20/40 layers to GPU')):
             with self.assertRaisesRegex(RuntimeError, 'below target'):
-                self.c.check_gpu_offload('2026-11-27 00:00:00', 'gmini/qwen3-coder-next-80b-q4_k_m')
+                self.c.check_gpu_offload('2026-11-27 00:00:00', f'{fixtures.AMD}/qwen3-coder-next-80b-q4_k_m')
         with patch.object(m, 'run', return_value=SimpleNamespace(stdout='load_tensors: offloaded 40/40 layers to GPU')):
-            self.c.check_gpu_offload('2026-11-27 00:00:00', 'gmini/qwen3-coder-next-80b-q4_k_m')
+            self.c.check_gpu_offload('2026-11-27 00:00:00', f'{fixtures.AMD}/qwen3-coder-next-80b-q4_k_m')
 
     def test_native_model_log_independent_of_journal(self):
         c=self.c
-        alias='gmini/qwen3-coder-next-80b-q4_k_m'
+        alias=f'{fixtures.AMD}/qwen3-coder-next-80b-q4_k_m'
         c.cfg.mkdir(parents=True,exist_ok=True)
         c.model_log(alias).write_text('load_tensors: offloaded 49/49 layers to GPU')
         with patch.object(m,'run') as run:

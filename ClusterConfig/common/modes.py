@@ -17,7 +17,13 @@ REPO = Path(__file__).resolve().parents[1]
 ROOT = Path.home() / 'inference'
 LLM = 'local-ai-inference.service'
 MEDIA = 'local-ai-media.service'
-NODES = ('gmini', 'z820', 'p520', 'macmini')
+from inventory import profiles, gateway, members
+
+
+def media_backend(node):
+    backend = profiles()[node].get('media_backend')
+    require(backend in ('cuda', 'xpu'), 'No supported media backend configured for ' + node)
+    return backend
 
 
 def run(*args, check=True):
@@ -164,7 +170,7 @@ def provision_catalog(node, catalog):
 
 
 def provision_media(node, storage):
-    require(node in ('z820', 'p520'), 'Media supported only as Z820 CUDA / experimental P520 XPU')
+    backend = media_backend(node)
     require(storage, '--storage is required for provision-media')
     base = private_path(storage)
     spec = manifest()
@@ -182,7 +188,7 @@ def provision_media(node, storage):
     run('uv', 'venv', '--python', spec['python'], env)
     constraints = base / 'constraints.txt'
     constraints.write_text('\n'.join(k + '==' + v for k, v in spec['pytorch'].items()) + '\n')
-    index = spec['indexes']['cuda' if node == 'z820' else 'xpu']
+    index = spec['indexes'][backend]
     run('uv', 'pip', 'install', '--python', env / 'bin/python', '--index-url', index,
         *[k + '==' + v for k, v in spec['pytorch'].items()])
     run('uv', 'pip', 'install', '--python', env / 'bin/python', '-c', constraints, '-r', runtime / 'requirements.txt')
@@ -194,7 +200,7 @@ def provision_media(node, storage):
     command = [env / 'bin/python', runtime / 'main.py', '--listen', '127.0.0.1', '--port', '8188',
                '--base-directory', base, '--models-directory', '${MEDIA_MODELS}', '--disable-auto-launch', '--disable-all-custom-nodes',
                '--offline', '--use-pytorch-cross-attention', '--lowvram']
-    if node == 'z820':
+    if backend == 'cuda':
         command += ['--cuda-device', '0']
     unit = '# local-ai-cluster private media\n[Unit]\nDescription=Private local ComfyUI\n[Service]\n'
     unit += 'User=' + run('id', '-un').stdout.strip() + '\nUMask=0077\n'
@@ -221,7 +227,7 @@ def verify_media(node):
     require(install['node'] == node and install['manifest'] == digest(REPO / 'config/profiles/media.yaml'), 'Media installation is stale')
     require(not active(LLM) and not active(MEDIA), 'Stop idle services before accelerator validation')
     gpu_free()
-    backend = 'cuda' if node == 'z820' else 'xpu'
+    backend = media_backend(node)
     code = ('import torch; assert torch.' + backend + '.is_available(); '
             'x=torch.ones((64,64),device="' + backend + '"); '
             'assert (x@x).cpu()[0,0].item()==64; print(torch.' + backend + '.get_device_name(0))')
@@ -242,7 +248,7 @@ def validate_catalog(node, catalog, quiesced):
     """Explicit inference test, isolated from daily switching; no downloads."""
     import yaml
     from manage import Cluster, atomic, api, offload_counts
-    require(node != 'macmini' and quiesced, 'Worker validation requires stopped clients and --quiesced')
+    require(profiles()[node]['role'] == 'worker' and quiesced, 'Worker validation requires stopped clients and --quiesced')
     require(not active(LLM) and not active(MEDIA), 'Switch off first; validation will not interrupt services')
     gpu_free()
     c = Cluster(argparse.Namespace(node=node, backend=None, dry_run=False, model=None))
@@ -282,15 +288,12 @@ def validate_catalog(node, catalog, quiesced):
     print('Compatibility passed; services left off. Review samples separately before enabling overlay.')
 
 
-def provision_router():
+def provision_router(node):
     from manage import Cluster, atomic
     import yaml
-    c = Cluster(argparse.Namespace(node='macmini', backend=None, dry_run=False))
+    c = Cluster(argparse.Namespace(node=node, backend=None, dry_run=False))
     require(not c.service_active(), 'Stop the idle gateway and its clients before provisioning router routes')
     require(c.service_path().is_file() and c.active.is_file(), 'Provision original gateway first')
-    from manage import gateway_routes
-    c.c['catalog_overlays'] = ['abliterated']
-    c.c['routes'] = gateway_routes(c.c, REPO / 'config')
     enabled()  # Preserve all installed Mac model tags from legacy seed pruning.
     atomic(c.native, yaml.safe_dump(c.render_gateway(), sort_keys=False))
     print('Gateway routes staged. Use router-start when ready; no models downloaded or removed.')
@@ -352,7 +355,7 @@ def switch(node, mode, catalog, quiesced, profile=None):
             require(proof.get('config_sha256') == digest(config) and proof.get('compatibility_pass') is True and proof.get('quality_pass') is True,
                     'Independent checkpoint compatibility and quality review required')
     if mode == 'video':
-        require(node in ('z820', 'p520'), 'No media backend on this node')
+        backend = media_backend(node)
         proof = read(ROOT / 'config/media-verified.json')
         require(proof['node'] == node and proof['manifest'] == digest(REPO / 'config/profiles/media.yaml') and proof['unit'] == digest(Path('/etc/systemd/system') / MEDIA), 'Media validation missing/stale')
         if selected:
@@ -363,12 +366,12 @@ def switch(node, mode, catalog, quiesced, profile=None):
             view = Path(proof['base']) / 'bundles' / selected['bundles'][0]
             for name, item in weights.items():
                 require((view / name).stat().st_size == item['size'], 'Provision media bundle first')
-        if node == 'p520':
+        if backend == 'xpu':
             review = read(ROOT / 'config/media-xpu-reviewed.json')
             require(review.get('manifest') == proof['manifest'] and review.get('node') == node
                     and review.get('checkpoint_pass') is True and review.get('workflow_pass') is True
                     and review.get('quality_pass') is True and review.get('evidence'),
-                    'P520 requires recorded checkpoint/workflow compatibility and quality evidence, not just a tensor smoke test')
+                    'XPU requires recorded checkpoint/workflow compatibility and quality evidence, not just a tensor smoke test')
     idle(llm, media, c.endpoint, c.key('worker'))
     if llm:
         c.stop()
@@ -396,7 +399,7 @@ def switch(node, mode, catalog, quiesced, profile=None):
                         require(expected == {x['id'] for x in found['data']}, 'Prepared catalog differs from advertised models')
                     else:
                         found = http('http://127.0.0.1:8188/system_stats')
-                        backend = 'cuda' if node == 'z820' else 'xpu'
+                        backend = media_backend(node)
                         require(any(d.get('type') == backend for d in found.get('devices', [])), 'ComfyUI did not select intended GPU backend')
                     break
                 except (OSError, ValueError):
@@ -420,6 +423,8 @@ def remote(args):
     command = ['python3', 'common/modes.py', args.action, '--node', args.node, '--catalog', args.catalog]
     if getattr(args, 'profile', None):
         command += ['--profile', args.profile]
+    if getattr(args, 'roles', False):
+        command.append('--roles')
     if args.quiesced:
         command.append('--quiesced')
     if args.dry_run:
@@ -437,8 +442,10 @@ def remote(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['status', 'general', 'video', 'off', 'provision-catalog', 'validate-catalog', 'provision-router', 'router-start', 'provision-media', 'verify-media', 'download-media'])
-    p.add_argument('--node', choices=NODES, required=True)
+    p.add_argument('action', choices=['inventory', 'status', 'general', 'video', 'off', 'provision-catalog', 'validate-catalog', 'provision-router', 'router-start', 'provision-media', 'verify-media', 'download-media'])
+    nodes = profiles()
+    p.add_argument('--node', choices=nodes)
+    p.add_argument('--roles', action='store_true', help='Include roles in inventory output')
     p.add_argument('--catalog', choices=['standard', 'abliterated'], default='standard')
     p.add_argument('--profile', choices=['general', 'general-abliterated', 'video', 'video-abliterated'])
     p.add_argument('--remote', action='store_true', help='Use existing cluster.local.json SSH mappings; works on Mac or Windows')
@@ -447,6 +454,29 @@ def main():
     p.add_argument('--bundle', choices=sorted({bundle for item in manifest()['models'] for bundle in item['bundles']}), default='starter')
     p.add_argument('--dry-run', action='store_true')
     a = p.parse_args()
+    if a.action == 'inventory':
+        a.node = a.node or gateway(nodes)
+        require(a.node == gateway(nodes), 'Inventory belongs to the gateway')
+        if a.remote:
+            remote(a)
+        else:
+            for name, role in members(nodes):
+                print(name + '\t' + role if a.roles else name)
+        return
+    if not a.node:
+        p.error('--node is required for this action')
+    role = nodes[a.node]['role']
+    if role == 'edge':
+        require(a.action == 'status' or a.profile, 'Choose a cluster mode or status for the edge runtime')
+        profile = nodes[a.node]
+        models = [m['id'] for m in profile['edge_models'].values() if m.get('enabled', True)]
+        if a.remote and not a.dry_run:
+            remote(a)
+            return
+        print(f"{a.node}: {a.profile or 'status'} | {profile['runtime']} | {', '.join(models)}")
+        if not a.dry_run:
+            subprocess.run(['bash', str(REPO / 'common/setup.sh'), a.node, '--health'], check=True)
+        return
     if a.profile:
         import yaml
         selection = yaml.safe_load((REPO / 'config' / (a.node + '.yaml')).read_text())['modes'][a.profile]
@@ -459,14 +489,14 @@ def main():
     if a.dry_run:
         print(json.dumps({'node': a.node, 'action': a.action, 'catalog': a.catalog, 'effects': 'none', 'switch_downloads': False, 'switch_deletions': False}))
         return
-    if a.node == 'macmini':
+    if role == 'gateway':
         require(sys.platform == 'darwin' and a.action in ('status', 'provision-router', 'router-start'), 'Mac supports status/provision-router/router-start only; switch workers with --remote')
     else:
         require(sys.platform.startswith('linux'), 'Local actions require the Linux worker; use --remote from Mac/Windows')
     if a.action == 'status':
-        if a.node == 'macmini':
+        if role == 'gateway':
             from manage import Cluster
-            c = Cluster(argparse.Namespace(node='macmini', backend=None, dry_run=False))
+            c = Cluster(argparse.Namespace(node=a.node, backend=None, dry_run=False))
             print(json.dumps({'router_active': c.service_active(), 'routes': sorted(c.c['routes'])}))
             return
         state = ROOT / 'config/mode-state.json'
@@ -477,12 +507,12 @@ def main():
     with (ROOT / '.manage.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if a.action == 'provision-router':
-            require(a.node == 'macmini', 'Router is on Mac only')
-            provision_router()
+            require(role == 'gateway', 'Router is on Mac only')
+            provision_router(a.node)
         elif a.action == 'router-start':
-            require(a.node == 'macmini', 'Router is on Mac only')
+            require(role == 'gateway', 'Router is on Mac only')
             from manage import Cluster
-            Cluster(argparse.Namespace(node='macmini', backend=None, dry_run=False)).start()
+            Cluster(argparse.Namespace(node=a.node, backend=None, dry_run=False)).start()
         elif a.action == 'provision-catalog':
             provision_catalog(a.node, a.catalog)
         elif a.action == 'validate-catalog':

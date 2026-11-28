@@ -48,8 +48,12 @@ def valid_alias(alias, node):
 
 def gateway_routes(config, profiles):
     """One model catalog per worker; disabled/offline nodes do not block startup."""
+    from inventory import profiles as load_profiles, routes_for
+    inventory = config['nodes']
+    if isinstance(inventory, list):
+        inventory = routes_for(config, load_profiles(profiles))
     routes = {}
-    for node, n in config['nodes'].items():
+    for node, n in inventory.items():
         if not n.get('enabled', False):
             continue
         url = n['url'].rstrip('/')
@@ -355,6 +359,8 @@ class Cluster:
         if any(not valid_alias(k, args.node) for k in self.c.get('models', {})):
             fail('Model IDs must be node/model-name with safe characters.')
         if self.role == 'gateway':
+            from inventory import profiles, routes_for
+            self.c['nodes'] = routes_for(self.c, profiles())
             self.c['routes'] = gateway_routes(self.c, REPO / 'config')
         if self.role == 'worker' and self.backend not in ('vulkan', 'cuda', 'cuda-native', 'rocm', 'sycl'):
             fail('Unsupported backend: ' + self.backend)
@@ -639,7 +645,7 @@ class Cluster:
             if not re.search(expect, r.stdout + r.stderr, re.I):
                 fail('Expected GPU missing from llama.cpp device list.')
         except (subprocess.CalledProcessError, OSError) as e:
-            fail(f'Runtime failed ({e}); Z820 may need --backend cuda-native; check driver/library compatibility.')
+            fail(f'Runtime failed ({e}); check driver/library compatibility and the backends listed in the node profile.')
         if not owned(self.swap):
             tag = self.v['llama_swap']
             metadata = self.cache / f'llama-swap-{tag}-release.json'
@@ -746,6 +752,28 @@ class Cluster:
             run('uv', 'pip', 'install', '--python', self.venv / 'bin/python', f'litellm[proxy]=={self.v["litellm"]}')
         except BaseException:
             remove_owned(self.venv)
+            raise
+
+    def apply_routes(self):
+        """Apply Mac routing YAML using only the installed local gateway."""
+        if self.role != 'gateway' or not self.service_path().is_file() or not self.native.is_file():
+            fail('Apply routes on an installed Mac gateway.')
+        self.service_owned()
+        old = self.native.read_bytes()
+        new = self.render_gateway()
+        if yaml.safe_load(old) == new:
+            self.start()
+            return
+        loaded = self.gateway_loaded(privileged=True)
+        self.gateway_bootout()
+        try:
+            atomic(self.native, yaml.safe_dump(new, sort_keys=False))
+            self.start()
+        except BaseException:
+            self.gateway_bootout()
+            atomic(self.native, old)
+            if loaded:
+                self.start()
             raise
 
     def render_gateway(self):
@@ -1257,6 +1285,9 @@ class Cluster:
                     fail('Gateway Tailscale Serve forwarding missing; rerun setup.')
                 say('Tailnet gateway: ' + self.public_endpoint + '/v1 (forward configured; remote peer test required)')
             for node, profile in self.c['nodes'].items():
+                if not profile.get('enabled'):
+                    say(f'{node}: disabled in gateway config; skipped')
+                    continue
                 try:
                     expected = {r['model'] for r in self.c['routes'].values() if r['node'] == node}
                     node_cfg = self.c if node == self.a.node else yaml.safe_load((REPO / 'config' / (node + '.yaml')).read_text())
@@ -1366,11 +1397,12 @@ class Cluster:
 
 
 def main():
+    from inventory import profiles
     parser = argparse.ArgumentParser(description='Local AI cluster: one profile, native services, pinned artifacts.')
     parser.add_argument('--version', action='version', version='local-ai-cluster ' + RELEASE)
-    parser.add_argument('node', choices=sorted(p.stem for p in (REPO / 'config').glob('*.yaml') if p.stem != 'versions'))
+    parser.add_argument('node', choices=profiles())
     group = parser.add_mutually_exclusive_group()
-    for flag, helptext in [('install', 'Seed/reconcile: retire old inference assets first (default)'), ('seed', 'Same as install: clean desired-state deployment, no rollback'), ('migrate', 'Alias for clean seed deployment'), ('models', 'Sync desired models; remove obsolete managed weights first'), ('cleanup', 'Remove obsolete managed model directories'), ('reset', 'Rebuild managed runtime; preserve models/cache'), ('uninstall', 'Remove managed runtime/service; preserve weights'), ('purge', 'Remove managed runtime and owned weights; preserve keys/cache'), ('start', 'Start managed service'), ('stop', 'Stop managed service'), ('health', 'Read-only system/API health'), ('validate', 'Execute inference on configured models; optionally select --model'), ('benchmark', 'Benchmark all enabled models or select --model'), ('calibrate', 'Measure real long-context prompts; optionally select --model'), ('init-keys', 'Create local gateway and worker keys on Mac')]:
+    for flag, helptext in [('apply-routes', 'Apply enabled Mac gateway routes without contacting workers'), ('install', 'Seed/reconcile: retire old inference assets first (default)'), ('seed', 'Same as install: clean desired-state deployment, no rollback'), ('migrate', 'Alias for clean seed deployment'), ('models', 'Sync desired models; remove obsolete managed weights first'), ('cleanup', 'Remove obsolete managed model directories'), ('reset', 'Rebuild managed runtime; preserve models/cache'), ('uninstall', 'Remove managed runtime/service; preserve weights'), ('purge', 'Remove managed runtime and owned weights; preserve keys/cache'), ('start', 'Start managed service'), ('stop', 'Stop managed service'), ('health', 'Read-only system/API health'), ('validate', 'Execute inference on configured models; optionally select --model'), ('benchmark', 'Benchmark all enabled models or select --model'), ('calibrate', 'Measure real long-context prompts; optionally select --model'), ('init-keys', 'Create local gateway and worker keys on Mac')]:
         group.add_argument('--' + flag, dest='action', action='store_const', const=flag, help=helptext)
     parser.add_argument('--dry-run', action='store_true', help='Print desired state only; no managed changes')
     parser.add_argument('--yes', action='store_true', help='Approve listed managed operations noninteractively')
@@ -1395,7 +1427,7 @@ def main():
             c.plan()
             say('Requested action: ' + a.action)
             return
-        if (c.cfg / 'modes-enabled.json').exists() and a.action not in ('health', 'validate'):
+        if (c.cfg / 'modes-enabled.json').exists() and a.action not in ('health', 'validate', 'apply-routes'):
             c.require_single_profile()
         if c.role == 'edge' and a.action in ('health', 'validate'):
             from edge import Edge
@@ -1412,7 +1444,9 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 fail('Another deployment action is already running on this node.')
-            if c.role == 'edge':
+            if a.action == 'apply-routes':
+                c.apply_routes()
+            elif c.role == 'edge':
                 from edge import Edge
                 Edge(c).dispatch()
             elif a.action == 'init-keys':

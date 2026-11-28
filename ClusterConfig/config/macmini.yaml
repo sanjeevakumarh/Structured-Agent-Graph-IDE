@@ -1,24 +1,13 @@
-# M4 / 16 GB. Gateway routes are derived from enabled worker profiles.
+# The active cluster. Remove a name to take it out of rotation.
+nodes: [gmini, p520, z820, nano, ventunoq, macmini]
+
 node: macmini
 role: gateway
-bind: tailnet  # local loopback + private Tailscale Serve TCP forwarding
+bind: tailnet
 port: 4001
-nodes:
-  gmini: {enabled: true, url: 'http://gmini:8081/v1'}
-  p520: {enabled: true, url: 'http://p520:8081/v1'}
-  z820: {enabled: true, url: 'http://z820:8081/v1'}
-  macmini: {enabled: true, url: 'http://localhost:11434/v1'}
-  nano:
-    enabled: false  # dedicated route, never automatic fallback
-    url: 'http://nano:11434/v1'
-  ventunoq:
-    enabled: false  # enable only after verifying vendor OpenAI API compatibility
-    url: 'http://ventunoq:18181/v1'
+endpoint: http://localhost:11434
+catalog_overlays: []
 local_models:
   macmini/qwen3-embedding-0.6b-q8_0: {model: 'qwen3-embedding:0.6b', embedding: true}
-  # macmini/qwen2.5-coder-7b-q6_k: {model: 'qwen2.5-coder:7b-instruct-q6_K'}
-# Optional short aliases map to one explicit route. No implicit cross-server fallback.
-aliases: {}
 legacy_launch_agent: local.litellm
-
 prune_native_models: true

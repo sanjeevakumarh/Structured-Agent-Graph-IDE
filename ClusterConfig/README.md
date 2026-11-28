@@ -23,13 +23,17 @@ Run from the Mac or Windows Git Bash with Python + PyYAML and the SSH mappings i
 
 Edit the `modes:` section in [gmini.yaml](config/gmini.yaml), [p520.yaml](config/p520.yaml), or [z820.yaml](config/z820.yaml) to select models. Shared YAML anchors reuse identical selections. Checkpoint pins live in the node's `models:` section and the [optional catalogs](config/profiles/). Mac serves LiteLLM throughout. P520 defaults to language service until its experimental XPU backend passes a local workflow test.
 
-Provision each selected catalog once with `python3 common/modes.py provision-catalog --node NODE --catalog standard` or `--catalog abliterated`. Stage the alternate aliases on the stopped Mac gateway with `provision-router --node macmini`, then `router-start --node macmini`. The alternate catalog requires `validate-catalog` and a quality review. On Z820 provision ComfyUI with `provision-media --node z820 --storage "$HOME/PrivateVideo"`, switch the idle node `off`, then run `verify-media` and `download-media --bundle wan22-production` with the same node argument. Provision `wan22-community` separately for video-abliterated. Select the corresponding checkpoint(s) in the native ComfyUI workflow. Switching retains installed models and stops on a busy worker. A cluster switch applies sequentially; status shows which workers completed.
+Provision each selected catalog once with `python3 common/modes.py provision-catalog --node NODE --catalog standard` or `--catalog abliterated`. Set `catalog_overlays: [abliterated]` in the Mac YAML. Stage the alternate aliases on the stopped Mac gateway with `provision-router --node macmini`, then `router-start --node macmini`. The alternate catalog requires `validate-catalog` and a quality review. On Z820 provision ComfyUI with `provision-media --node z820 --storage "$HOME/PrivateVideo"`, switch the idle node `off`, then run `verify-media` and `download-media --bundle wan22-production` with the same node argument. Provision `wan22-community` separately for video-abliterated. Select the corresponding checkpoint(s) in the native ComfyUI workflow. Switching retains installed models and stops on a busy worker. A cluster switch applies sequentially; status shows which workers completed.
 
 Use encrypted local storage and access ComfyUI through `ssh -N -L 127.0.0.1:8188:127.0.0.1:8188 YOUR_Z820_SSH_ALIAS`. SDXL portraits and Wan 14B image-to-video are optional bundles in the media manifest.
 
 The checkpoint inventory records upstream revisions and exact files. The P520 Heretic Q5 publisher supplies no vision projector. Use Gmini for captions in the alternate modes. The Z820 5B preview remains available through the `wan22-5b` bundle. A14B throughput and peak memory on the A4500 are unmeasured.
 
 Before increasing concurrency, measure the Gmini 120B + 35B pair at the intended context and slot counts, including KV caches and vision buffers. `reserve_gib` reserves disk space. Compare P520 Vulkan and SYCL with the same GGUF once oneAPI is available. For video, compare four-step A14B at 832×480/81 frames with the 5B preview, recording wall time, RAM, VRAM and output quality.
+
+The Mac checkout owns cluster membership in the YAML profile with `role: gateway`. Node profiles declare their role and optional `media_backend` (`cuda` or `xpu`). Add a node by creating its profile, listing it in the gateway YAML and setting its SSH mapping. Windows cluster commands and live mode commands read its enabled nodes before dispatch. Offline mode previews use the local copy. Every listed edge participates in all four modes with its configured native language models. Each mode switch checks that its service advertises those models. Status includes every enabled node. Setup uses the Mac as its worker-key source.
+
+To take one backend out of rotation, remove its name from `nodes` in `config/macmini.yaml` on the Mac. Once current gateway requests finish, run `./setup-macmini.sh --apply-routes`. Add its name back and repeat to restore it. Applying a change briefly restarts LiteLLM; worker services and downloads continue. On Windows, `.\cluster.ps1 health -OnlyNode macmini` checks just the gateway and its enabled routes.
 
 ## Setup
 
@@ -40,7 +44,7 @@ Requirements: working GPU drivers, Tailscale and resolvable cluster hostnames, P
 1. Replace the old repository files with this complete package on every node. Do not merge old YAML or generated configurations.
 2. From Windows, copy `config/cluster.example.json` to `config/cluster.local.json`, set the SSH targets and remote checkout path, then run `./cluster.ps1 setup`. The local file is Git-ignored; keep it only on the controlling machine. It checks versions, initializes/distributes keys, runs workers and edge nodes, then Mac. Sudo may prompt. `-Yes` approves destructive actions.
 3. Alternatively run `./setup-macmini.sh --init-keys`, copy `~/inference/config/worker.key` to the three workers with mode 600, then execute each node's setup script; Mac last.
-4. Run `./cluster.ps1 health` and `./cluster.ps1 validate`. Gateway validation requires enabled workers to be reachable; edge routes are disabled by default.
+4. Run `./cluster.ps1 health` and `./cluster.ps1 validate`. Gateway validation requires enabled workers to be reachable; the active node list includes both edge routes.
 
 ## Daily use
 

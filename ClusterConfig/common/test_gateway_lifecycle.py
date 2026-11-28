@@ -2,6 +2,7 @@
 """Offline tests for launchd transitions and failure preservation; no real services."""
 import json
 import tempfile
+import profile_fixtures as fixtures
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ class GatewayLifecycleTests(unittest.TestCase):
         home = Path(self.tmp.name)
         h = patch.object(m.Path, 'home', return_value=home)
         h.start(); self.addCleanup(h.stop)
-        self.c = c = m.Cluster(SimpleNamespace(dry_run=True,node='macmini', backend=None, yes=True, model=None, prune=False))
+        self.c = c = m.Cluster(SimpleNamespace(dry_run=True,node=fixtures.GATEWAY, backend=None, yes=True, model=None, prune=False))
         c.host_check = lambda: None
         c.prepare()
         c.service_path = lambda: home / 'gateway.plist'

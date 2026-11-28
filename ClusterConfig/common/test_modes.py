@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import profile_fixtures as fixtures
 import unittest
 from unittest.mock import patch, Mock
 
@@ -72,19 +73,19 @@ class ModesTests(unittest.TestCase):
 
     def test_all_dry_runs_have_no_effects(self):
         for action in ('general', 'video', 'off', 'provision-media', 'provision-catalog', 'validate-catalog'):
-            with patch.object(sys, 'argv', ['modes.py', action, '--node', 'z820', '--dry-run']), patch.object(m, 'run', side_effect=AssertionError('service call')), patch.object(m, 'http', side_effect=AssertionError('network')), contextlib.redirect_stdout(io.StringIO()) as out:
+            with patch.object(sys, 'argv', ['modes.py', action, '--node', fixtures.CUDA, '--dry-run']), patch.object(m, 'run', side_effect=AssertionError('service call')), patch.object(m, 'http', side_effect=AssertionError('network')), contextlib.redirect_stdout(io.StringIO()) as out:
                 m.main()
                 self.assertEqual(json.loads(out.getvalue())['effects'], 'none')
 
     def test_remote_dry_run_does_not_ssh(self):
-        args = argparse.Namespace(node='z820', action='video', catalog='standard', quiesced=False, dry_run=True, storage=None, bundle='starter')
-        with patch.object(m, 'read', return_value={'repo': "~/a b/it's", 'targets': {'z820': 'my-alias'}}), patch.object(subprocess, 'run', side_effect=AssertionError('SSH')), contextlib.redirect_stdout(io.StringIO()) as out:
+        args = argparse.Namespace(node=fixtures.CUDA, action='video', catalog='standard', quiesced=False, dry_run=True, storage=None, bundle='starter')
+        with patch.object(m, 'read', return_value={'repo': "~/a b/it's", 'targets': {fixtures.CUDA: 'my-alias'}}), patch.object(subprocess, 'run', side_effect=AssertionError('SSH')), contextlib.redirect_stdout(io.StringIO()) as out:
             m.remote(args)
             self.assertIn('SSH (not executed)', out.getvalue())
 
     def test_invalid_ssh_target_refused(self):
-        args = argparse.Namespace(node='z820')
-        with patch.object(m, 'read', return_value={'targets': {'z820': '-oProxyCommand=bad'}}), self.assertRaises(RuntimeError):
+        args = argparse.Namespace(node=fixtures.CUDA)
+        with patch.object(m, 'read', return_value={'targets': {fixtures.CUDA: '-oProxyCommand=bad'}}), self.assertRaises(RuntimeError):
             m.remote(args)
 
     def test_switch_checks_busy_before_stopping(self):
@@ -96,20 +97,20 @@ class ModesTests(unittest.TestCase):
             fake = types.SimpleNamespace(Cluster=lambda _: c, atomic=Mock())
             with patch.dict(sys.modules, {'manage': fake}), patch.object(m, 'ROOT', root), patch.object(m, 'active', side_effect=[True, False]), patch.object(m, 'idle', side_effect=RuntimeError('busy')), patch.object(m, 'run') as run:
                 with self.assertRaisesRegex(RuntimeError, 'busy'):
-                    m.switch('z820', 'off', 'standard', True)
+                    m.switch(fixtures.CUDA, 'off', 'standard', True)
                 c.stop.assert_not_called()
                 run.assert_not_called()
 
     def test_switch_requires_quiesced_clients(self):
         with patch.dict(sys.modules, {'manage': types.SimpleNamespace(Cluster=Mock(), atomic=Mock())}):
             with self.assertRaisesRegex(RuntimeError, 'clients'):
-                m.switch('z820', 'video', 'standard', False)
+                m.switch(fixtures.CUDA, 'video', 'standard', False)
 
     def test_four_profiles_resolve_every_selected_model(self):
         import yaml
         shared = yaml.safe_load((m.REPO / 'config/profiles/abliterated.yaml').read_text())['models']
         media = m.manifest()['models']
-        for node in ('gmini', 'p520', 'z820'):
+        for node in (n for n, spec in fixtures.NODES.items() if spec['role'] == 'worker'):
             profile = yaml.safe_load((m.REPO / 'config' / (node + '.yaml')).read_text())
             self.assertEqual(set(profile['modes']), {'general', 'general-abliterated', 'video', 'video-abliterated'})
             for mode in profile['modes'].values():

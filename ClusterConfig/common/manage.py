@@ -237,6 +237,10 @@ def api(url, key=None, payload=None, timeout=10):
         raise urllib.error.HTTPError(e.url, e.code, detail, e.headers, None) from None
 
 
+class DegradedRoutes(RuntimeError):
+    """Gateway discovery passed but a required backend is unavailable or stale."""
+
+
 class DiskSpaceError(RuntimeError):
     """Insufficient storage for an explicitly requested artifact."""
 
@@ -1244,7 +1248,10 @@ class Cluster:
             run('systemctl', 'status', SERVICE, '--no-pager', check=False)
         elif self.role == 'gateway':
             unreachable = []
-            say('Managed gateway loaded: ' + str(self.service_active()))
+            if not self.service_active():
+                fail('Managed gateway is not loaded')
+            self.discover()  # Check the authenticated LiteLLM endpoint before its backends.
+            say('Gateway API: PASS')
             if self.gateway_tailnet:
                 if not self.gateway_forward(int(self.c['port'])):
                     fail('Gateway Tailscale Serve forwarding missing; rerun setup.')
@@ -1263,7 +1270,9 @@ class Cluster:
                     status = f'API unavailable or incompatible ({e})'
                     if profile.get('enabled'): unreachable.append(node)
                 say(f'{node}: {status}; routing={profile.get("enabled", False)}')
-            if unreachable: fail('Required routes unavailable or stale: ' + ', '.join(unreachable))
+            if unreachable:
+                raise DegradedRoutes('Required routes unavailable or stale: ' + ', '.join(unreachable))
+            return
         self.discover()
 
     def discover(self):
@@ -1434,6 +1443,9 @@ def main():
             elif a.action == 'calibrate':
                 if c.migration_pending(): c.reconcile()
                 c.calibrate()
+    except DegradedRoutes as e:
+        print('DEGRADED: ' + str(e), file=sys.stderr)
+        sys.exit(3)
     except KeyboardInterrupt:
         print('Interrupted; no legacy rollback. Rerun setup to reconcile.', file=sys.stderr)
         sys.exit(130)

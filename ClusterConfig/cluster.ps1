@@ -77,7 +77,8 @@ $Results = foreach ($Node in $Nodes) {
     $TTY = if ($Action -in @('setup','benchmark','calibrate')) { '-tt' } else { '-T' }
     & ssh @SSH $TTY $Node.Target $Command | Out-Host
     $Code = $LASTEXITCODE
-    [pscustomobject]@{Node=$Node.Name; Status=if ($Code -eq 0) {'PASS'} else {'FAIL'}; ExitCode=$Code}
+    [pscustomobject]@{Node=$Node.Name; Status=if ($Code -eq 0) {'PASS'} elseif ($Action -eq 'health' -and $Node.Name -eq 'macmini' -and $Code -eq 3) {'DEGRADED'} else {'FAIL'}; ExitCode=$Code}
 }
 $Results | Format-Table -AutoSize
 if ($Results.Status -contains 'FAIL') { exit 1 }
+if ($Results.Status -contains 'DEGRADED') { exit 3 }

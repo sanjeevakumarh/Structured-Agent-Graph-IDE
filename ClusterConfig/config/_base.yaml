@@ -1,0 +1,56 @@
+# --------------------------------------------------------------
+# Shared base configuration for all cluster nodes
+# --------------------------------------------------------------
+# This file defines the sections that are identical across the
+# per‑node YAML files. Each node file will merge (`<<: *base`) this
+# block and then override only the node‑specific values (node name,
+# role, hardware identifiers, ports, etc.).
+# --------------------------------------------------------------
+
+base: &base
+  # ----------------------------------------------------------------
+  # Hardware template – values that are the same for every node.
+  # Individual nodes can override any of the nested keys.
+  # ----------------------------------------------------------------
+  hardware:
+    # The concrete vendor/PCI identifiers must be supplied per node.
+    vendor: ~               # e.g. "0x1002"
+    pci_device: ~           # e.g. "0x1586"
+    device_regex: ~         # e.g. "AMD|Radeon|gfx1151"
+    backends: [vulkan, rocm]
+    telemetry: ~            # e.g. "amd_gtt"
+    rocm_target: ~          # e.g. "gfx1151"
+
+  # ----------------------------------------------------------------
+  # Calibration defaults – identical for all nodes.
+  # If you later need to tweak these, edit them here only.
+  # ----------------------------------------------------------------
+  calibration:
+    contexts: [8192, 16384, 32768, 65536, 131072, 262144]
+    cache_types: [f16, q8_0, q4_0]
+    min_host_free_gib: 6
+    min_gpu_free_mib: 1024
+
+  # ----------------------------------------------------------------
+  # Common runtime / service settings (can be overridden per node).
+  # ----------------------------------------------------------------
+  # backend is intentionally omitted here – each node should set the
+  # appropriate value (vulkan, rocm, sycl, etc.) to avoid accidental
+  # defaults.
+  bind: tailnet
+  port: 8081
+  legacy_service: placeholder.service
+  migration_hostnames: []   # empty = any matching hardware
+  reserve_gib: 15
+
+  # ----------------------------------------------------------------
+  # Mode anchors – the four mode families used by the cluster.
+  # Nodes can reference these anchors directly if they need to tweak.
+  # ----------------------------------------------------------------
+  modes:
+    general: &general {}
+    general_abliterated: &general_abliterated {}
+    video: &video {}
+    video_abliterated: &video_abliterated {}
+
+# End of _base.yaml

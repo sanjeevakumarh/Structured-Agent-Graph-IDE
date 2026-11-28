@@ -3,9 +3,9 @@ node: p520
 role: worker
 media_backend: xpu
 hardware:
-  vendor: "0x8086"
-  pci_device: "0xe223"
-  device_regex: "Intel|BMG|Arc"
+  vendor: intel
+  pci_device: arc
+  device_regex: intel
   backends: [vulkan, sycl]
   telemetry: intel_xpu
   intel_device: 0

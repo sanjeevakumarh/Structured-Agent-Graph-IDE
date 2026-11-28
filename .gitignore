@@ -20,6 +20,7 @@ Thumbs.db
 
 # Logs
 *.log
+*.txt
 logs/
 
 # Database

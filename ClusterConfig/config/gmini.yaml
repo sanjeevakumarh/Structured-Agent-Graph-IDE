@@ -2,9 +2,9 @@
 node: gmini
 role: worker
 hardware:
-  vendor: "0x1002"
-  pci_device: "0x1586"  # Ryzen AI MAX+ 395 integrated graphics; adjust if hardware changes
-  device_regex: "AMD|Radeon|gfx1151"
+  vendor: amd
+  pci_device: gfx1151  # Ryzen AI MAX+ 395 integrated graphics; adjust if hardware changes
+  device_regex: amd
   backends: [vulkan, rocm]
   telemetry: amd_gtt
   rocm_target: gfx1151

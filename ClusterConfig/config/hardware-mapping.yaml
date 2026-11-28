@@ -1,0 +1,16 @@
+# Mapping of symbolic hardware identifiers to original hex values and regexes
+
+amd:
+  vendor: "0x1002"
+  pci_device: "0x1586"
+  device_regex: "AMD|Radeon|gfx1151"
+
+intel:
+  vendor: "0x8086"
+  pci_device: "0xe223"
+  device_regex: "Intel|BMG|Arc"
+
+nvidia:
+  vendor: "0x10de"
+  pci_device: "0x2232"
+  device_regex: "A4500|NVIDIA"

@@ -3,9 +3,9 @@ node: z820
 role: worker
 media_backend: cuda
 hardware:
-  vendor: "0x10de"
-  pci_device: "0x2232"
-  device_regex: "A4500|NVIDIA"
+  vendor: nvidia
+  pci_device: a4500
+  device_regex: nvidia
   backends: [cuda, cuda-native]
   telemetry: nvidia_smi
   cuda_arch: 86

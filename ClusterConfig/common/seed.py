@@ -129,6 +129,7 @@ def retire_gateway(c):
 
 
 def deploy(c):
+    c.require_single_profile()
     c.prepare(); c.service_owned()
     first = not (c.cfg/'seed-complete.json').is_file() or getattr(c.a,'action','install') == 'seed'
     c.plan()

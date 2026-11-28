@@ -1,4 +1,4 @@
-# Arc Pro B70. Xe driver/Level Zero already installed; don't replace drivers.
+# Arc Pro B70 / 64 GB system RAM. Xe driver/Level Zero already installed; don't replace drivers.
 node: p520
 role: worker
 hardware:
@@ -31,7 +31,7 @@ models:
     source:
       repo: unsloth/Qwen3.8-27B-GGUF
       revision: db81afd1e1f5d6cca1988c9fe5c8fe0844b1cad7
-      files: [Qwen3.8-27B-UD-Q5_K_M.gguf]
+      files: [Qwen3.8-27B-UD-Q5_K_M.gguf, mmproj-F16.gguf]
       reuse: ~/models/Qwen3.8-27B-GGUF
     parallel: 1
     tool_test: true
@@ -45,7 +45,7 @@ models:
     source:
       repo: unsloth/Qwen3.6-35B-A3B-GGUF
       revision: 9280dd353ab587157920d5bd391ada414d84e552
-      files: [Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf]
+      files: [Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf, mmproj-F16.gguf]
       reuse: ~/models/Qwen3.6-35B-A3B-GGUF
     parallel: 1
     tool_test: true
@@ -66,3 +66,18 @@ legacy_cleanup:
     - /usr/local/lib/ollama
   files: [/usr/local/bin/ollama, /usr/local/bin/llama-swap, ~/llama-swap.yaml]
 disable_swap_monitor: true  # v277 chooses NVIDIA monitor on this Intel node
+
+# Runtime and available models per cluster mode. YAML anchors share identical selections.
+modes:
+  general: &general
+    runtime: llm
+    catalog: standard
+    models:
+      - p520/qwen3.8-27b-ud-q5_k_m
+  general-abliterated: &alternate
+    runtime: llm
+    catalog: abliterated
+    models:
+      - p520/qwen3.8-27b-heretic-i1-q5_k_m
+  video: *general
+  video-abliterated: *alternate

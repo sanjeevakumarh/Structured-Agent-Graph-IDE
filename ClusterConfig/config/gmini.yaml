@@ -47,6 +47,7 @@ models:
       repo: ggml-org/gpt-oss-120b-GGUF
       revision: 7200b74bea78b0a2964ef9f3897eefa401e890ff
       files: [gpt-oss-120b-MXFP4.gguf]
+    args: [-b, 2048, -ub, 2048]
     parallel: 1
     tool_test: true
     test_request: {reasoning_effort: low}
@@ -59,7 +60,7 @@ models:
     source:
       repo: unsloth/Qwen3.6-35B-A3B-GGUF
       revision: 4a3a39659678d382ccdb388bced90e5a711cd5ea
-      files: [Qwen3.6-35B-A3B-UD-Q4_K_M.gguf]
+      files: [Qwen3.6-35B-A3B-UD-Q4_K_M.gguf, mmproj-F16.gguf]
     parallel: 2
     tool_test: true
     test_request: {chat_template_kwargs: {enable_thinking: false}}
@@ -73,9 +74,31 @@ models:
 legacy_cleanup:
   services: [ollama.service, llama-swap.service]
   directories:
-    - ~/models
     - ~/llama-rocm
     - ~/llama-vulkan-gmini
-    - /usr/share/ollama/.ollama/models
     - /usr/local/lib/ollama
   files: [/usr/local/bin/ollama, /usr/local/bin/llama-swap, ~/llama-swap.yaml]
+
+# Runtime and available models per cluster mode. YAML anchors share identical selections.
+modes:
+  general: &general
+    runtime: llm
+    catalog: standard
+    models:
+      - gmini/qwen3-coder-next-80b-q4_k_m
+      - gmini/gpt-oss-120b-mxfp4
+      - gmini/qwen3.6-35b-a3b-ud-q4_k_m
+  general-abliterated: &alternate
+    runtime: llm
+    catalog: abliterated
+    models:
+      - gmini/gpt-oss-120b-heretic-mxfp4
+      - gmini/qwen3.6-35b-heretic-q4_k_m
+      - gmini/qwen3-coder-next-abliterated-q4_k_m
+  video: *general
+  video-abliterated:
+    runtime: llm
+    catalog: abliterated
+    models:
+      - gmini/gpt-oss-120b-heretic-mxfp4
+      - gmini/qwen3.6-35b-heretic-q4_k_m

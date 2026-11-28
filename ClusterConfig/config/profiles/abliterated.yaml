@@ -1,0 +1,56 @@
+quality_prompt: Explain how a camera lens focuses light in three sentences.
+models:
+  gpt-oss-120b-heretic-mxfp4:
+    source:
+      repo: bartowski/kldzj_gpt-oss-120b-heretic-GGUF
+      revision: 406292f67859a86dd34853c75b573aadedf6cbda
+      files:
+      - kldzj_gpt-oss-120b-heretic-MXFP4_MOE/kldzj_gpt-oss-120b-heretic-MXFP4_MOE-00001-of-00002.gguf
+      - kldzj_gpt-oss-120b-heretic-MXFP4_MOE/kldzj_gpt-oss-120b-heretic-MXFP4_MOE-00002-of-00002.gguf
+    context: 32768
+    parallel: 1
+    tool_test: true
+    args:
+    - -b
+    - '2048'
+    - -ub
+    - '2048'
+    test_request:
+      reasoning_effort: low
+  qwen3.6-35b-heretic-q4_k_m:
+    source:
+      repo: llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-GGUF
+      revision: 9d913f7df1e80f0104fbe327620afbe24e3c56ee
+      files:
+      - Qwen3.6-35B-A3B-uncensored-heretic-Q4_K_M.gguf
+      - Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf
+    context: 32768
+    parallel: 2
+    tool_test: true
+  qwen3-coder-next-abliterated-q4_k_m:
+    source:
+      repo: bartowski/huihui-ai_Qwen3-Coder-Next-abliterated-GGUF
+      revision: 4b24fbac95c8496ceb09c3e95d15f9f9d11427d4
+      files:
+      - huihui-ai_Qwen3-Coder-Next-abliterated-Q4_K_M.gguf
+    context: 32768
+    parallel: 2
+    tool_test: true
+  qwen3.8-27b-heretic-i1-q5_k_m:
+    source:
+      repo: mradermacher/Qwen3.8-27B-heretic-ara-i1-GGUF
+      revision: 84623b1bd7236f7a10e1d80d25bcbe36b5efbdd4
+      files:
+      - Qwen3.8-27B-heretic-ara.i1-Q5_K_M.gguf
+    context: 32768
+    parallel: 1
+    tool_test: true
+  qwen3.8-27b-heretic-i1-iq4_xs:
+    source:
+      repo: mradermacher/Qwen3.8-27B-heretic-ara-i1-GGUF
+      revision: 84623b1bd7236f7a10e1d80d25bcbe36b5efbdd4
+      files:
+      - Qwen3.8-27B-heretic-ara.i1-IQ4_XS.gguf
+    context: 8192
+    parallel: 1
+    tool_test: true

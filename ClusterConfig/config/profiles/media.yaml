@@ -1,0 +1,176 @@
+status: experimental; no node execution performed
+researched: '2026-11-27'
+comfyui:
+  tag: v0.46.0
+  revision: a277b5bf213e8a44fa34817b7770b54f86ef4cea
+  url: https://github.com/Comfy-Org/ComfyUI.git
+python: '3.12'
+pytorch:
+  torch: 2.14.1
+  torchvision: 0.29.1
+indexes:
+  xpu: https://download.pytorch.org/whl/xpu
+  cuda: https://download.pytorch.org/whl/cu126
+models:
+- sha256: be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5
+  size: 2838303560
+  repo: Comfy-Org/Wan-2.1
+  destination: diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors
+  revision: d6258323e18f14c60d37899da97ca555f3118259
+  file: split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors
+  bundles:
+  - starter
+- sha256: 7b8850f1961e1cf8a77cca4c964a358d303f490833c6c087d0cff4b2f99db2af
+  size: 11366399385
+  repo: Comfy-Org/Wan-2.1
+  destination: text_encoders/umt5_xxl_fp16.safetensors
+  revision: d6258323e18f14c60d37899da97ca555f3118259
+  file: split_files/text_encoders/umt5_xxl_fp16.safetensors
+  bundles:
+  - starter
+  - image-to-video
+- sha256: 2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b
+  size: 253815318
+  repo: Comfy-Org/Wan-2.1
+  destination: vae/wan_2.1_vae.safetensors
+  revision: d6258323e18f14c60d37899da97ca555f3118259
+  file: split_files/vae/wan_2.1_vae.safetensors
+  bundles:
+  - starter
+  - image-to-video
+  - wan22-community
+  - wan22-production
+- file: split_files/clip_vision/clip_vision_h.safetensors
+  destination: clip_vision/clip_vision_h.safetensors
+  size: 1264219396
+  revision: d6258323e18f14c60d37899da97ca555f3118259
+  bundles:
+  - image-to-video
+  sha256: 64a7ef761bfccbadbaa3da77366aac4185a6c58fa5de5f589b42a65bcc21f161
+  repo: Comfy-Org/Wan-2.1
+- file: split_files/diffusion_models/wan2.1_i2v_480p_14B_fp16.safetensors
+  destination: diffusion_models/wan2.1_i2v_480p_14B_fp16.safetensors
+  size: 32791377504
+  revision: d6258323e18f14c60d37899da97ca555f3118259
+  bundles:
+  - image-to-video
+  sha256: 27988f6b510eb8d5fdd7485671b54897f8683f2bba7a772c5671be21d3491253
+  repo: Comfy-Org/Wan-2.1
+- file: sd_xl_base_1.0.safetensors
+  destination: checkpoints/sd_xl_base_1.0.safetensors
+  size: 6938078334
+  revision: 462165984030d82259a11f4367a4eed129e94a7b
+  bundles:
+  - portraits
+  sha256: 31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b
+  repo: stabilityai/stable-diffusion-xl-base-1.0
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
+  destination: diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
+  sha256: 456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e
+  size: 9999658848
+  bundles:
+  - wan22-5b
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/vae/wan2.2_vae.safetensors
+  destination: vae/wan2.2_vae.safetensors
+  sha256: e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156
+  size: 1409400960
+  bundles:
+  - wan22-5b
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+  destination: text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+  sha256: c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68
+  size: 6735906897
+  bundles:
+  - wan22-5b
+  - wan22-community
+  - wan22-production
+- repo: rzgar/wan2.2-i2v-A14B-Uncensored-base
+  revision: 44bd071cc0917cd6350d4592c291214dd8f60d19
+  file: Wan2.2_I2V_High_R1.safetensors
+  destination: diffusion_models/Wan2.2_I2V_High_R1.safetensors
+  sha256: f0d7e6ace6b16d945588124bd384afa9b74f004c8f537d7176ac86a62a370cd1
+  size: 14548610448
+  bundles:
+  - wan22-community
+- repo: rzgar/wan2.2-i2v-A14B-Uncensored-base
+  revision: 44bd071cc0917cd6350d4592c291214dd8f60d19
+  file: Wan2.2_I2V_Low_R1.safetensors
+  destination: diffusion_models/Wan2.2_I2V_Low_R1.safetensors
+  sha256: 0aca667baee6778177c61b9a4e48b484cfcfabd53f8135aab746b1ab8a6505ea
+  size: 14548610448
+  bundles:
+  - wan22-community
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+  destination: diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+  sha256: 6122e79d55e0f235698d11d657f3b196c5273c830da00b2b013c5a048d5e6a42
+  size: 14294742832
+  bundles:
+  - wan22-production
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+  destination: diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+  sha256: 5471a457b6ac404202a5fbe6c11595a3d5641fc766b00f38763f72303fffc21e
+  size: 14294742832
+  bundles:
+  - wan22-production
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors
+  destination: diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors
+  sha256: cad711ae211c8b23455ec68cd6a190a33a3d874234a77eb57266d73f8f0e6c9f
+  size: 14293923632
+  bundles:
+  - wan22-production
+  - wan22-community
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors
+  destination: diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors
+  sha256: e71b96d7c82e638694c5e7fb98fac4bfb0e4ddc5fbbb4b1df40da8f0f1278a97
+  size: 14293923632
+  bundles:
+  - wan22-production
+  - wan22-community
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+  destination: loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+  sha256: d176c808d6fc461999b68e321efcb7501b20b8c3797523ed0df14f7d1deff11e
+  size: 1226977424
+  bundles:
+  - wan22-production
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+  destination: loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+  sha256: 024f21de095bc8fad9809ded3e9e49a2e170dcf27075da8145ba7d60d8aab7f9
+  size: 1226977424
+  bundles:
+  - wan22-production
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors
+  destination: loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors
+  sha256: 698321cb86bd30c4af06c9b84e656a1048c8cb54e06d50694536fb5de37fde41
+  size: 1226977424
+  bundles:
+  - wan22-production
+  - wan22-community
+- repo: Comfy-Org/Wan-2.2
+  revision: 5df3a4a3ed0628002308022198249dbbbd045d09
+  file: split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors
+  destination: loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors
+  sha256: ec95216e614b3c132c11bfb387b11feedf62163150ccc9068bca8a189771e75a
+  size: 1226977424
+  bundles:
+  - wan22-production
+  - wan22-community

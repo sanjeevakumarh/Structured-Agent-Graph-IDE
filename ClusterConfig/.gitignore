@@ -17,3 +17,84 @@ benchmarks/results/
 
 # Private SSH targets and remote checkout paths.
 /config/cluster.local.json
+
+# Media belongs outside this checkout; defense against accidental additions.
+private-media/
+
+# Images, including iPhone HEIF, Android Ultra HDR JPEG and Google Photos exports (case-insensitive).
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[jJ][pP][eE]
+*.[jJ][fF][iI][fF]
+*.[mM][pP][oO]
+*.[hH][eE][iI][cC]
+*.[hH][eE][iI][fF]
+*.[hH][eE][iI][cC][sS]
+*.[hH][eE][iI][fF][sS]
+*.[hH][iI][fF]
+*.[aA][vV][iI][fF]
+*.[aA][vV][iI][fF][sS]
+*.[pP][nN][gG]
+*.[aA][pP][nN][gG]
+*.[gG][iI][fF]
+*.[wW][eE][bB][pP]
+*.[bB][mM][pP]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.[jJ][xX][lL]
+*.[sS][vV][gG]
+*.[sS][vV][gG][zZ]
+*.[iI][cC][oO]
+
+# Apple Photos adjustment sidecars and Google Takeout media metadata.
+*.[aA][aA][eE]
+*.[sS][uU][pP][pP][lL][eE][mM][eE][nN][tT][aA][lL]-[mM][eE][tT][aA][dD][aA][tT][aA].[jJ][sS][oO][nN]
+
+# Camera RAW, including Apple ProRAW and Android DNG (case-insensitive).
+*.[dD][nN][gG]
+*.[rR][aA][wW]
+*.[aA][rR][wW]
+*.[cC][rR]2
+*.[cC][rR]3
+*.[cC][rR][wW]
+*.[nN][eE][fF]
+*.[nN][rR][wW]
+*.[oO][rR][fF]
+*.[rR][aA][fF]
+*.[rR][wW]2
+*.[pP][eE][fF]
+*.[sS][rR][wW]
+
+# Video, including Live Photo MOV, Android recordings and exported clips (case-insensitive).
+*.[mM][oO][vV]
+*.[qQ][tT]
+*.[mM][pP]4
+*.[mM]4[vV]
+*.3[gG][pP]
+*.3[gG][pP][pP]
+*.3[gG]2
+*.3[gG][pP][pP]2
+*.[wW][eE][bB][mM]
+*.[mM][kK][vV]
+*.[aA][vV][iI]
+*.[mM][pP][gG]
+*.[mM][pP][eE][gG]
+*.[mM][pP][eE]
+*.[mM]2[vV]
+*.[mM]1[vV]
+*.[mM][tT][sS]
+*.[mM]2[tT][sS]
+*.[mM]2[tT]
+*.[wW][mM][vV]
+*.[aA][sS][fF]
+*.[fF][lL][vV]
+*.[vV][oO][bB]
+*.[oO][gG][vV]
+*.[mM][oO][dD]
+*.[tT][oO][dD]
+*.[dD][iI][vV][xX]
+*.[mM][jJ][pP][gG]
+*.[mM][jJ][pP][eE][gG]
+*.[hH][eE][vV][cC]
+*.[hH]264
+*.[hH]265

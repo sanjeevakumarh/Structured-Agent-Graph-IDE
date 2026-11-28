@@ -36,6 +36,30 @@ class SafetyTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 c.plan()
 
+    def test_optional_profiles_block_pruning_and_seed(self):
+        (self.c.cfg / 'modes-enabled.json').write_text('{}')
+        self.assertEqual(self.c.obsolete(), [])
+        with self.assertRaisesRegex(RuntimeError, 'preserve all installed'):
+            self.c.cleanup()
+        with self.assertRaisesRegex(RuntimeError, 'preserve all installed'):
+            self.c.reset(purge=True)
+        with patch.object(self.c, 'prepare') as prepare:
+            with self.assertRaisesRegex(RuntimeError, 'preserve all installed'):
+                seed.deploy(self.c)
+            prepare.assert_not_called()
+
+    def test_optional_gateway_overlay_does_not_replace_standard(self):
+        import copy
+        import yaml
+        config = yaml.safe_load((m.REPO / 'config/macmini.yaml').read_text())
+        baseline = m.gateway_routes(config, m.REPO / 'config')
+        extra = copy.deepcopy(config)
+        extra['catalog_overlays'] = ['abliterated']
+        routes = m.gateway_routes(extra, m.REPO / 'config')
+        self.assertTrue(set(routes) > set(baseline))
+        for alias, route in baseline.items():
+            self.assertEqual(routes[alias], route)
+
     def test_exact_upstream_hash_and_hardlink_reuse(self):
         blob = b'GGUF' + b'fixture'
         digest = hashlib.sha256(blob).hexdigest()

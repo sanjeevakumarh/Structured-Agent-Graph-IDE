@@ -64,3 +64,43 @@ legacy_cleanup:
     - /usr/share/ollama/.ollama/models
     - /usr/local/lib/ollama
   files: [/usr/local/bin/ollama, /usr/local/bin/llama-swap, ~/llama-swap.yaml]
+
+# Runtime and available models per cluster mode. YAML anchors share identical selections.
+modes:
+  general: &general
+    runtime: llm
+    catalog: standard
+    models:
+      - z820/gpt-oss-20b-mxfp4
+      - z820/qwen3.8-27b-ud-iq4_xs
+  general-abliterated: &alternate
+    runtime: llm
+    catalog: abliterated
+    models:
+      - z820/qwen3.8-27b-heretic-i1-iq4_xs
+  video:
+    runtime: comfyui
+    bundles: [wan22-production]
+    models:
+      - vae/wan_2.1_vae.safetensors
+      - text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+      - diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+      - diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+      - diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors
+      - diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors
+      - loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+      - loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+      - loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors
+      - loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors
+  video-abliterated:
+    runtime: comfyui
+    bundles: [wan22-community]
+    models:
+      - vae/wan_2.1_vae.safetensors
+      - text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+      - diffusion_models/Wan2.2_I2V_High_R1.safetensors
+      - diffusion_models/Wan2.2_I2V_Low_R1.safetensors
+      - diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors
+      - diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors
+      - loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors
+      - loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors

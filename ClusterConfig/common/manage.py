@@ -60,6 +60,19 @@ def gateway_routes(config, profiles):
         profile = config if node == config['node'] else yaml.safe_load((profiles / (node + '.yaml')).read_text())
         if profile['role'] == 'worker':
             models = {a: {'model': a} for a, m in profile['models'].items() if m.get('enabled', True)}
+            overlays = config.get('catalog_overlays', [])
+            if not isinstance(overlays, list) or set(overlays) - {'abliterated'}:
+                fail('Unknown optional language catalog overlay')
+            for overlay in overlays:
+                extra = yaml.safe_load((profiles / 'profiles' / (overlay + '.yaml')).read_text())
+                for name in extra['models']:
+                    alias = node + '/' + name
+                    selected = any(alias in mode['models'] for mode in profile.get('modes', {}).values())
+                    if not selected:
+                        continue
+                    if alias in models:
+                        fail('Overlay must not replace standard alias: ' + alias)
+                    models[alias] = {'model': alias}
         elif profile['role'] == 'gateway':
             models = config.get('local_models', {})
         elif profile['role'] == 'edge':
@@ -514,7 +527,14 @@ class Cluster:
                 say('  Remove unused native model tags as configured in YAML.')
         say('No partition, boot, driver or unrelated application changes.')
 
+    def require_single_profile(self):
+        if (self.cfg / 'modes-enabled.json').exists():
+            fail('Optional modes preserve all installed profiles. Legacy seed/cleanup/reset is blocked; use common/modes.py. Do not remove the marker to bypass retention.')
+
     def obsolete(self):
+        # Optional profiles retain every installed model, including disabled ones.
+        if (self.cfg / 'modes-enabled.json').exists():
+            return []
         keep = {model_id(m) for m in self.desired.values()}
         return sorted(p for p in self.models.glob('*') if owned(p) and p.name not in keep)
 
@@ -783,6 +803,7 @@ class Cluster:
                 run('sudo', 'systemctl', 'start', SERVICE)
 
     def reconcile(self, install=True):
+        self.require_single_profile()
         from seed import deploy
         return deploy(self)
 
@@ -1045,6 +1066,7 @@ class Cluster:
             fail('Gateway validation incomplete: required workers unreachable.')
 
     def cleanup(self):
+        self.require_single_profile()
         self.host_check()
         self.check_layout()
         if self.role != 'worker':
@@ -1173,6 +1195,7 @@ class Cluster:
         return self.reconcile(install=True)
 
     def reset(self, purge=False, uninstall=False):
+        self.require_single_profile()
         self.host_check()
         self.check_layout()
         if self.role == 'edge':
@@ -1363,6 +1386,8 @@ def main():
             c.plan()
             say('Requested action: ' + a.action)
             return
+        if (c.cfg / 'modes-enabled.json').exists() and a.action not in ('health', 'validate'):
+            c.require_single_profile()
         if c.role == 'edge' and a.action in ('health', 'validate'):
             from edge import Edge
             Edge(c).dispatch()

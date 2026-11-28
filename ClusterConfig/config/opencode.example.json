@@ -1,0 +1,60 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "cluster/gmini/qwen3-coder-next-80b-q4_k_m",
+  "providers": {
+    "cluster": {
+      "name": "Local cluster",
+      "env": [
+        "CLUSTER_GATEWAY_KEY"
+      ],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:4401/v1"
+      },
+      "models": {
+        "gmini/qwen3-coder-next-80b-q4_k_m": {
+          "name": "gmini/qwen3-coder-next-80b-q4_k_m",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "gmini/gpt-oss-120b-mxfp4": {
+          "name": "gmini/gpt-oss-120b-mxfp4",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "gmini/qwen3.6-35b-a3b-ud-q4_k_m": {
+          "name": "gmini/qwen3.6-35b-a3b-ud-q4_k_m",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "p520/qwen3.8-27b-ud-q5_k_m": {
+          "name": "p520/qwen3.8-27b-ud-q5_k_m",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "z820/gpt-oss-20b-mxfp4": {
+          "name": "z820/gpt-oss-20b-mxfp4",
+          "limit": {
+            "context": 16384,
+            "output": 4096
+          }
+        },
+        "z820/qwen3.8-27b-ud-iq4_xs": {
+          "name": "z820/qwen3.8-27b-ud-iq4_xs",
+          "limit": {
+            "context": 8192,
+            "output": 2048
+          }
+        }
+      }
+    }
+  }
+}

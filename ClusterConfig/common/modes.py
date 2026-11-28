@@ -420,7 +420,7 @@ def remote(args):
     repo = local['repo']
     require(repo.startswith(('/', '~/')) and not re.search(r'[\x00-\x1f]', repo), 'Invalid remote repo path')
     quoted = '"$HOME"/' + shlex.quote(repo[2:]) if repo.startswith('~/') else shlex.quote(repo)
-    command = ['python3', 'common/modes.py', args.action, '--node', args.node, '--catalog', args.catalog]
+    command = ['bash', 'common/setup.sh', '--modes', args.action, '--node', args.node, '--catalog', args.catalog]
     if getattr(args, 'profile', None):
         command += ['--profile', args.profile]
     if getattr(args, 'roles', False):

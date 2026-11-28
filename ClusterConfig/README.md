@@ -1,12 +1,84 @@
-# Local AI Cluster v0.11 â€” seed deployment
+# Local AI cluster
 
-Git contains the desired inference stack, not models, binaries or credentials. No legacy rollback. All future changes are driven by `config/*.yaml`.
+The Mac routes language requests through LiteLLM. Its [cluster configuration](config/macmini.yaml) lists the machines that participate. Each machine's own YAML defines what it runs. Run commands from the `ClusterConfig` directory on the machine named in each step.
 
-## Cluster modes
+**Already deployed?** Start at [switch modes](#4-switch-modes) for daily use or [change membership](#5-change-membership) to test a smaller cluster.
 
-Run from the Mac or Windows Git Bash with Python + PyYAML and the SSH mappings in `config/cluster.local.json`. Pause submissions and close media tunnels before switching. Use `--dry-run` to see the exact models without connecting, or `--node z820` to target one worker.
+## 1. Choose the nodes and models
+
+Edit `nodes` in **the Mac checkout**. For example, to work with just the Mac and Z820:
+
+```yaml
+nodes: [z820, macmini]
+```
+
+| To change | Edit |
+|---|---|
+| Active nodes and gateway routes | [macmini.yaml](config/macmini.yaml) |
+| Models and runtime for each mode | The worker's `modes` and `models` sections in [gmini.yaml](config/gmini.yaml), [p520.yaml](config/p520.yaml), or [z820.yaml](config/z820.yaml) |
+| Native edge models shared by all four modes | `edge_models` in [nano.yaml](config/nano.yaml) or [ventunoq.yaml](config/ventunoq.yaml) |
+| Alternate language checkpoints or video bundles | [abliterated.yaml](config/profiles/abliterated.yaml) or [media.yaml](config/profiles/media.yaml) |
+| Inference runtime versions | [versions.yaml](config/versions.yaml) |
+| SSH targets and remote checkout path | The controller's private `config/cluster.local.json`. Start from [cluster.example.json](config/cluster.example.json). |
+
+## 2. Deploy the baseline once
+
+1. Put the reviewed checkout on each participating machine at the configured remote path. The controller invokes those copies over SSH. Install working GPU drivers, Tailscale, curl, and either Python 3.12 with PyYAML or uv. The Mac also needs uv and Ollama. Verify SSH access and host keys from the controller.
+2. On Windows, create the SSH settings if missing, then edit the copy:
+   ```powershell
+   if (!(Test-Path config/cluster.local.json)) { Copy-Item config/cluster.example.json config/cluster.local.json }
+   ```
+3. On each selected node, preview its baseline plan, for example `./setup-z820.sh --dry-run`. **Baseline setup can delete directories listed in `legacy_cleanup`, obsolete managed weights, and unused native model tags.** Review the plan before proceeding.
+4. In Windows PowerShell, from `ClusterConfig`, check the connection first:
+   ```powershell
+   .\cluster.ps1 health -OnlyNode macmini
+   ```
+   If the Mac is in the active list, reaching `=== macmini: health ===` confirms Windows read the Mac's inventory. An uninstalled gateway can still fail health at this point. If the Mac is outside the list, use a listed node's name instead.
+
+   For a **new baseline**, run `.\cluster.ps1 setup` after reviewing step 3. It uses the checkouts already on the selected nodes and deploys the gateway last if selected. For an **existing baseline**, skip setup. Once the services are ready, run:
+   ```powershell
+   .\cluster.ps1 health
+   .\cluster.ps1 validate
+   ```
+   Health checks availability and advertised models. Validate submits inference requests.
+
+## 3. Provision the modes you want
+
+**Language workers.** On each selected Linux worker, set `NODE` to its YAML name and provision the standard catalog. This also applies to Z820 if you plan to switch it between language and video service.
 
 ```bash
+NODE=gmini
+bash common/setup.sh --modes provision-catalog --node "$NODE" --catalog standard
+```
+
+**Optional abliterated catalog.** On that worker, provision the alternate weights. Pause submissions and wait for active models to unload before validation.
+
+```bash
+bash common/setup.sh --modes provision-catalog --node "$NODE" --catalog abliterated
+bash common/setup.sh --modes off --node "$NODE" --quiesced
+bash common/setup.sh --modes validate-catalog --node "$NODE" --catalog abliterated --quiesced
+```
+
+Validation leaves the worker off. Review the generated samples in `~/inference/config/catalogs/abliterated.compatibility.json`. If they pass your quality review, create `abliterated-reviewed.json` alongside it with the report's exact `config_sha256`, `"compatibility_pass": true`, and `"quality_pass": true`. On the Mac, set `catalog_overlays: [abliterated]` and apply routes as in step 5.
+
+**Optional video worker.** On Z820, use an encrypted, non-synced storage directory outside Git. Provisioning needs git, uv, flock, fuser and sudo access. With submissions paused:
+
+```bash
+bash common/setup.sh --modes provision-media --node z820 --storage "$HOME/PrivateVideo"
+bash common/setup.sh --modes off --node z820 --quiesced
+bash common/setup.sh --modes verify-media --node z820
+bash common/setup.sh --modes download-media --node z820 --bundle wan22-production
+bash common/setup.sh --modes download-media --node z820 --bundle wan22-community  # for video-abliterated
+```
+
+The runtime check verifies the accelerator. Clip quality and memory fit need a workflow test on the device. P520 remains a language worker by default; its experimental XPU media backend requires a separate checkpoint and workflow review.
+
+## 4. Switch modes
+
+From the Mac or Windows Git Bash, preview once, then run the command for your workload. Pause submissions and close media tunnels before switching. Mode changes use provisioned files and stop on a busy worker.
+
+```bash
+./cluster-mode.sh video --dry-run
 ./cluster-mode.sh general
 ./cluster-mode.sh general-abliterated
 ./cluster-mode.sh video
@@ -17,58 +89,45 @@ Run from the Mac or Windows Git Bash with Python + PyYAML and the SSH mappings i
 | Mode | Gmini | P520 | Z820 |
 |---|---|---|---|
 | general | GPT-OSS 120B, Qwen3.6 35B with vision, Coder-Next | Qwen3.8 27B Q5 with vision | Qwen3.8 27B IQ4_XS or GPT-OSS 20B |
-| general-abliterated | Heretic GPT-OSS 120B and Qwen3.6 35B with vision, abliterated Coder-Next | Qwen3.8 27B Heretic ARA Q5 | Qwen3.8 27B Heretic ARA IQ4_XS |
-| video | General catalog for prompts and captions | General Q5 | Wan 2.2 A14B FP8 text/image-to-video with matching LightX2V adapters |
-| video-abliterated | Heretic GPT-OSS 120B and Qwen3.6 35B with vision | Heretic Q5 | Community R1 image-to-video pair plus upstream A14B text-to-video |
+| general-abliterated | Heretic GPT-OSS and Qwen3.6, abliterated Coder-Next | Heretic Qwen3.8 Q5 | Heretic Qwen3.8 IQ4_XS |
+| video | General catalog for prompts and captions | General Q5 | Wan 2.2 A14B text/image-to-video with four-step adapters |
+| video-abliterated | Heretic GPT-OSS and Qwen3.6 with vision | Heretic Q5 | Community R1 image-to-video plus upstream A14B text-to-video |
 
-Edit the `modes:` section in [gmini.yaml](config/gmini.yaml), [p520.yaml](config/p520.yaml), or [z820.yaml](config/z820.yaml) to select models. Shared YAML anchors reuse identical selections. Checkpoint pins live in the node's `models:` section and the [optional catalogs](config/profiles/). Mac serves LiteLLM throughout. P520 defaults to language service until its experimental XPU backend passes a local workflow test.
+In all four modes the Mac routes language requests. Listed edge nodes serve their existing native models: Nano's Qwen3.5 4B and Ventuno Q's Qwen3 4B. A switch checks their advertised models. Use `--node z820` to switch just Z820. Offline previews use the controller's local copy of the Mac inventory.
 
-Provision each selected catalog once with `python3 common/modes.py provision-catalog --node NODE --catalog standard` or `--catalog abliterated`. Set `catalog_overlays: [abliterated]` in the Mac YAML. Stage the alternate aliases on the stopped Mac gateway with `provision-router --node macmini`, then `router-start --node macmini`. The alternate catalog requires `validate-catalog` and a quality review. On Z820 provision ComfyUI with `provision-media --node z820 --storage "$HOME/PrivateVideo"`, switch the idle node `off`, then run `verify-media` and `download-media --bundle wan22-production` with the same node argument. Provision `wan22-community` separately for video-abliterated. Select the corresponding checkpoint(s) in the native ComfyUI workflow. Switching retains installed models and stops on a busy worker. A cluster switch applies sequentially; status shows which workers completed.
+For ComfyUI, open a tunnel from your client using the video worker's SSH target:
 
-Use encrypted local storage and access ComfyUI through `ssh -N -L 127.0.0.1:8188:127.0.0.1:8188 YOUR_Z820_SSH_ALIAS`. SDXL portraits and Wan 14B image-to-video are optional bundles in the media manifest.
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8188:127.0.0.1:8188 YOUR_VIDEO_SSH_TARGET
+```
 
-The checkpoint inventory records upstream revisions and exact files. The P520 Heretic Q5 publisher supplies no vision projector. Use Gmini for captions in the alternate modes. The Z820 5B preview remains available through the `wan22-5b` bundle. A14B throughput and peak memory on the A4500 are unmeasured.
+Open `http://127.0.0.1:8188` and select the provisioned weights in your workflow.
 
-Before increasing concurrency, measure the Gmini 120B + 35B pair at the intended context and slot counts, including KV caches and vision buffers. `reserve_gib` reserves disk space. Compare P520 Vulkan and SYCL with the same GGUF once oneAPI is available. For video, compare four-step A14B at 832×480/81 frames with the 5B preview, recording wall time, RAM, VRAM and output quality.
+## 5. Change membership
 
-The Mac checkout owns cluster membership in the YAML profile with `role: gateway`. Node profiles declare their role and optional `media_backend` (`cuda` or `xpu`). Add a node by creating its profile, listing it in the gateway YAML and setting its SSH mapping. Windows cluster commands and live mode commands read its enabled nodes before dispatch. Offline mode previews use the local copy. Every listed edge participates in all four modes with its configured native language models. Each mode switch checks that its service advertises those models. Status includes every enabled node. Setup uses the Mac as its worker-key source.
+1. On the Mac, remove or add a name in `nodes`. Live health and mode commands read that list on their next run.
+2. Wait for current gateway requests to finish, then run `./setup-macmini.sh --apply-routes` on the Mac. Changed routes briefly restart LiteLLM. Worker services and downloads continue.
+3. From Windows, run `.\cluster.ps1 health -OnlyNode macmini`. **DEGRADED** means the gateway answered but a listed backend was unavailable or had a stale catalog. For a worker-specific check, use its name with `-OnlyNode`.
 
-To take one backend out of rotation, remove its name from `nodes` in `config/macmini.yaml` on the Mac. Once current gateway requests finish, run `./setup-macmini.sh --apply-routes`. Add its name back and repeat to restore it. Applying a change briefly restarts LiteLLM; worker services and downloads continue. On Windows, `.\cluster.ps1 health -OnlyNode macmini` checks just the gateway and its enabled routes.
+A mode switch runs sequentially. If one worker fails, run `./cluster-mode.sh status` before retrying. Worker diagnostics are under `~/inference/config` and `~/inference/benchmarks`. On workers with provisioned modes, the retention marker blocks legacy cleanup and seed operations.
 
-## Setup
+## Use the cluster from OpenCode on Windows
 
-**Destructive:** ordinary setup deletes the inventoried old inference directories and services in `legacy_cleanup`, including the entire legacy worker `~/models` directories where listed, old Ollama stores and unused native model tags. Review the YAML before running. No OS, partition, driver or unrelated application changes. Existing keys, reports, pinned download caches and exact upstream-matching desired weights are retained.
+1. Copy [opencode.example.json](config/opencode.example.json) to `opencode.jsonc` in the project you want OpenCode to work on. If the project already has OpenCode settings, merge the `providers.cluster` entry and choose the default `model`. The example lists standard worker models and their configured context sizes.
+2. From PowerShell in `ClusterConfig`, open a tunnel to the Mac gateway. Leave this window open:
+   ```powershell
+   $mac = (Get-Content config/cluster.local.json -Raw | ConvertFrom-Json).targets.macmini
+   ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:4401:127.0.0.1:4001 $mac
+   ```
+3. In a second PowerShell window in `ClusterConfig`, load the gateway credential into this session and check which routes LiteLLM advertises:
+   ```powershell
+   $mac = (Get-Content config/cluster.local.json -Raw | ConvertFrom-Json).targets.macmini
+   $key = ssh -T $mac 'cat ~/inference/config/gateway.key'
+   if ($LASTEXITCODE -ne 0 -or $key -notmatch '^sk-[A-Za-z0-9_-]{32,}$') { throw 'Could not read the gateway key.' }
+   $env:CLUSTER_GATEWAY_KEY = $key.Trim()
+   Remove-Variable key
+   (Invoke-RestMethod http://127.0.0.1:4401/v1/models -Headers @{Authorization="Bearer $env:CLUSTER_GATEWAY_KEY"}).data.id
+   ```
+4. In that same window, change directory to your project and run `opencode`. The default is Gmini's Qwen3-Coder-Next. Use `/models` to choose another available worker. A route can be advertised while its worker is downloading or serving video; select a worker currently serving its language catalog.
 
-Requirements: working GPU drivers, Tailscale and resolvable cluster hostnames, Python + PyYAML (or uv), curl; Mac also needs uv and Ollama. Vendor JetPack/QAIRT stacks remain installed. Run as normal login user, not root.
-
-1. Replace the old repository files with this complete package on every node. Do not merge old YAML or generated configurations.
-2. From Windows, copy `config/cluster.example.json` to `config/cluster.local.json`, set the SSH targets and remote checkout path, then run `./cluster.ps1 setup`. The local file is Git-ignored; keep it only on the controlling machine. It checks versions, initializes/distributes keys, runs workers and edge nodes, then Mac. Sudo may prompt. `-Yes` approves destructive actions.
-3. Alternatively run `./setup-macmini.sh --init-keys`, copy `~/inference/config/worker.key` to the three workers with mode 600, then execute each node's setup script; Mac last.
-4. Run `./cluster.ps1 health` and `./cluster.ps1 validate`. Gateway validation requires enabled workers to be reachable; the active node list includes both edge routes.
-
-## Daily use
-
-| Command on a node | Action |
-|---|---|
-| `./setup-gmini.sh --dry-run` | Preview |
-| `./setup-gmini.sh` | Seed/reconcile, delete obsolete assets, install and validate |
-| `./setup-gmini.sh --seed` | Force clean runtime re-extraction/rebuild |
-| `./setup-gmini.sh --models` | Apply model catalog changes |
-| `./setup-gmini.sh --health` | Check service and catalog |
-| `./setup-gmini.sh --validate` | Actual generation and tool-call tests |
-| `./setup-gmini.sh --benchmark` | Measure all enabled models |
-| `./setup-gmini.sh --calibrate` | Measure context/cache options |
-| `./setup-gmini.sh --calibrate --apply` | Save passing recommendations to YAML; rerun setup |
-| `./setup-gmini.sh --help` | Other commands |
-
-Workers use authenticated Tailscale HTTP on port 8081; gateway uses port 4001. No IP addresses in Git. Model IDs identify the actual server and quantization. Edit `config/<node>.yaml` to replace models, and `config/versions.yaml` to change runtimes. Disabled models are not retained in the seed catalog.
-
-## Implementation and limits
-
-Worker seed resolves pinned upstream GGUF manifests before deletion, reuses only exact SHA-256 matches, removes old weights before downloads, regenerates configuration and tests actual inference, structured tool calls and GPU offload. No prior config is restored on failure. Failures include native logs under `~/inference/benchmarks` and `~/inference/config`. Calibration is separate from installation. Keep the local artifact cache for fast rebuilds; a full OS wipe requires downloads or backup. Do not copy secrets into Git.
-
-Mac and edge native runtimes are reused; Ollama tags and GenieX bundles are vendor-managed, not content-pinned like worker GGUFs. VENTUNO Q calibration benchmarks its fixed-context bundle instead of guessing a context. Nano uses Qwen only; failing Gemma models are removed. Hardware compatibility, NPU placement and optimum contexts require actual device tests; no hardware certification is claimed.
-
-`sudo bash setup-os-maintenance.sh --install-timer` schedules daily Linux maintenance. Review vendor-specific updates on edge devices first.
-
-Offline regression tests: `python3 -m unittest discover -s common`. Do not run deployment scripts on a test host with unrelated inference data.
+For an alternate checkpoint, add its exact gateway alias to the example's model map after provisioning and enabling the alternate catalog. [OpenCode provider reference](https://opencode.ai/docs/providers/)

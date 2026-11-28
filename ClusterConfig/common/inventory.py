@@ -60,4 +60,20 @@ def members(nodes):
 
 
 if __name__ == '__main__':
-    print(gateway(profiles()))
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gateway-yaml', action='store_true', help='Read active gateway YAML from stdin')
+    args = parser.parse_args()
+    nodes = profiles()
+    name = gateway(nodes)
+    if args.gateway_yaml:
+        config = yaml.safe_load(sys.stdin.buffer.read())
+        if not isinstance(config, dict) or config.get('node') != name or config.get('role') != 'gateway':
+            parser.error('Remote YAML does not match the configured gateway')
+        nodes[name] = config
+        for node, role in members(nodes):
+            print(node, role, sep='\t')
+    else:
+        print(name)

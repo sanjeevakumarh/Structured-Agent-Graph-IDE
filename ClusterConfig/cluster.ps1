@@ -39,16 +39,23 @@ $Repo = Quote-RemotePath $Local.repo
 # Keep the gateway last: the preflight distributes its key to the three workers.
 $SSH = @('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3')
 $InventoryScript = Join-Path $PSScriptRoot 'common/inventory.py'
-$Gateway = if (Get-Command python -ErrorAction SilentlyContinue) {
-    & python $InventoryScript 2>$null
+$InventoryPython = 'python'
+$InventoryArgs = @($InventoryScript)
+$Gateway = if (Get-Command $InventoryPython -ErrorAction SilentlyContinue) {
+    & $InventoryPython @InventoryArgs 2>$null
 }
 if (-not $Gateway -and (Get-Command uv -ErrorAction SilentlyContinue)) {
-    $Gateway = & uv run --offline --no-project --with pyyaml --python 3.12 python $InventoryScript
+    $InventoryPython = 'uv'
+    $InventoryArgs = @('run','--offline','--no-project','--with','pyyaml','--python','3.12','python',$InventoryScript)
+    $Gateway = & $InventoryPython @InventoryArgs
 }
 if ($LASTEXITCODE -ne 0 -or $Gateway -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_-]*$') { throw 'Cannot discover gateway from local profiles (Python + PyYAML required).' }
 $MacTarget = $Local.targets.$Gateway
 if ($MacTarget -notmatch '^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*$') { throw 'Invalid gateway SSH target.' }
-$Rows = @(& ssh @SSH -T $MacTarget "cd $Repo && python3 common/modes.py inventory --roles")
+# Membership lives on the gateway. Reading the YAML works across launcher versions.
+$GatewayYaml = & ssh @SSH -T $MacTarget "cd $Repo && cat 'config/$Gateway.yaml'"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read the gateway YAML over SSH.' }
+$Rows = @($GatewayYaml | & $InventoryPython @InventoryArgs --gateway-yaml)
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read inventory from the gateway checkout.' }
 $Roles = [ordered]@{}
 foreach ($Row in $Rows) {
